@@ -7,8 +7,23 @@
     "default_title": "Scrape LinkedIn Job",
     "default_popup": "popup.html"
   },
+  "background": {
+    "service_worker": "src/background.js"
+  },
   "permissions": ["activeTab", "clipboardWrite", "scripting"],
-  "host_permissions": ["https://www.linkedin.com/*"],
+  "host_permissions": [
+    "https://www.linkedin.com/*",
+    "http://127.0.0.1:8787/*"
+  ],
+  "commands": {
+    "scrape-and-save-job": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "MacCtrl+Shift+Y"
+      },
+      "description": "Scrape the active LinkedIn job and save it to Google Sheets"
+    }
+  },
   "content_scripts": [
     {
       "matches": [

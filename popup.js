@@ -1,7 +1,9 @@
 const scrapeButton = document.querySelector("#scrape");
 const copyJsonButton = document.querySelector("#copyJson");
+const saveSheetButton = document.querySelector("#saveSheet");
 const openApplyUrlLink = document.querySelector("#openApplyUrl");
 const statusEl = document.querySelector("#status");
+const SHEETS_BRIDGE_URL = "http://127.0.0.1:8787/jobs";
 const fields = {
   title: document.querySelector("#title"),
   company: document.querySelector("#company"),
@@ -27,6 +29,41 @@ copyJsonButton.addEventListener("click", async () => {
 
   await navigator.clipboard.writeText(JSON.stringify(latestPayload, null, 2));
   setStatus("Copied JSON to clipboard.");
+});
+
+saveSheetButton.addEventListener("click", async () => {
+  if (!latestPayload) {
+    return;
+  }
+
+  saveSheetButton.disabled = true;
+  setStatus("Saving to Google Sheet...");
+
+  try {
+    const response = await fetch(SHEETS_BRIDGE_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(latestPayload)
+    });
+    const result = await response.json().catch(() => ({}));
+
+    if (!response.ok || !result.ok) {
+      throw new Error(result.error || `Sheets bridge returned HTTP ${response.status}.`);
+    }
+
+    if (result.status === "duplicate") {
+      setStatus(result.message || `Skipped because ${latestPayload.company} already exists.`);
+      return;
+    }
+
+    setStatus(`Saved to Google Sheet${result.updatedRange ? ` (${result.updatedRange})` : ""}.`);
+  } catch (error) {
+    setStatus(`Could not save. Start the local Sheets bridge, then try again. ${error.message}`);
+  } finally {
+    saveSheetButton.disabled = !latestPayload;
+  }
 });
 
 openApplyUrlLink.addEventListener("click", (event) => {
@@ -97,6 +134,7 @@ function renderResult(data) {
   }
 
   setCopyEnabled(true);
+  setSaveEnabled(true);
   const warningText = data.warnings?.length ? ` ${data.warnings.join(" ")}` : "";
   setStatus(`Scraped ${countPresentFields(data)} of 4 fields.${warningText}`);
 }
@@ -109,6 +147,7 @@ function clearResult() {
   jsonEl.textContent = "{}";
   openApplyUrlLink.href = "#";
   openApplyUrlLink.classList.add("disabled");
+  setSaveEnabled(false);
 }
 
 function countPresentFields(data) {
@@ -130,6 +169,10 @@ function setBusy(isBusy) {
 
 function setCopyEnabled(isEnabled) {
   copyJsonButton.disabled = !isEnabled;
+}
+
+function setSaveEnabled(isEnabled) {
+  saveSheetButton.disabled = !isEnabled;
 }
 
 function setStatus(message) {

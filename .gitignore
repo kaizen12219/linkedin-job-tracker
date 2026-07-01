@@ -2,5 +2,8 @@ node_modules/
 dist/
 *.zip
 *.crx
+.env
+service-account*.json
+*.private.json
 .DS_Store
 Thumbs.db

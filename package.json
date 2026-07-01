@@ -1,0 +1,10 @@
+{
+  "name": "linkedin-job-tracker-extension",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Chrome extension and local Sheets bridge for tracking LinkedIn jobs.",
+  "scripts": {
+    "sheets:server": "node scripts/sheets-server.js",
+    "sheets:check": "node scripts/sheets-server.js --check"
+  }
+}
