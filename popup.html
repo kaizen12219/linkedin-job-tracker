@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LinkedIn Job Scraper</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main>
+      <header class="header">
+        <div>
+          <h1>Job Scraper</h1>
+          <p id="status">Ready to scrape the active LinkedIn job page.</p>
+        </div>
+        <button id="scrape" type="button">Scrape</button>
+      </header>
+
+      <section class="fields" aria-live="polite">
+        <label>
+          <span>Job title</span>
+          <input id="title" readonly placeholder="Not scraped yet">
+        </label>
+        <label>
+          <span>Company</span>
+          <input id="company" readonly placeholder="Not scraped yet">
+        </label>
+        <label>
+          <span>Apply URL</span>
+          <input id="applyUrl" readonly placeholder="Not scraped yet">
+        </label>
+        <label>
+          <span>Job description</span>
+          <textarea id="description" readonly placeholder="Not scraped yet"></textarea>
+        </label>
+      </section>
+
+      <section class="actions">
+        <button id="copyJson" type="button" disabled>Copy JSON</button>
+        <a id="openApplyUrl" class="button-link disabled" href="#" target="_blank" rel="noreferrer">Open Apply URL</a>
+      </section>
+
+      <details>
+        <summary>Raw JSON</summary>
+        <pre id="json">{}</pre>
+      </details>
+    </main>
+
+    <script src="popup.js"></script>
+  </body>
+</html>
