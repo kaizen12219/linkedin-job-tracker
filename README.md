@@ -42,19 +42,25 @@ Optional access check:
 npm run sheets:check -- --credentials "D:\rezi-builder-mcp\rezi-builder-95b56753ae45.json"
 ```
 
+List available sheet tabs:
+
+```powershell
+npm run sheets:tabs -- --credentials "D:\rezi-builder-mcp\rezi-builder-95b56753ae45.json"
+```
+
 Start the bridge:
 
 ```powershell
 npm run sheets:server -- --credentials "D:\rezi-builder-mcp\rezi-builder-95b56753ae45.json"
 ```
 
-Keep that terminal open. The popup sends scraped jobs to `http://127.0.0.1:8787/jobs`, and the bridge writes to this sheet:
+Keep that terminal open. The popup loads available tabs from `https://plank-undergo-sandbag.ngrok-free.dev/tabs`, sends scraped jobs to `https://plank-undergo-sandbag.ngrok-free.dev/jobs`, and the bridge writes to this sheet:
 
 - Spreadsheet ID: `1arOqpFZYqsjAKL-whYlQhQ9Veeep66oAG88xc20NeIg`
 - Sheet gid: `1956783810`
 - Columns written: `B:E` as `Company`, `Job Title`, `Job Description`, `Apply URL`
 
-Before writing, the bridge scans column `B` and skips the write when the same normalized company already exists. New jobs are written explicitly to `B{nextRow}:E{nextRow}` so the sheet's `Date` column in `A` is left untouched.
+Use the popup's **Destination tab** menu to choose where new jobs should be inserted. Before writing, the bridge scans column `B` across every tab and skips the write when the same normalized company already exists anywhere in the spreadsheet. New jobs are written explicitly to `B{nextRow}:E{nextRow}` on the selected tab so the sheet's `Date` column in `A` is left untouched.
 
 ## Hotkey Save
 
@@ -64,7 +70,7 @@ After reloading the unpacked extension, press this default shortcut on a LinkedI
 Ctrl+Shift+Y
 ```
 
-The shortcut scrapes the active job and saves it to Google Sheets through the local bridge. Keep the bridge running first:
+The shortcut scrapes the active job and saves it to Google Sheets through the local bridge. It uses the last **Destination tab** selected in the popup, or the bridge's default tab if none has been selected yet. Keep the bridge running first:
 
 ```powershell
 npm run sheets:server -- --credentials "D:\rezi-builder-mcp\rezi-builder-95b56753ae45.json"
@@ -73,7 +79,7 @@ npm run sheets:server -- --credentials "D:\rezi-builder-mcp\rezi-builder-95b5675
 The extension badge shows:
 
 - `OK` when the job was saved
-- `SKIP` when the company already exists in column `B`
+- `SKIP` when the company already exists in column `B` on any tab
 - `ERR` when scraping or saving failed
 
 To change the shortcut, open `chrome://extensions/shortcuts` and edit **Scrape the active LinkedIn job and save it to Google Sheets**.

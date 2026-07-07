@@ -1,10 +1,10 @@
 const http = require("http");
-const { saveJobIfCompanyMissing, checkSheetAccess } = require("./google-sheets");
+const { saveJobIfCompanyMissing, checkSheetAccess, listSheetTabs } = require("./google-sheets");
 
 const DEFAULT_SPREADSHEET_ID = "1arOqpFZYqsjAKL-whYlQhQ9Veeep66oAG88xc20NeIg";
 const DEFAULT_SHEET_GID = "1956783810";
 const DEFAULT_CREDENTIALS_PATH = "D:\\rezi-builder-mcp\\rezi-builder-95b56753ae45.json";
-const DEFAULT_PORT = 8787;
+const DEFAULT_PORT = 8788;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 main().catch((error) => {
@@ -21,9 +21,16 @@ async function main() {
     return;
   }
 
+  if (config.listTabsOnly) {
+    const result = await listSheetTabs(config);
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
   if (config.oncePayload) {
     const result = await saveJobIfCompanyMissing({
       ...config,
+      targetSheetGid: config.oncePayload.targetSheetGid || config.oncePayload.sheetGid || config.sheetGid,
       job: config.oncePayload
     });
     console.log(JSON.stringify(result, null, 2));
@@ -65,10 +72,21 @@ async function handleRequest(request, response, config) {
     return;
   }
 
+  if (request.method === "GET" && (url.pathname === "/tabs" || url.pathname === "/sheets")) {
+    const result = await listSheetTabs(config);
+
+    sendJson(response, 200, {
+      ok: true,
+      ...result
+    });
+    return;
+  }
+
   if (request.method === "POST" && url.pathname === "/jobs") {
     const job = await readJsonBody(request);
     const result = await saveJobIfCompanyMissing({
       ...config,
+      targetSheetGid: job.targetSheetGid || job.sheetGid || config.sheetGid,
       job
     });
 
@@ -96,6 +114,7 @@ function readConfig() {
     credentialsPath: getArg(args, "--credentials") || process.env.GOOGLE_APPLICATION_CREDENTIALS || DEFAULT_CREDENTIALS_PATH,
     port: Number(getArg(args, "--port") || process.env.SHEETS_BRIDGE_PORT || DEFAULT_PORT),
     checkOnly: args.includes("--check"),
+    listTabsOnly: args.includes("--list-tabs"),
     oncePayload
   };
 }
@@ -157,5 +176,5 @@ function sendJson(response, statusCode, payload) {
 function setCorsHeaders(response) {
   response.setHeader("Access-Control-Allow-Origin", "*");
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type, ngrok-skip-browser-warning");
 }

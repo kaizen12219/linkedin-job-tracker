@@ -1,4 +1,8 @@
-const SHEETS_BRIDGE_URL = "http://127.0.0.1:8787/jobs";
+const SHEETS_BRIDGE_BASE_URL = "https://plank-undergo-sandbag.ngrok-free.dev";
+const SHEETS_BRIDGE_HEADERS = {
+  "ngrok-skip-browser-warning": "true"
+};
+const SHEETS_BRIDGE_URL = `${SHEETS_BRIDGE_BASE_URL}/jobs`;
 const BADGE_TIMEOUT_MS = 4000;
 
 chrome.commands.onCommand.addListener((command) => {
@@ -65,12 +69,17 @@ async function requestScrape(tabId) {
 }
 
 async function saveToSheet(payload) {
+  const targetSheetGid = await getSelectedSheetGid();
   const response = await fetch(SHEETS_BRIDGE_URL, {
     method: "POST",
     headers: {
+      ...SHEETS_BRIDGE_HEADERS,
       "Content-Type": "application/json"
     },
-    body: JSON.stringify(payload)
+    body: JSON.stringify({
+      ...payload,
+      ...(targetSheetGid ? { targetSheetGid } : {})
+    })
   });
   const result = await response.json().catch(() => ({}));
 
@@ -79,6 +88,11 @@ async function saveToSheet(payload) {
   }
 
   return result;
+}
+
+async function getSelectedSheetGid() {
+  const result = await chrome.storage.local.get("selectedSheetGid");
+  return result.selectedSheetGid || "";
 }
 
 function isSupportedUrl(url) {

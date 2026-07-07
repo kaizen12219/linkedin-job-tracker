@@ -57,6 +57,7 @@ label span {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   border: 1px solid #c9d3dc;
@@ -65,6 +66,13 @@ textarea {
   color: #17212b;
   background: #ffffff;
   font: inherit;
+}
+
+.sheet-picker {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: end;
 }
 
 textarea {

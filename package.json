@@ -5,6 +5,7 @@
   "description": "Chrome extension and local Sheets bridge for tracking LinkedIn jobs.",
   "scripts": {
     "sheets:server": "node scripts/sheets-server.js",
-    "sheets:check": "node scripts/sheets-server.js --check"
+    "sheets:check": "node scripts/sheets-server.js --check",
+    "sheets:tabs": "node scripts/sheets-server.js --list-tabs"
   }
 }

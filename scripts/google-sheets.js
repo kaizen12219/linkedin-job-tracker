@@ -6,26 +6,39 @@ const SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets";
 const CELL_LIMIT = 49000;
 
 async function saveJobIfCompanyMissing(options) {
-  const { credentialsPath, spreadsheetId, sheetGid, job } = options;
+  const { credentialsPath, spreadsheetId, sheetGid, targetSheetGid, job } = options;
   const normalizedJob = normalizeJob(job);
   const token = await getAccessToken(credentialsPath);
-  const sheet = await getSheetByGid({ token, spreadsheetId, sheetGid });
-  const companyColumnRange = `${quoteSheetName(sheet.title)}!B:B`;
-  const companies = await getValues({ token, spreadsheetId, range: companyColumnRange });
+  const sheets = await getSheets({ token, spreadsheetId });
+  const destinationSheet = getSheetByGidFromList(sheets, targetSheetGid || sheetGid);
   const normalizedCompany = normalizeCompany(normalizedJob.company);
-  const alreadyExists = companies.some((row) => normalizeCompany(row[0]) === normalizedCompany);
-  const nextRow = companies.length + 1;
+  const scanResult = await findCompanyAcrossSheets({
+    token,
+    spreadsheetId,
+    sheets,
+    normalizedCompany
+  });
 
-  if (alreadyExists) {
+  if (scanResult) {
     return {
       status: "duplicate",
       company: normalizedJob.company,
-      sheetTitle: sheet.title,
-      message: `Skipped because ${normalizedJob.company} already exists in column B.`
+      sheetId: destinationSheet.sheetId,
+      sheetTitle: destinationSheet.title,
+      duplicateSheetId: scanResult.sheet.sheetId,
+      duplicateSheetTitle: scanResult.sheet.title,
+      duplicateRow: scanResult.rowNumber,
+      message: `Skipped because ${normalizedJob.company} already exists in column B on "${scanResult.sheet.title}".`
     };
   }
 
-  const updateRange = `${quoteSheetName(sheet.title)}!B${nextRow}:E${nextRow}`;
+  const destinationCompanies = await getCompaniesForSheet({
+    token,
+    spreadsheetId,
+    sheet: destinationSheet
+  });
+  const nextRow = destinationCompanies.length + 1;
+  const updateRange = `${quoteSheetName(destinationSheet.title)}!B${nextRow}:E${nextRow}`;
   const updateResult = await updateValues({
     token,
     spreadsheetId,
@@ -41,7 +54,8 @@ async function saveJobIfCompanyMissing(options) {
   return {
     status: "inserted",
     company: normalizedJob.company,
-    sheetTitle: sheet.title,
+    sheetId: destinationSheet.sheetId,
+    sheetTitle: destinationSheet.title,
     updatedRange: updateResult.updatedRange || "",
     warnings: normalizedJob.warnings
   };
@@ -50,17 +64,43 @@ async function saveJobIfCompanyMissing(options) {
 async function checkSheetAccess(options) {
   const { credentialsPath, spreadsheetId, sheetGid } = options;
   const token = await getAccessToken(credentialsPath);
-  const sheet = await getSheetByGid({ token, spreadsheetId, sheetGid });
-  const companies = await getValues({
-    token,
-    spreadsheetId,
-    range: `${quoteSheetName(sheet.title)}!B:B`
-  });
+  const sheets = await getSheets({ token, spreadsheetId });
+  const sheet = getSheetByGidFromList(sheets, sheetGid);
+  let totalCompanyRowsRead = 0;
+
+  for (const candidateSheet of sheets) {
+    const companies = await getCompaniesForSheet({
+      token,
+      spreadsheetId,
+      sheet: candidateSheet
+    });
+
+    totalCompanyRowsRead += companies.length;
+  }
 
   return {
     ok: true,
     sheetTitle: sheet.title,
-    companyRowsRead: companies.length
+    sheetId: sheet.sheetId,
+    tabsFound: sheets.length,
+    totalCompanyRowsRead
+  };
+}
+
+async function listSheetTabs(options) {
+  const { credentialsPath, spreadsheetId, sheetGid } = options;
+  const token = await getAccessToken(credentialsPath);
+  const sheets = await getSheets({ token, spreadsheetId });
+  const defaultSheet = getSheetByGidFromList(sheets, sheetGid);
+
+  return {
+    defaultSheetId: String(defaultSheet.sheetId),
+    defaultSheetTitle: defaultSheet.title,
+    sheets: sheets.map((sheet) => ({
+      sheetId: String(sheet.sheetId),
+      title: sheet.title,
+      index: sheet.index
+    }))
   };
 }
 
@@ -118,23 +158,61 @@ function createJwt(credentials) {
   return `${unsigned}.${base64Url(signature)}`;
 }
 
-async function getSheetByGid(options) {
-  const { token, spreadsheetId, sheetGid } = options;
+async function getSheets(options) {
+  const { token, spreadsheetId } = options;
   const metadata = await sheetsRequest({
     token,
     method: "GET",
-    path: `/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(sheetId,title)`
+    path: `/v4/spreadsheets/${encodeURIComponent(spreadsheetId)}?fields=sheets.properties(sheetId,title,index)`
   });
-  const numericGid = Number(sheetGid);
-  const sheet = metadata.sheets
+  const sheets = metadata.sheets
     ?.map((entry) => entry.properties)
-    .find((properties) => Number(properties.sheetId) === numericGid);
+    .sort((a, b) => Number(a.index) - Number(b.index));
+
+  if (!sheets?.length) {
+    throw new Error("No tabs found in the target spreadsheet.");
+  }
+
+  return sheets;
+}
+
+function getSheetByGidFromList(sheets, sheetGid) {
+  const numericGid = Number(sheetGid);
+  const sheet = sheets.find((properties) => Number(properties.sheetId) === numericGid);
 
   if (!sheet) {
     throw new Error(`No sheet found for gid ${sheetGid}.`);
   }
 
   return sheet;
+}
+
+async function findCompanyAcrossSheets(options) {
+  const { token, spreadsheetId, sheets, normalizedCompany } = options;
+
+  for (const sheet of sheets) {
+    const companies = await getCompaniesForSheet({ token, spreadsheetId, sheet });
+    const rowIndex = companies.findIndex((row) => normalizeCompany(row[0]) === normalizedCompany);
+
+    if (rowIndex !== -1) {
+      return {
+        sheet,
+        rowNumber: rowIndex + 1
+      };
+    }
+  }
+
+  return null;
+}
+
+function getCompaniesForSheet(options) {
+  const { token, spreadsheetId, sheet } = options;
+
+  return getValues({
+    token,
+    spreadsheetId,
+    range: `${quoteSheetName(sheet.title)}!B:B`
+  });
 }
 
 async function getValues(options) {
@@ -279,5 +357,6 @@ function base64Url(value) {
 module.exports = {
   saveJobIfCompanyMissing,
   checkSheetAccess,
+  listSheetTabs,
   normalizeCompany
 };
