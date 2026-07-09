@@ -5,16 +5,18 @@ const SHEETS_BRIDGE_HEADERS = {
 const SHEETS_BRIDGE_URL = `${SHEETS_BRIDGE_BASE_URL}/jobs`;
 const BADGE_TIMEOUT_MS = 4000;
 
-chrome.commands.onCommand.addListener((command) => {
+chrome.commands.onCommand.addListener((command, commandTab) => {
   if (command === "scrape-and-save-job") {
-    runScrapeAndSaveShortcut();
+    runScrapeAndSaveShortcut(commandTab);
   }
 });
 
-async function runScrapeAndSaveShortcut() {
+async function runScrapeAndSaveShortcut(commandTab) {
+  let tab = commandTab || null;
+
   try {
     await setBadge("...", "#56687a");
-    const tab = await getActiveTab();
+    tab = tab?.id ? tab : await getActiveTab();
 
     if (!tab?.id) {
       throw new Error("No active tab found.");
@@ -34,15 +36,15 @@ async function runScrapeAndSaveShortcut() {
 
     if (saveResult.status === "duplicate") {
       await setBadge("SKIP", "#8a6d1d");
-      await notify(saveResult.message || `${scrapeResponse.data.company} already exists in the sheet.`);
+      await notify(tab.id, saveResult.message || `${scrapeResponse.data.company} already exists in the sheet.`, "warning");
       return;
     }
 
     await setBadge("OK", "#1f7a3f");
-    await notify(`Saved ${scrapeResponse.data.company || "job"} to Google Sheets.`);
+    await notify(tab.id, `Saved ${scrapeResponse.data.company || "job"} to Google Sheets.`, "success");
   } catch (error) {
     await setBadge("ERR", "#b3261e");
-    await notify(error.message);
+    await notify(tab?.id, error.message, "error");
   } finally {
     setTimeout(() => {
       chrome.action.setBadgeText({ text: "" });
@@ -51,8 +53,14 @@ async function runScrapeAndSaveShortcut() {
 }
 
 async function getActiveTab() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  return tabs[0] || null;
+  const focusedTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+
+  if (focusedTabs[0]) {
+    return focusedTabs[0];
+  }
+
+  const currentTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  return currentTabs[0] || null;
 }
 
 async function requestScrape(tabId) {
@@ -104,11 +112,62 @@ function isSupportedUrl(url) {
   }
 }
 
-async function notify(message) {
+async function notify(tabId, message, tone = "info") {
   await chrome.action.setTitle({ title: `LinkedIn Job Scraper: ${message}` });
+
+  if (!tabId) {
+    return;
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: showShortcutToast,
+      args: [message, tone]
+    });
+  } catch (error) {
+    // Some pages do not allow script injection; the badge/title still carry the result.
+  }
 }
 
 async function setBadge(text, color) {
   await chrome.action.setBadgeBackgroundColor({ color });
   await chrome.action.setBadgeText({ text });
+}
+
+function showShortcutToast(message, tone) {
+  const existing = document.querySelector("[data-linkedin-job-scraper-toast]");
+
+  if (existing) {
+    existing.remove();
+  }
+
+  const toast = document.createElement("div");
+  const palette = {
+    success: "#1f7a3f",
+    warning: "#8a6d1d",
+    error: "#b3261e",
+    info: "#56687a"
+  };
+
+  toast.dataset.linkedinJobScraperToast = "true";
+  toast.textContent = message;
+  Object.assign(toast.style, {
+    position: "fixed",
+    zIndex: "2147483647",
+    right: "18px",
+    bottom: "18px",
+    maxWidth: "360px",
+    padding: "12px 14px",
+    borderRadius: "8px",
+    background: palette[tone] || palette.info,
+    color: "#ffffff",
+    font: "13px/1.4 Arial, Helvetica, sans-serif",
+    boxShadow: "0 8px 24px rgba(0, 0, 0, 0.22)"
+  });
+  document.documentElement.append(toast);
+
+  setTimeout(() => {
+    toast.remove();
+  }, 5000);
 }

@@ -11,6 +11,7 @@ const SHEETS_BRIDGE_HEADERS = {
 };
 const SHEETS_BRIDGE_URL = `${SHEETS_BRIDGE_BASE_URL}/jobs`;
 const SHEET_TABS_URL = `${SHEETS_BRIDGE_BASE_URL}/tabs`;
+const SHEET_TABS_CACHE_KEY = "sheetTabsCache";
 const fields = {
   title: document.querySelector("#title"),
   company: document.querySelector("#company"),
@@ -32,7 +33,7 @@ scrapeButton.addEventListener("click", () => {
 });
 
 refreshTabsButton.addEventListener("click", () => {
-  loadSheetTabs();
+  loadSheetTabs({ forceRefresh: true });
 });
 
 sheetTabSelect.addEventListener("change", async () => {
@@ -139,10 +140,23 @@ async function scrapeCurrentTab() {
   }
 }
 
-async function loadSheetTabs() {
+async function loadSheetTabs({ forceRefresh = false } = {}) {
   refreshTabsButton.disabled = true;
   sheetTabSelect.disabled = true;
-  renderSheetTabs([], "");
+
+  if (!forceRefresh) {
+    const cachedTabs = await getCachedSheetTabs();
+
+    if (cachedTabs) {
+      await applySheetTabs(cachedTabs);
+      refreshTabsButton.disabled = false;
+      return;
+    }
+  }
+
+  if (!sheetTabs.length) {
+    renderSheetTabs([], "");
+  }
 
   try {
     const response = await fetch(SHEET_TABS_URL, {
@@ -154,25 +168,73 @@ async function loadSheetTabs() {
       throw new Error(result.error || `Sheets bridge returned HTTP ${response.status}.`);
     }
 
-    sheetTabs = result.sheets || [];
+    const nextSheetTabs = {
+      defaultSheetId: result.defaultSheetId || "",
+      sheets: result.sheets || []
+    };
 
-    if (!sheetTabs.length) {
+    if (!nextSheetTabs.sheets.length) {
       throw new Error("No tabs were returned by the Sheets bridge.");
     }
 
-    const stored = await chrome.storage.local.get("selectedSheetGid");
-    const selectedSheetGid = chooseSelectedSheetGid(stored.selectedSheetGid, result.defaultSheetId);
-    renderSheetTabs(sheetTabs, selectedSheetGid);
-    await persistSelectedSheetTab();
-    setSaveEnabled(Boolean(latestPayload && getSelectedSheetGid()));
+    await cacheSheetTabs(nextSheetTabs);
+    await applySheetTabs(nextSheetTabs);
   } catch (error) {
-    sheetTabs = [];
-    renderSheetTabs([], "");
-    setSaveEnabled(false);
+    if (!sheetTabs.length) {
+      renderSheetTabs([], "");
+      setSaveEnabled(false);
+    } else {
+      setSaveEnabled(Boolean(latestPayload && getSelectedSheetGid()));
+    }
+
     setStatus(`Could not load sheet tabs. Start the local Sheets bridge, then refresh tabs. ${error.message}`);
   } finally {
     refreshTabsButton.disabled = false;
   }
+}
+
+async function applySheetTabs(tabPayload) {
+  sheetTabs = normalizeSheetTabs(tabPayload.sheets || []);
+
+  const stored = await chrome.storage.local.get("selectedSheetGid");
+  const selectedSheetGid = chooseSelectedSheetGid(stored.selectedSheetGid, tabPayload.defaultSheetId);
+  renderSheetTabs(sheetTabs, selectedSheetGid);
+  await persistSelectedSheetTab();
+  setSaveEnabled(Boolean(latestPayload && getSelectedSheetGid()));
+}
+
+async function getCachedSheetTabs() {
+  const result = await chrome.storage.local.get(SHEET_TABS_CACHE_KEY);
+  const cache = result[SHEET_TABS_CACHE_KEY];
+
+  if (!cache?.sheets?.length) {
+    return null;
+  }
+
+  return {
+    defaultSheetId: cache.defaultSheetId || "",
+    sheets: cache.sheets
+  };
+}
+
+async function cacheSheetTabs(tabPayload) {
+  await chrome.storage.local.set({
+    [SHEET_TABS_CACHE_KEY]: {
+      cachedAt: Date.now(),
+      defaultSheetId: String(tabPayload.defaultSheetId || ""),
+      sheets: normalizeSheetTabs(tabPayload.sheets || [])
+    }
+  });
+}
+
+function normalizeSheetTabs(tabs) {
+  return tabs
+    .map((tab) => ({
+      sheetId: String(tab.sheetId || ""),
+      title: String(tab.title || ""),
+      index: Number(tab.index || 0)
+    }))
+    .filter((tab) => tab.sheetId && tab.title);
 }
 
 async function requestScrape(tabId) {

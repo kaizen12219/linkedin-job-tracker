@@ -12,6 +12,8 @@
   },
   "permissions": ["activeTab", "clipboardWrite", "scripting", "storage"],
   "host_permissions": [
+    "https://linkedin.com/*",
+    "https://*.linkedin.com/*",
     "https://www.linkedin.com/*",
     "http://127.0.0.1/*",
     "https://plank-undergo-sandbag.ngrok-free.dev/*"
@@ -28,6 +30,8 @@
   "content_scripts": [
     {
       "matches": [
+        "https://linkedin.com/jobs/*",
+        "https://*.linkedin.com/jobs/*",
         "https://www.linkedin.com/jobs/*",
         "https://www.linkedin.com/jobs/view/*",
         "https://www.linkedin.com/jobs/search-results/*"
