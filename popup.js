@@ -5,12 +5,13 @@ const openApplyUrlLink = document.querySelector("#openApplyUrl");
 const sheetTabSelect = document.querySelector("#sheetTab");
 const refreshTabsButton = document.querySelector("#refreshTabs");
 const statusEl = document.querySelector("#status");
-const SHEETS_BRIDGE_BASE_URL = "https://plank-undergo-sandbag.ngrok-free.dev";
-const SHEETS_BRIDGE_HEADERS = {
+const SHEETS_BRIDGE_BASE_URLS = [
+  "http://localhost:8787",
+  "https://plank-undergo-sandbag.ngrok-free.dev"
+];
+const NGROK_BRIDGE_HEADERS = {
   "ngrok-skip-browser-warning": "true"
 };
-const SHEETS_BRIDGE_URL = `${SHEETS_BRIDGE_BASE_URL}/jobs`;
-const SHEET_TABS_URL = `${SHEETS_BRIDGE_BASE_URL}/tabs`;
 const SHEET_TABS_CACHE_KEY = "sheetTabsCache";
 const fields = {
   title: document.querySelector("#title"),
@@ -72,10 +73,9 @@ saveSheetButton.addEventListener("click", async () => {
   setStatus("Saving to Google Sheet...");
 
   try {
-    const response = await fetch(SHEETS_BRIDGE_URL, {
+    const response = await fetchSheetsBridge("/jobs", {
       method: "POST",
       headers: {
-        ...SHEETS_BRIDGE_HEADERS,
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
@@ -159,9 +159,7 @@ async function loadSheetTabs({ forceRefresh = false } = {}) {
   }
 
   try {
-    const response = await fetch(SHEET_TABS_URL, {
-      headers: SHEETS_BRIDGE_HEADERS
-    });
+    const response = await fetchSheetsBridge("/tabs");
     const result = await response.json().catch(() => ({}));
 
     if (!response.ok || !result.ok) {
@@ -191,6 +189,39 @@ async function loadSheetTabs({ forceRefresh = false } = {}) {
   } finally {
     refreshTabsButton.disabled = false;
   }
+}
+
+async function fetchSheetsBridge(path, options = {}) {
+  const errors = [];
+
+  for (const baseUrl of SHEETS_BRIDGE_BASE_URLS) {
+    const url = `${baseUrl}${path}`;
+
+    try {
+      const response = await fetch(url, {
+        ...options,
+        headers: getBridgeHeaders(baseUrl, options.headers)
+      });
+
+      if (response.status === 404) {
+        errors.push(`${url} returned HTTP 404`);
+        continue;
+      }
+
+      return response;
+    } catch (error) {
+      errors.push(`${url}: ${error.message}`);
+    }
+  }
+
+  throw new Error(`Could not reach Sheets bridge. Tried ${SHEETS_BRIDGE_BASE_URLS.join(", ")}. ${errors.join("; ")}`);
+}
+
+function getBridgeHeaders(baseUrl, headers = {}) {
+  return {
+    ...(baseUrl.includes("ngrok-free.") ? NGROK_BRIDGE_HEADERS : {}),
+    ...headers
+  };
 }
 
 async function applySheetTabs(tabPayload) {

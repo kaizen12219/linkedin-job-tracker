@@ -27,6 +27,11 @@
     /\bresults\b/i
   ];
 
+  const NON_COMPANY_PATTERNS = [
+    /^(show|see|view|learn)\s+(more|less)(\s+about\s+(the\s+)?company)?\.?$/i,
+    /^(follow|following|apply|save|share|search|results|job alert)$/i
+  ];
+
   function scrape(doc = document, sourceUrl = window.location.href) {
     const root = findJobDetailsRoot(doc);
     const titleResult = extractTitle(doc, root);
@@ -114,7 +119,7 @@
   function extractCompany(doc, root) {
     const companyLinks = queryAll(root, 'a[href*="/company/"]')
       .map((link, index) => {
-        const label = readElementText(link) || normalizeCompanyLabel(link.getAttribute("aria-label") || "");
+        const label = extractCompanyLabel(link);
         return {
           value: cleanCompany(label),
           source: `company-link:${index}`,
@@ -136,10 +141,10 @@
       return result(fromLogo, "company-logo-alt", 0.65);
     }
 
-    const titleParts = (doc.title || "").split("|").map(cleanText).filter(Boolean);
+    const documentCompany = extractCompanyFromDocumentTitle(doc);
 
-    if (titleParts[1] && !/linkedin/i.test(titleParts[1])) {
-      return result(cleanCompany(titleParts[1]), "document-title", 0.45);
+    if (documentCompany) {
+      return result(documentCompany, "document-title", 0.45);
     }
 
     return result("", "not-found", 0);
@@ -238,9 +243,16 @@
   function scoreCompanyLink(link, root, index) {
     let score = 50;
     const ariaLabel = link.getAttribute("aria-label") || "";
+    const visibleText = readElementText(link);
+    const ariaCompany = extractCompanyFromAriaLabel(ariaLabel);
+
+    if (isNonCompanyLabel(ariaLabel) || (!ariaCompany && isNonCompanyLabel(visibleText))) {
+      return -100;
+    }
 
     if (root?.contains(link)) score += 35;
-    if (/company|empresa/i.test(ariaLabel)) score += 25;
+    if (ariaCompany) score += 45;
+    else if (/company|empresa/i.test(ariaLabel)) score += 10;
     if (/\/company\/[^/]+\/life\/?/.test(link.pathname)) score += 15;
     score -= index * 2;
 
@@ -356,6 +368,64 @@
     return cleanText(element.innerText || element.textContent || "");
   }
 
+  function extractCompanyLabel(link) {
+    const ariaCompany = extractCompanyFromAriaLabel(link.getAttribute("aria-label") || "");
+
+    if (ariaCompany) {
+      return ariaCompany;
+    }
+
+    const titleCompany = cleanCompany(link.getAttribute("title") || "");
+
+    if (isPlausibleCompany(titleCompany)) {
+      return titleCompany;
+    }
+
+    const nestedText = queryAll(link, "span, p, strong")
+      .map(readElementText)
+      .map(cleanCompany)
+      .find(isPlausibleCompany);
+
+    if (nestedText) {
+      return nestedText;
+    }
+
+    return cleanCompany(readElementText(link));
+  }
+
+  function extractCompanyFromAriaLabel(value) {
+    const label = cleanText(value);
+    const companyMatch = label.match(/^(company|empresa)\s*[,:\-]\s*(.+?)(?:\.\s*)?$/i);
+    const logoMatch = label.match(/^(company logo for|logotipo de empresa para)\s*[,:\-]?\s*(.+?)(?:\.\s*)?$/i);
+    const company = cleanCompany(companyMatch?.[2] || logoMatch?.[2] || "");
+
+    return isPlausibleCompany(company) ? company : "";
+  }
+
+  function extractCompanyFromDocumentTitle(doc) {
+    const metaTitle = getMetaContent(doc, ['meta[property="og:title"]', 'meta[name="title"]']);
+    const titleParts = (metaTitle || doc.title || "").split("|").map(cleanText).filter(Boolean);
+
+    for (const part of titleParts) {
+      const atCompanyMatch = part.match(/\b(?:at|@)\s+(.+)$/i);
+      const company = cleanCompany(atCompanyMatch?.[1] || "");
+
+      if (isPlausibleCompany(company)) {
+        return company;
+      }
+    }
+
+    if (titleParts[1] && !/linkedin/i.test(titleParts[1])) {
+      const company = cleanCompany(titleParts[1]);
+
+      if (isPlausibleCompany(company)) {
+        return company;
+      }
+    }
+
+    return "";
+  }
+
   function readRichText(element) {
     if (!element) {
       return "";
@@ -431,7 +501,18 @@
   }
 
   function isPlausibleCompany(value) {
-    return Boolean(value && value.length >= 2 && value.length <= 120 && !/linkedin/i.test(value));
+    return Boolean(
+      value &&
+      value.length >= 2 &&
+      value.length <= 120 &&
+      !/linkedin/i.test(value) &&
+      !isNonCompanyLabel(value)
+    );
+  }
+
+  function isNonCompanyLabel(value) {
+    const label = cleanText(value);
+    return Boolean(label && NON_COMPANY_PATTERNS.some((pattern) => pattern.test(label)));
   }
 
   function absoluteUrl(href, baseUrl) {

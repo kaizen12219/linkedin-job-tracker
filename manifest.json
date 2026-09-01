@@ -1,22 +1,27 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn Job Scraper",
-  "description": "Scrape the current LinkedIn job title, company, description, and apply URL.",
-  "version": "0.1.0",
+  "description": "Capture LinkedIn jobs in Kai Flow with an optional profile.",
+  "version": "0.3.0",
+  "minimum_chrome_version": "120",
+  "incognito": "not_allowed",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvsWi6U73aY1iXrGiSP3+FJmiI6A1qVASPcXhvJOCRof1W4lG+wcC3p5kY/qUQYYgbVepH24k8NgiStnUcq3ucGAB6b7wcvpfZ0uL60zpyKd00g1wKhDLCTMXOoR4+YotxTlvt1u+s2aZYtQTciSPtKkUzS96PtqDPN/jKhtxVvO8WcI2JmHG4LRL+sWp3N7i/alNQEFJ9HB7ardbso3XaBylRXVtdcysZnqheCHk0RYGygRO2MgrpRYJRA8a8AG0g8/X1i+Q2SE/L2Ihz7wxuu2UD+B216Fi8J21dl/E8s1aGZtwwjKt6rHmLFMxcmEZeUFlBOsqEiMwJdvzk5pWbwIDAQAB",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https:"
+  },
   "action": {
-    "default_title": "Scrape LinkedIn Job",
+    "default_title": "Save LinkedIn Job to Kai Flow",
     "default_popup": "popup.html"
   },
   "background": {
     "service_worker": "src/background.js"
   },
-  "permissions": ["activeTab", "clipboardWrite", "scripting", "storage"],
+  "permissions": ["activeTab", "clipboardWrite", "scripting", "storage", "alarms"],
+  "optional_host_permissions": ["https://*/*"],
   "host_permissions": [
     "https://linkedin.com/*",
     "https://*.linkedin.com/*",
-    "https://www.linkedin.com/*",
-    "http://127.0.0.1/*",
-    "https://plank-undergo-sandbag.ngrok-free.dev/*"
+    "https://www.linkedin.com/*"
   ],
   "commands": {
     "scrape-and-save-job": {
@@ -24,7 +29,7 @@
         "default": "Ctrl+Shift+Y",
         "mac": "MacCtrl+Shift+Y"
       },
-      "description": "Scrape the active LinkedIn job and save it to Google Sheets"
+      "description": "Scrape the active LinkedIn job and save it to Kai Flow"
     }
   },
   "content_scripts": [

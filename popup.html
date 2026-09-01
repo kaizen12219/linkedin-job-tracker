@@ -10,53 +10,67 @@
     <main>
       <header class="header">
         <div>
-          <h1>Job Scraper</h1>
-          <p id="status">Ready to scrape the active LinkedIn job page.</p>
+          <h1>Save to Kai Flow</h1>
+          <p id="status" role="status">Ready to read the LinkedIn job.</p>
         </div>
         <button id="scrape" type="button">Scrape</button>
       </header>
 
-      <section class="sheet-picker">
+      <div class="scroll-content">
+        <section class="connection">
+          <p id="connectionStatus" role="status">Checking connection…</p>
+          <button id="refreshConnection" class="secondary" type="button">Refresh</button>
+        </section>
+        <details id="pairingSettings">
+          <summary>Server connection</summary>
+          <div class="settings-fields">
+            <label><span>Pairing link from the Kai Flow owner</span><input id="pairingLink" type="password" autocomplete="off" placeholder="https://…/#tracker-pair=…"></label>
+            <label><span>Device name (optional)</span><input id="deviceName" maxlength="80" placeholder="My LinkedIn tracker"></label>
+            <p>Use your central Kai Flow server. No dashboard or local service is needed on this PC. Earlier queued jobs stay with their original connection.</p>
+            <button id="connectServer" type="button">Connect</button>
+          </div>
+        </details>
+        <details id="queueSection">
+          <summary id="queueSummary">Save queue</summary>
+          <div id="queueList" class="queue-list" aria-live="polite"></div>
+        </details>
+      <section class="fields">
         <label>
-          <span>Destination tab</span>
-          <select id="sheetTab" disabled>
-            <option value="">Start bridge to load tabs</option>
-          </select>
+          <span>Profile (optional)</span>
+          <select id="profile" disabled><option value="">No profile</option></select>
         </label>
-        <button id="refreshTabs" type="button">Refresh</button>
-      </section>
-
-      <section class="fields" aria-live="polite">
         <label>
           <span>Job title</span>
-          <input id="title" readonly placeholder="Not scraped yet">
+          <input id="title" maxlength="1000" placeholder="Job title" required>
         </label>
         <label>
           <span>Company</span>
-          <input id="company" readonly placeholder="Not scraped yet">
+          <input id="company" maxlength="1000" placeholder="Company" required>
         </label>
+        <aside id="duplicate" class="duplicate" hidden></aside>
         <label>
           <span>Apply URL</span>
-          <input id="applyUrl" readonly placeholder="Not scraped yet">
+          <input id="applyUrl" maxlength="4096" placeholder="https://…">
         </label>
         <label>
           <span>Job description</span>
-          <textarea id="description" readonly placeholder="Not scraped yet"></textarea>
+          <textarea id="description" maxlength="49000" placeholder="Job description" required></textarea>
         </label>
-      </section>
-
-      <section class="actions">
-        <button id="copyJson" type="button" disabled>Copy JSON</button>
-        <button id="saveSheet" type="button" disabled>Save to Sheet</button>
-        <a id="openApplyUrl" class="button-link disabled" href="#" target="_blank" rel="noreferrer">Open Apply URL</a>
       </section>
 
       <details>
         <summary>Raw JSON</summary>
         <pre id="json">{}</pre>
       </details>
+      </div>
+      <section class="actions">
+        <button id="saveSheet" type="button" disabled>Save</button>
+        <button id="copyJson" class="secondary" type="button" disabled>Copy JSON</button>
+        <a id="openApplyUrl" class="button-link secondary disabled" href="#" target="_blank" rel="noreferrer">Apply URL</a>
+      </section>
     </main>
 
-    <script src="popup.js"></script>
+    <script src="src/tracker-security.js"></script>
+    <script src="src/popup-kai-flow.js"></script>
   </body>
 </html>

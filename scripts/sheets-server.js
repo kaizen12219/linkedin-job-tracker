@@ -4,7 +4,7 @@ const { saveJobIfCompanyMissing, checkSheetAccess, listSheetTabs } = require("./
 const DEFAULT_SPREADSHEET_ID = "1arOqpFZYqsjAKL-whYlQhQ9Veeep66oAG88xc20NeIg";
 const DEFAULT_SHEET_GID = "1956783810";
 const DEFAULT_CREDENTIALS_PATH = "D:\\rezi-builder-mcp\\rezi-builder-95b56753ae45.json";
-const DEFAULT_PORT = 8788;
+const DEFAULT_PORT = 8787;
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 main().catch((error) => {
@@ -46,8 +46,8 @@ async function main() {
     });
   });
 
-  server.listen(config.port, "127.0.0.1", () => {
-    console.log(`LinkedIn Job Scraper Sheets bridge listening on http://127.0.0.1:${config.port}`);
+  server.listen(config.port, "localhost", () => {
+    console.log(`LinkedIn Job Scraper Sheets bridge listening on http://localhost:${config.port}`);
     console.log(`Target spreadsheet: ${config.spreadsheetId}, gid: ${config.sheetGid}`);
   });
 }
