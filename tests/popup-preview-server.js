@@ -1,4 +1,4 @@
-// Standalone visual fixture: no live Chrome, Kai Flow, LinkedIn, or Sheets calls.
+// Standalone visual fixture: no live Chrome, LinkedIn, OAuth, or Sheets calls.
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -7,7 +7,6 @@ const assets = new Map([
   ["/", ["popup.html", "text/html"]],
   ["/popup.css", ["popup.css", "text/css"]],
   ["/src/popup-kai-flow.js", ["src/popup-kai-flow.js", "text/javascript"]],
-  ["/src/tracker-security.js", ["src/tracker-security.js", "text/javascript"]],
   ["/fixture.js", ["tests/popup-preview-fixture.js", "text/javascript"]]
 ]);
 const server = http.createServer(async (request, response) => {

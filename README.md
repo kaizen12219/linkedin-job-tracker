@@ -1,54 +1,71 @@
-# LinkedIn Job Tracker → Kai Flow
+# LinkedIn Job Tracker → Google Sheets
 
-This extension is a **standalone remote client**. It works on a different PC or in an AdsPower/proxy profile. It does not connect to localhost, does not require Kai Flow installed on the capture PC, and does not need an open dashboard. The central Kai Flow server and its public HTTPS connection must remain running.
+This Chrome extension captures LinkedIn jobs directly into a Kai Sheet-compatible Google Sheet. It does not connect to the Kai Flow dashboard, a local bridge, a public tunnel, or any pairing service. The dashboard can be stopped while the extension is used.
 
-## Install and connect
+## Install and configure
 
-1. Use Chrome/Chromium 120+ (or an AdsPower profile with a compatible Chromium kernel). Extract the extension-only ZIP on the capture PC. Keep the extracted folder in a permanent location.
-2. Open `chrome://extensions`, enable **Developer mode**, then **Load unpacked** and choose that folder. For an existing installation, update its files and **Reload**. The extension ID remains `lomiekljcjnlhfpklnjmmhomknfigofn`.
-3. Ask the Kai Flow owner to open **Job tracker → Create pairing link**, and send the link privately. Links are single-use and do not expire; ask the owner to cancel an unused link if it was shared by mistake. Do not paste owner/viewer dashboard tokens into the tracker.
-4. In the extension, expand **Server connection**, paste the complete `https://…/#tracker-pair=…` link, optionally enter a device name, and click **Connect**. Approve browser access to that one server origin. The extension does not request access to every HTTPS site.
-5. The popup should say **Connected** and show the central server hostname. You may close the dashboard and popup; the extension remains independently paired in that browser profile.
+1. Share the target Google Sheet with the service account's `client_email` as an **Editor**.
+2. Extract the extension ZIP into a permanent folder.
+3. Open `chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and select that folder. Use **Reload** after updating an existing installation. The bundled public manifest key keeps the extension ID stable; it is not a secret credential.
+4. Open the extension and expand **Google Sheet settings**.
+5. Choose the Google service-account credentials JSON file, paste the full `https://docs.google.com/spreadsheets/d/...` URL, enter the destination tab `gid`, and choose **Save settings**. The URL's `#gid=` value is also accepted.
 
-Pairing credentials last 90 days unless revoked by the owner. Expired/revoked connections pause saves and ask you to reconnect. A new pairing is a new device identity: earlier queued requests stay visibly paused with their original connection, even when the new link points at the same server. They are **not** silently transferred or resubmitted. Ask the owner to reconcile earlier requests before recreating them.
+The destination tab must use the Kai Sheet headers `Date`, `Company`, `Job Title`, `Job Description`, `Apply URL`, `Profile`, `Status`, `Salary`, and `Info` in A:I. The extension safely creates the managed `Trashed`, `Added By`, and `Applied By` headers in K:M when those columns are unused. It refuses to write if the expected headers were repurposed.
 
-Changing the proxy does not require a local service. If the server is unreachable, check that the proxy can reach its HTTPS hostname and that the central server/tunnel is online. **Refresh** requests the live profile list and checks due queued work. No local-port permission or port-scan exception is used by this version.
+The credentials are reduced to the service-account fields needed for authentication and stored only in trusted `chrome.storage.local` for that browser profile. They are never put in Chrome Sync, exported, shown in status responses, sent to LinkedIn, or sent to Kai Flow. OAuth access tokens remain only in service-worker memory. **Remove settings** deletes the saved credentials, target, and local receipts from the profile.
+
+Because a service-account JSON contains a long-lived private key, configure it only in a browser profile and PC you trust. Use a narrowly scoped service account shared only with the intended Sheet, and rotate/revoke its key if the PC or extracted extension folder is compromised. Each separate PC/browser profile needs its own setup.
 
 ## Capture a job
 
-Open a LinkedIn job and click the extension icon. **Scrape** reads company, job title, description, and application URL. Review or edit those fields, optionally choose a profile, then click **Save**. Company, title, and description are required. The description has its own fixed-height scroll area; Save stays visible below the scrolling form.
+Open a LinkedIn job and select the extension. **Scrape** reads the company, job title, description, and real application URL. Review or edit the fields in this order: Company → Job title → Apply URL → Profile → Job description, then choose **Save**. Company, title, and description are required.
 
-**Profile (optional)** starts with **No profile**. Blank stays blank. An explicit selection is remembered for **Ctrl+Shift+Y**, which scrapes and saves the active LinkedIn job directly. Profile labels come from the server, while permanent keys are saved. Options refresh on popup open and Refresh. An unavailable selected profile remains visible until you choose another profile or No profile; it is never silently reassigned. If offline, previously loaded choices may be used, and the server validates the selection when delivery resumes.
+New rows are written with:
 
-Company duplicate checks run after scraping and while typing (350 ms debounce). An existing match shows a short job brief; no-match checks show no message. Kai Flow repeats the authoritative duplicate check before inserting a job, including its existing Restricted exception.
+- the first row considered empty by Kai Sheet's job-row rule;
+- status `added` (Pending);
+- no application date;
+- `Job tracker` in **Added By**;
+- an empty **Applied By** value.
 
-Saved jobs enter **Pending**, with no application date until they are marked applied. All dashboards update through Kai Flow's existing synchronization. Google Sheet writes, validation, tailoring, and prompt dispatch remain server-side. The extension has no profile JSON, Google credentials, owner controls, or arbitrary Sheet-write access.
+If the tab needs another row or managed columns, the extension expands it before writing. **Profile** values come from the F2 dropdown plus profiles already present in column F. A nonblank profile must be one of those live options; blank remains allowed and is remembered for the keyboard shortcut.
 
-**Copy JSON** and **Apply URL** remain available. Change the keyboard shortcut at `chrome://extensions/shortcuts`.
+`Ctrl+Shift+Y` scrapes and saves the active LinkedIn job without opening the popup. Change the shortcut at `chrome://extensions/shortcuts`. **Copy JSON** and **Apply URL** remain available.
 
-## Save queue and safe retries
+## Duplicate and banned-company behavior
 
-- A save request and its unique ID are persisted **before** any network send. Connection loss or timeout leaves it queued, and retries use that same ID. A browser/worker restart cannot create a new request for an uncertain save.
-- The worker checks due work about every **30 seconds** while the browser/profile is running. Chrome may delay alarms; closed or sleeping browsers do not guarantee delivery. Pending work resumes on browser startup. No dashboard tab is involved.
-- **Save queue** shows queued, sending, saved, not-saved, paused, and owner-check states. Repeated clicks, or edits to an unresolved same-company job, do not silently create another pending request.
-- **Cancel retries** stops further attempts. It cannot undo an in-flight or already accepted save. A potentially submitted request keeps a warning and retained receipt; check with the owner before adding it again.
-- An explicit server uncertainty response pauses for owner review instead of blindly appending again. Automatic retry also stops after **7 days**. Those requests remain visible and retained for reconciliation.
-- An explicit fresh Save may use a new ID only after the server definitively rejected the earlier request, or the user canceled a request known never to have been sent. Automatic retries never create fresh IDs.
-- Up to **256** request records and about **7 MB** of queued data are accepted. Completed and definitively rejected history expires after 7 days, or earlier to make room for new saves. Unresolved/sent cancellation records are never silently evicted; a full unresolved queue asks you to resolve earlier work.
-- Do not uninstall the extension, clear its storage, or delete an AdsPower profile while it has unresolved saves. The queue is stored in that browser profile, not in the dashboard. A different profile has its own pairing and queue.
+Company matching trims/collapses whitespace and ignores case. A matching recorded company blocks another save regardless of its ordinary lifecycle status. The only exceptions are:
 
-## Security and API boundary
+- a row marked in column K as Trash;
+- `trashed` or legacy `deleted` status;
+- `clearance`, `location restriction`, `location-restriction`, `on-site`, `onsite`, `language`, `not applicable`, `not-applicable`, or `restricted`.
 
-The manifest carries a public identity key, not a secret signing key. Pairing requests use `POST /api/tracker/pair` with `{code, deviceName}` and receive `{ok:true,result:{token,deviceId,serverId,expiresAt}}`, where `expiresAt` is epoch milliseconds. Subsequent authenticated POSTs use `/api/tracker/options`, `/duplicate`, and `/save` only. Save bodies include a stable UUID `requestId` and the editable job fields plus the optional profile.
+The authoritative duplicate check runs again immediately before every write. LinkedIn search cards for duplicate companies are styled using a short cached snapshot of the same Sheet rule.
 
-Credentials are stored only in trusted extension contexts. LinkedIn content scripts cannot read them or call privileged tracker actions: the worker accepts those messages only from its exact own popup. The credential is sent only to its paired HTTPS origin. Requests omit browser cookies, omit referrers, disable caching, and reject redirects. Pairing codes stay in the pasted link fragment until exchanged with that server; the successful connection clears the input. The popup never receives the stored bearer token.
+**Banned companies** remains a separate editable list. It uses Chrome synced storage when available, and Export/Import can transfer it across unrelated profiles or PCs. Banned and duplicate LinkedIn cards use the same concise visual treatment. Banned companies cannot be saved until removed from that list.
 
-The implementation follows Chrome's [optional-permission/user-gesture model](https://developer.chrome.com/docs/extensions/reference/api/permissions), [trusted-context storage controls](https://developer.chrome.com/docs/extensions/reference/api/storage), and [alarm persistence and timing guidance](https://developer.chrome.com/docs/extensions/reference/api/alarms).
+## Save safety and limitations
+
+There is no persistent retry queue. Each Save performs one direct Google Sheets operation. A bounded local receipt is written before the Sheet call and can reconcile an uncertain response if the exact row reached Google. It does not replay work automatically.
+
+Writes from the popup and keyboard shortcut are serialized inside one extension service worker so they cannot choose the same gap. Google Sheets' Values API does not provide a compare-and-swap insert, so two different PCs can still race if they save at exactly the same time. The duplicate scan greatly reduces ordinary collisions but cannot make cross-PC writes fully atomic.
+
+If a result is uncertain, check the Google Sheet before trying again. A later identical save can recognize its locally receipted row. A different browser profile has no access to that local receipt.
+
+## Network and permissions
+
+Runtime network access is limited to:
+
+- `https://oauth2.googleapis.com` for the signed service-account JWT exchange;
+- `https://sheets.googleapis.com` for Sheet reads and writes;
+- LinkedIn job pages for scraping and duplicate/banned styling.
+
+There is no localhost, WebSocket, ngrok, arbitrary HTTPS, Kai Flow API, bearer pairing token, alarm-based retry, or dashboard connection.
 
 ## Development and distribution
 
-Run `npm test` for offline tests with synthetic jobs. They never save live records. `npm run preview:popup` serves a synthetic visual fixture; use `?mode=unpaired`, `?mode=offline`, or `?mode=duplicate` for those states.
+Run `npm test` for offline tests with generated credentials and synthetic Sheet responses. Tests never access a live account or write a live Sheet.
 
-Run `npm run package:extension` on Windows to create a versioned ZIP under `dist/`. Packaging uses a fixed allowlist of the manifest, popup assets, scraper/content scripts, and remote-client worker files. It excludes legacy scripts, service-account credentials, `.env`, tests, and unrelated repository files. Distribute **that ZIP**, not the complete development repository.
+Run `npm run preview:popup` for the synthetic popup fixture. Supported modes include `?mode=unconfigured`, `?mode=offline`, `?mode=duplicate`, and `?mode=uncertain`.
 
-The source scraper keeps its existing LinkedIn extraction logic, including the real offsite application link. Old `popup.js` and `scripts/sheets-server.js` are retained in the development repository for historical use only. They are not referenced by the current manifest/popup, are not packaged, and must not be started for this integration.
+Run `npm run package:extension` on Windows to create a versioned ZIP under `dist/`. Packaging uses a fixed allowlist and excludes service-account files, tests, development scripts, `.env` files, and unrelated repository content. Distribute that ZIP rather than the complete repository.

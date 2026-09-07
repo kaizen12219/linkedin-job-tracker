@@ -10,7 +10,7 @@
     <main>
       <header class="header">
         <div>
-          <h1>Save to Kai Flow</h1>
+          <h1>Save to Kai Sheet</h1>
           <p id="status" role="status">Ready to read the LinkedIn job.</p>
         </div>
         <button id="scrape" type="button">Scrape</button>
@@ -18,39 +18,59 @@
 
       <div class="scroll-content">
         <section class="connection">
-          <p id="connectionStatus" role="status">Checking connection…</p>
+          <p id="connectionStatus" role="status">Checking Google Sheet…</p>
           <button id="refreshConnection" class="secondary" type="button">Refresh</button>
         </section>
-        <details id="pairingSettings">
-          <summary>Server connection</summary>
+        <details id="sheetSettings">
+          <summary>Google Sheet settings</summary>
           <div class="settings-fields">
-            <label><span>Pairing link from the Kai Flow owner</span><input id="pairingLink" type="password" autocomplete="off" placeholder="https://…/#tracker-pair=…"></label>
-            <label><span>Device name (optional)</span><input id="deviceName" maxlength="80" placeholder="My LinkedIn tracker"></label>
-            <p>Use your central Kai Flow server. No dashboard or local service is needed on this PC. Earlier queued jobs stay with their original connection.</p>
-            <button id="connectServer" type="button">Connect</button>
+            <label>
+              <span>Service-account credentials JSON</span>
+              <input id="credentialsFile" type="file" accept=".json,application/json">
+            </label>
+            <p id="credentialsStatus">Choose the JSON file only on a browser profile you trust.</p>
+            <label><span>Google Sheet URL</span><input id="sheetUrl" type="url" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=…"></label>
+            <label><span>Destination tab gid</span><input id="sheetGid" inputmode="numeric" pattern="[0-9]*" maxlength="12" placeholder="0"></label>
+            <p>The Sheet must be shared with the service account as an editor. The private key stays in this browser profile and is never synced.</p>
+            <div class="settings-actions">
+              <button id="saveSheetSettings" type="button">Save settings</button>
+              <button id="removeSheetSettings" class="secondary" type="button">Remove settings</button>
+            </div>
           </div>
         </details>
-        <details id="queueSection">
-          <summary id="queueSummary">Save queue</summary>
-          <div id="queueList" class="queue-list" aria-live="polite"></div>
+        <details id="bannedSettings">
+          <summary>Banned companies</summary>
+          <div class="settings-fields">
+            <label>
+              <span>One company per line</span>
+              <textarea id="bannedCompanies" class="company-list" placeholder="Company A&#10;Company B"></textarea>
+            </label>
+            <p id="bannedStatus" role="status">This separate list syncs with Chrome and can also be exported for another PC.</p>
+            <div class="settings-actions">
+              <button id="saveBanned" type="button">Save list</button>
+              <button id="exportBanned" class="secondary" type="button">Export</button>
+              <label class="button-link secondary import-button" for="importBanned">Import</label>
+              <input id="importBanned" class="visually-hidden" type="file" accept=".txt,.json,text/plain,application/json">
+            </div>
+          </div>
         </details>
       <section class="fields">
-        <label>
-          <span>Profile (optional)</span>
-          <select id="profile" disabled><option value="">No profile</option></select>
-        </label>
-        <label>
-          <span>Job title</span>
-          <input id="title" maxlength="1000" placeholder="Job title" required>
-        </label>
         <label>
           <span>Company</span>
           <input id="company" maxlength="1000" placeholder="Company" required>
         </label>
         <aside id="duplicate" class="duplicate" hidden></aside>
         <label>
+          <span>Job title</span>
+          <input id="title" maxlength="1000" placeholder="Job title" required>
+        </label>
+        <label>
           <span>Apply URL</span>
           <input id="applyUrl" maxlength="4096" placeholder="https://…">
+        </label>
+        <label>
+          <span>Profile (optional)</span>
+          <select id="profile" disabled><option value="">No profile</option></select>
         </label>
         <label>
           <span>Job description</span>
@@ -70,7 +90,6 @@
       </section>
     </main>
 
-    <script src="src/tracker-security.js"></script>
     <script src="src/popup-kai-flow.js"></script>
   </body>
 </html>

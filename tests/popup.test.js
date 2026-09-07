@@ -4,15 +4,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const root = path.resolve(__dirname, "..");
-const popupSource = fs.readFileSync(path.join(root, "src/popup-kai-flow.js"), "utf8");
-const securitySource = fs.readFileSync(path.join(root, "src/tracker-security.js"), "utf8");
-const popupHtml = fs.readFileSync(path.join(root, "popup.html"), "utf8");
-const defaultJob = Object.freeze({
+const ROOT = path.resolve(__dirname, "..");
+const SOURCE = fs.readFileSync(path.join(ROOT, "src/popup-kai-flow.js"), "utf8");
+const HTML = fs.readFileSync(path.join(ROOT, "popup.html"), "utf8");
+const SHEET_URL = "https://docs.google.com/spreadsheets/d/1abcdefghijklmnopqrstuvwxyzABCDE/edit#gid=123";
+const JOB = Object.freeze({
   title: "Software Engineer",
   company: "Example Company",
   description: "Build and maintain accessible software.",
-  applyUrl: "https://example.test/jobs/123",
+  applyUrl: "https://example.test/jobs/123"
 });
 
 class Element {
@@ -21,6 +21,9 @@ class Element {
     this.value = value;
     this.disabled = false;
     this.hidden = false;
+    this.open = false;
+    this.href = "";
+    this.files = [];
     this.children = [];
     this.listeners = new Map();
     this._text = "";
@@ -33,7 +36,7 @@ class Element {
         if (enabled) classes.add(name);
         else classes.delete(name);
         return enabled;
-      },
+      }
     };
   }
   get textContent() { return this._text + this.children.map((child) => child.textContent).join(""); }
@@ -41,11 +44,8 @@ class Element {
   set innerHTML(_) { throw new Error("Popup must render untrusted data as text, not HTML."); }
   replaceChildren(...children) { this._text = ""; this.children = children; }
   append(...children) { this.children.push(...children); }
-  addEventListener(name, handler) {
-    this.listeners.set(name, [...(this.listeners.get(name) || []), handler]);
-  }
+  addEventListener(name, handler) { this.listeners.set(name, [...(this.listeners.get(name) || []), handler]); }
   async dispatch(name) {
-    // Match native buttons: a disabled button cannot be clicked by the user.
     if (name === "click" && this.disabled) return;
     const event = { defaultPrevented: false, preventDefault() { this.defaultPrevented = true; } };
     await Promise.all((this.listeners.get(name) || []).map((handler) => handler(event)));
@@ -53,8 +53,21 @@ class Element {
   }
 }
 
-function createPopup({ job = defaultJob, profiles = ["Kai", "Alex"], profileLabels, selectedProfile = "", respond, scrapeWait, paired = true, entries = [], permissionGranted = true } = {}) {
-  const ids = ["scrape", "copyJson", "saveSheet", "openApplyUrl", "refreshConnection", "profile", "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description", "pairingSettings", "pairingLink", "deviceName", "connectServer", "queueSummary", "queueList"];
+function createPopup({
+  job = JOB,
+  profiles = ["Kai", "Alex"],
+  selectedProfile = "",
+  configured = true,
+  respond,
+  banned = []
+} = {}) {
+  const ids = [
+    "scrape", "copyJson", "saveSheet", "openApplyUrl", "refreshConnection", "profile",
+    "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description",
+    "sheetSettings", "credentialsFile", "credentialsStatus", "sheetUrl", "sheetGid",
+    "saveSheetSettings", "removeSheetSettings", "bannedSettings", "bannedCompanies", "bannedStatus",
+    "saveBanned", "exportBanned", "importBanned"
+  ];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element(id === "profile" ? "select" : "div")]));
   elements.profile.append(Object.assign(new Element("option", ""), { textContent: "No profile" }));
   elements.profile.disabled = true;
@@ -62,420 +75,209 @@ function createPopup({ job = defaultJob, profiles = ["Kai", "Alex"], profileLabe
   elements.duplicate.hidden = true;
   elements.openApplyUrl.classList.add("disabled");
   const document = new Element("document");
-  const createdElements = [];
+  document.body = new Element("body");
   document.querySelector = (selector) => {
-    assert.match(selector, /^#[A-Za-z]+$/);
+    assert.match(selector, /^#[A-Za-z]+$/u);
     assert.ok(elements[selector.slice(1)], `Unexpected popup selector: ${selector}`);
     return elements[selector.slice(1)];
   };
-  document.createElement = (tag) => {
-    const element = new Element(tag);
-    createdElements.push(element);
-    return element;
-  };
+  document.createElement = (tag) => new Element(tag);
   const messages = [];
-  const storageWrites = [];
   const storage = { kaiFlowSelectedProfile: selectedProfile };
+  const storageWrites = [];
   const clipboard = [];
   const injected = [];
-  const permissionRequests = [];
-  const confirms = [];
-  const runtimeListeners = [];
+  const confirmations = [];
   const extensionId = "lomiekljcjnlhfpklnjmmhomknfigofn";
   const chrome = {
     runtime: {
       id: extensionId,
-      onMessage: { addListener(listener) { runtimeListeners.push(listener); } },
+      onMessage: { addListener() {} },
       async sendMessage(message) {
-        const copied = structuredClone(message);
-        messages.push(copied);
+        messages.push(structuredClone(message));
         if (respond) {
-          const response = await respond(copied, messages);
-          if (response !== undefined) return response;
+          const result = await respond(message, messages);
+          if (result !== undefined) return result;
         }
-        if (["KAI_TRACKER_STATUS", "KAI_TRACKER_CANCEL", "KAI_TRACKER_RETRY", "KAI_TRACKER_PAIR"].includes(message.type)) return { ok: true, result: { paired, connection: paired ? "connected" : "unpaired", origin: paired ? "https://kai.example.test" : "", entries, profileOptions: { profiles, profileLabels: profileLabels || {} } } };
-        if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles, ...(profileLabels ? { profileLabels } : {}) } };
+        if (message.type === "KAI_TRACKER_STATUS") return { ok: true, result: {
+          configured,
+          connection: configured ? "connected" : "unconfigured",
+          sheetUrl: configured ? SHEET_URL : "",
+          sheetGid: configured ? 123 : "",
+          sheetTitle: configured ? "Jobs" : "",
+          profileOptions: { profiles }
+        } };
+        if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles } };
+        if (message.type === "KAI_TRACKER_CONFIGURE") {
+          configured = true;
+          return { ok: true, result: { configured: true, connection: "connected", sheetUrl: SHEET_URL, sheetGid: 123, sheetTitle: "Jobs" } };
+        }
+        if (message.type === "KAI_TRACKER_CLEAR_CONFIG") {
+          configured = false;
+          return { ok: true, result: { configured: false, connection: "unconfigured", sheetUrl: "", sheetGid: "", sheetTitle: "" } };
+        }
         if (message.type === "KAI_TRACKER_DUPLICATE") return { ok: true, result: { duplicate: null } };
-        if (message.type === "KAI_TRACKER_SAVE") return { ok: true, result: { status: "inserted" } };
+        if (message.type === "KAI_TRACKER_BANNED_GET") return { ok: true, result: { companies: banned } };
+        if (message.type === "KAI_TRACKER_BANNED_SET") {
+          banned = message.companies;
+          return { ok: true, result: { companies: banned } };
+        }
+        if (message.type === "KAI_TRACKER_SAVE") return { ok: true, result: { status: "inserted", replayed: false } };
         throw new Error(`Unexpected message: ${message.type}`);
-      },
+      }
     },
     storage: { local: {
       async get(key) { return { [key]: storage[key] }; },
-      async set(values) { storageWrites.push(structuredClone(values)); Object.assign(storage, values); },
+      async set(values) { storageWrites.push(structuredClone(values)); Object.assign(storage, values); }
     } },
     tabs: {
       async query() { return [{ id: 1, url: "https://www.linkedin.com/jobs/view/123" }]; },
       async sendMessage(tabId, message) {
         assert.equal(tabId, 1);
         assert.equal(message.type, "SCRAPE_LINKEDIN_JOB");
-        if (scrapeWait) await scrapeWait;
         return { ok: true, data: structuredClone(job) };
-      },
+      }
     },
-    scripting: { async executeScript(details) { injected.push(structuredClone(details)); } },
-    permissions: { async request(value) { permissionRequests.push(structuredClone(value)); return permissionGranted; } },
+    scripting: { async executeScript(value) { injected.push(structuredClone(value)); } }
   };
   const context = vm.createContext({
-    document, chrome, URL, console, setTimeout, clearTimeout,
-    confirm(message) { confirms.push(message); return true; },
+    document,
+    chrome,
+    URL,
+    console,
+    setTimeout,
+    clearTimeout,
+    confirm(message) { confirmations.push(message); return true; },
     Option: function Option(text, value) { return Object.assign(new Element("option", value), { textContent: text }); },
     navigator: { clipboard: { async writeText(value) { clipboard.push(value); } } },
+    Blob,
+    structuredClone
   });
-  vm.runInContext(securitySource, context, { filename: "tracker-security.js" });
-  vm.runInContext(popupSource, context, { filename: "popup-kai-flow.js" });
+  vm.runInContext(SOURCE, context, { filename: "popup-kai-flow.js" });
   return {
-    elements, messages, storageWrites, storage, clipboard, injected, createdElements, permissionRequests, confirms,
+    elements, messages, storageWrites, clipboard, injected, confirmations,
     async start() { await document.dispatch("DOMContentLoaded"); await settle(); },
     async click(id) { await elements[id].dispatch("click"); await settle(); },
-    async select(profile) { elements.profile.value = profile; await elements.profile.dispatch("change"); await settle(); },
     async input(id, value) { elements[id].value = value; await elements[id].dispatch("input"); await settle(); },
-    async notify(message, sender = { id: extensionId }) {
-      runtimeListeners.forEach((listener) => listener(message, sender));
-      await settle();
-    },
+    async select(value) { elements.profile.value = value; await elements.profile.dispatch("change"); await settle(); },
+    async chooseFile(file) { elements.credentialsFile.files = [file]; await elements.credentialsFile.dispatch("change"); await settle(); }
   };
 }
 
-// DOMContentLoaded and duplicate previews deliberately start detached promises.
-// Advance event-loop turns, not a guessed wall-clock timeout, before assertions.
 async function settle() {
-  for (let turn = 0; turn < 8; turn++) await new Promise((resolve) => setImmediate(resolve));
+  for (let index = 0; index < 10; index += 1) await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("popup declares an optional profile and uses only the new Kai Flow entry point", () => {
-  assert.match(popupHtml, /Profile \(optional\)/);
-  assert.match(popupHtml, /<select id="profile"[^>]*><option value="">No profile<\/option><\/select>/);
-  assert.deepEqual([...popupHtml.matchAll(/<script\b[^>]*src="([^"]+)"/g)].map((match) => match[1]), ["src/tracker-security.js", "src/popup-kai-flow.js"]);
-  assert.doesNotMatch(popupHtml + popupSource, /8787|ngrok|script\.google\.com|sheets-server|fetch\s*\(/i);
+test("popup contains direct Google Sheet settings and no pairing or server controls", () => {
+  assert.match(HTML, /Service-account credentials JSON/);
+  assert.match(HTML, /Google Sheet URL/);
+  assert.match(HTML, /Destination tab gid/);
+  assert.doesNotMatch(HTML + SOURCE, /pairing|connectServer|Server connection|permissions\.request|\/api\/tracker/iu);
+  assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/popup-kai-flow.js"]);
+  assert.doesNotMatch(SOURCE, /fetch\s*\(/u);
 });
 
-test("loads live profile options and leaves the default selection empty", async () => {
-  const app = createPopup({ profiles: ["Kai", "Alex", "Kai", "", null] });
-  await app.start();
-  assert.deepEqual(app.elements.profile.children.map((item) => [item.textContent, item.value]), [["No profile", ""], ["Kai", "Kai"], ["Alex", "Alex"]]);
-  assert.equal(app.elements.profile.value, "");
-  assert.equal(app.elements.profile.disabled, false);
-  assert.equal(app.elements.connectionStatus.textContent, "Connected · kai.example.test");
-  assert.equal(app.elements.saveSheet.disabled, false);
-  assert.equal(JSON.parse(app.elements.json.textContent).profile, "");
-  assert.deepEqual(app.storageWrites, []);
-});
-
-test("preserves an optional profile selection for the shortcut and sends it with Save", async () => {
+test("configured popup loads Sheet profiles and saves the captured job directly", async () => {
   const app = createPopup();
   await app.start();
-  await app.select("Alex");
-  assert.deepEqual(app.storageWrites, [{ kaiFlowSelectedProfile: "Alex" }]);
-  assert.equal(JSON.parse(app.elements.json.textContent).profile, "Alex");
-  await app.click("saveSheet");
-  assert.deepEqual(app.messages.filter((message) => message.type === "KAI_TRACKER_SAVE"), [{ type: "KAI_TRACKER_SAVE", job: defaultJob, profile: "Alex" }]);
-  assert.match(app.elements.status.textContent, /Saved to Kai Flow · Pending/);
-});
-
-test("shows friendly profile names while retaining the selected permanent key in storage, JSON and Save", async () => {
-  const app = createPopup({
-    profiles: ["stable-alex", "stable-jamie"],
-    profileLabels: { "stable-alex": "Alex Morgan", "stable-jamie": "Jamie Taylor" },
-    selectedProfile: "stable-alex"
-  });
-  await app.start();
+  assert.equal(app.elements.connectionStatus.textContent, "Connected · Jobs");
   assert.deepEqual(app.elements.profile.children.map((item) => [item.textContent, item.value]), [
-    ["No profile", ""], ["Alex Morgan", "stable-alex"], ["Jamie Taylor", "stable-jamie"]
+    ["No profile", ""], ["Kai", "Kai"], ["Alex", "Alex"]
   ]);
-  assert.equal(app.elements.profile.value, "stable-alex");
-  assert.deepEqual(app.storageWrites, [], "rendering a display label must not rewrite the assignment");
-  await app.select("stable-jamie");
-  assert.deepEqual(app.storageWrites, [{ kaiFlowSelectedProfile: "stable-jamie" }]);
-  assert.equal(JSON.parse(app.elements.json.textContent).profile, "stable-jamie");
-  await app.click("saveSheet");
-  assert.equal(app.messages.find((message) => message.type === "KAI_TRACKER_SAVE").profile, "stable-jamie");
-});
-
-test("an authenticated profile-change notification refreshes labels without changing the saved key", async () => {
-  let reads = 0;
-  const app = createPopup({
-    selectedProfile: "stable-alex",
-    respond(message) {
-      if (message.type !== "KAI_TRACKER_OPTIONS") return undefined;
-      reads += 1;
-      return { ok: true, result: {
-        profiles: reads === 1 ? ["stable-alex"] : ["stable-jamie", "stable-alex"],
-        profileLabels: { "stable-alex": reads === 1 ? "Alex" : "Alex Morgan", "stable-jamie": "Jamie Taylor" }
-      } };
-    }
-  });
-  await app.start();
-  await app.notify({ type: "KAI_TRACKER_PROFILES_CHANGED" }, { id: "another-extension" });
-  await app.notify({ type: "UNRELATED_MESSAGE" });
-  assert.equal(reads, 1, "foreign and unrelated notifications are ignored");
-  await app.notify({ type: "KAI_TRACKER_PROFILES_CHANGED" });
-  assert.equal(reads, 2);
-  assert.deepEqual(app.messages.filter((message) => message.type === "KAI_TRACKER_OPTIONS").at(-1), { type: "KAI_TRACKER_OPTIONS", refresh: true });
-  assert.deepEqual(app.elements.profile.children.map((item) => [item.textContent, item.value]), [
-    ["No profile", ""], ["Jamie Taylor", "stable-jamie"], ["Alex Morgan", "stable-alex"]
-  ]);
-  assert.equal(app.elements.profile.value, "stable-alex");
-  assert.equal(app.elements.saveSheet.disabled, false);
-  assert.deepEqual(app.storageWrites, []);
-});
-
-test("a newly deactivated selected profile remains unassigned to any replacement after a live refresh", async () => {
-  let reads = 0;
-  const app = createPopup({
-    selectedProfile: "stable-alex",
-    respond(message) {
-      if (message.type !== "KAI_TRACKER_OPTIONS") return undefined;
-      return { ok: true, result: { profiles: ++reads === 1 ? ["stable-alex"] : ["stable-jamie"], profileLabels: { "stable-alex": "Alex Morgan", "stable-jamie": "Jamie Taylor" } } };
-    }
-  });
-  await app.start();
-  await app.notify({ type: "KAI_TRACKER_PROFILES_CHANGED" });
-  assert.equal(app.elements.profile.value, "stable-alex");
-  assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.status.textContent, /saved profile is unavailable/);
-  assert.deepEqual(app.storageWrites, []);
-  await app.click("saveSheet");
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_SAVE"), false);
-});
-
-test("Save sends no profile when the user leaves the optional field blank", async () => {
-  const app = createPopup();
-  await app.start();
-  await app.click("saveSheet");
-  assert.equal(app.messages.find((message) => message.type === "KAI_TRACKER_SAVE").profile, "");
-});
-
-test("restores a valid saved profile without assigning the first live option", async () => {
-  const app = createPopup({ selectedProfile: "Alex" });
-  await app.start();
-  assert.equal(app.elements.profile.value, "Alex");
-  assert.equal(app.elements.saveSheet.disabled, false);
-});
-
-test("a stale saved profile remains visible and invalid until explicitly changed", async () => {
-  const app = createPopup({ selectedProfile: "Retired Candidate" });
-  await app.start();
-  assert.equal(app.elements.profile.value, "Retired Candidate");
-  assert.match(app.elements.profile.children.at(-1).textContent, /Retired Candidate — unavailable/);
-  assert.equal(app.elements.saveSheet.disabled, true);
-  await app.click("saveSheet");
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_SAVE"), false);
-  assert.deepEqual(app.storageWrites, []);
-  await app.select("");
   assert.equal(app.elements.saveSheet.disabled, false);
   await app.click("saveSheet");
-  assert.equal(app.messages.find((message) => message.type === "KAI_TRACKER_SAVE").profile, "");
+  const save = app.messages.find((message) => message.type === "KAI_TRACKER_SAVE");
+  assert.deepEqual(save.job, JOB);
+  assert.equal(save.profile, "");
+  assert.match(app.elements.status.textContent, /Saved to Google Sheet · Pending/);
 });
 
-test("a slower scrape cannot replace a stale-profile warning with ready-to-save feedback", async () => {
-  let releaseScrape;
-  const scrapeWait = new Promise((resolve) => { releaseScrape = resolve; });
-  const app = createPopup({ selectedProfile: "Retired Candidate", scrapeWait });
+test("unconfigured popup opens settings and cannot save", async () => {
+  const app = createPopup({ configured: false });
   await app.start();
-  assert.equal(app.elements.connectionStatus.textContent, "Connected · kai.example.test");
-  assert.equal(app.elements.title.value, "");
-  assert.match(app.elements.status.textContent, /saved profile is unavailable/);
-  releaseScrape();
-  await settle();
-  assert.equal(app.elements.title.value, defaultJob.title);
-  assert.equal(app.elements.profile.value, "Retired Candidate");
+  assert.equal(app.elements.sheetSettings.open, true);
   assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.status.textContent, /saved profile is unavailable/);
-  assert.doesNotMatch(app.elements.status.textContent, /Ready to save/);
-});
-
-test("a server-side duplicate blocks Save and renders only safe job summary text", async () => {
-  const duplicate = {
-    company: '<img src=x onerror="throw Error()">',
-    jobTitle: "<script>alert('title')</script>",
-    jobDescriptionPreview: "<svg onload=alert('description')>Preview</svg>",
-    status: "added",
-  };
-  const app = createPopup({ respond(message) {
-    if (message.type === "KAI_TRACKER_SAVE") return { ok: false, error: { code: "DUPLICATE_COMPANY", message: "Duplicate", details: { duplicate } } };
-  } });
-  await app.start();
-  await app.click("saveSheet");
-  assert.equal(app.elements.duplicate.hidden, false);
-  assert.deepEqual(app.elements.duplicate.children.map((item) => item.tagName), ["STRONG", "SPAN", "SPAN", "P"]);
-  assert.equal(app.elements.duplicate.children[1].textContent, `${duplicate.company} · ${duplicate.jobTitle}`);
-  assert.equal(app.elements.duplicate.children[2].textContent, "Pending");
-  assert.equal(app.elements.duplicate.children[3].textContent, duplicate.jobDescriptionPreview);
-  assert.equal(app.createdElements.some((element) => ["IMG", "SCRIPT", "SVG"].includes(element.tagName)), false);
-  assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.status.textContent, /Nothing was added/);
-});
-
-test("a live duplicate preview prevents Save before submission", async () => {
-  const app = createPopup({ respond(message) {
-    if (message.type === "KAI_TRACKER_DUPLICATE") return { ok: true, result: { duplicate: { company: "Example Company", jobTitle: "Previous role", status: "applied", jobDescriptionPreview: "Existing job" } } };
-  } });
-  await app.start();
-  assert.equal(app.elements.duplicate.hidden, false);
-  assert.match(app.elements.duplicate.textContent, /Previous role/);
-  assert.equal(app.elements.saveSheet.disabled, true);
-  await app.click("saveSheet");
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_SAVE"), false);
-});
-
-test("no duplicate match shows no warning or no-match message", async () => {
-  const app = createPopup();
-  await app.start();
-  assert.ok(app.messages.some((message) => message.type === "KAI_TRACKER_DUPLICATE"));
-  assert.equal(app.elements.duplicate.hidden, true);
-  assert.equal(app.elements.duplicate.textContent, "");
-  assert.doesNotMatch(app.elements.status.textContent, /no.*(?:duplicate|match)|reviewed.or.later/i);
-});
-
-for (const missing of ["title", "description", "company"]) {
-  test(`missing ${missing} prevents Save`, async () => {
-    const app = createPopup({ job: { ...defaultJob, [missing]: "  " } });
-    await app.start();
-    assert.equal(app.elements.saveSheet.disabled, true);
-    assert.match(app.elements.status.textContent, new RegExp(`Missing ${missing}`));
-    await app.click("saveSheet");
-    assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_SAVE"), false);
-  });
-}
-
-test("a paired but offline connection allows durable Queue save and refreshes live options", async () => {
-  let available = false;
-  const app = createPopup({ respond(message) {
-    if (message.type === "KAI_TRACKER_OPTIONS" && !available) return { ok: false, error: { code: "TRACKER_UNAVAILABLE", message: "Start Kai Flow first." } };
-  } });
-  await app.start();
-  assert.match(app.elements.connectionStatus.textContent, /Server unavailable/);
-  assert.equal(app.elements.saveSheet.disabled, false);
-  assert.equal(app.elements.saveSheet.textContent, "Queue save");
-  assert.equal(app.elements.profile.disabled, false);
-  await app.click("saveSheet");
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_SAVE"), true);
-  available = true;
-  await app.click("refreshConnection");
-  assert.ok(app.messages.some((message) => message.type === "KAI_TRACKER_OPTIONS" && message.refresh === true));
-  assert.equal(app.elements.saveSheet.disabled, false);
-});
-
-test("unpaired tracker asks for pairing instead of asking to start a local server", async () => {
-  const app = createPopup({ paired: false });
-  await app.start();
-  assert.equal(app.elements.pairingSettings.open, true);
-  assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.connectionStatus.textContent, /pairing link/);
+  assert.match(app.elements.connectionStatus.textContent, /not configured/i);
   assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_OPTIONS"), false);
-  assert.doesNotMatch(popupSource, /Start Kai Flow on this|127\.0\.0\.1|ws:\/\//);
 });
 
-test("Connect requests only the user-selected HTTPS origin and clears the one-use link", async () => {
-  const app = createPopup(); await app.start();
-  app.elements.pairingLink.value = "https://kai.example.test/#tracker-pair=kfp_01234567890123456789012345678901";
-  app.elements.deviceName.value = "AdsPower tracker";
-  await app.click("connectServer");
-  assert.deepEqual(app.permissionRequests, [{ origins: ["https://kai.example.test/*"] }]);
-  const pairing = app.messages.find((message) => message.type === "KAI_TRACKER_PAIR");
-  assert.equal(pairing.deviceName, "AdsPower tracker");
-  assert.match(pairing.link, /#tracker-pair=kfp_/);
-  assert.equal(app.elements.pairingLink.value, "");
+test("credentials file, Sheet URL, and gid are sent once to the trusted worker configuration action", async () => {
+  const app = createPopup({ configured: false });
+  await app.start();
+  const credentials = { type: "service_account", client_email: "synthetic@example.test", private_key: "synthetic-private-key" };
+  await app.chooseFile({ name: "service-account.json", size: 200, async text() { return JSON.stringify(credentials); } });
+  app.elements.sheetUrl.value = SHEET_URL;
+  app.elements.sheetGid.value = "123";
+  await app.click("saveSheetSettings");
+  const configure = app.messages.find((message) => message.type === "KAI_TRACKER_CONFIGURE");
+  assert.deepEqual(configure, { type: "KAI_TRACKER_CONFIGURE", credentials, sheetUrl: SHEET_URL, sheetGid: "123" });
+  assert.equal(app.elements.credentialsFile.value, "");
+  assert.match(app.elements.credentialsStatus.textContent, /stored locally/i);
+  assert.equal(app.storageWrites.some((value) => JSON.stringify(value).includes("private_key")), false,
+    "the popup never stores credentials; only the trusted service worker does");
 });
 
-test("refusing permission or entering a local link sends no pairing request", async () => {
-  const denied = createPopup({ permissionGranted: false }); await denied.start();
-  denied.elements.pairingLink.value = "https://kai.example.test/#tracker-pair=kfp_01234567890123456789012345678901";
-  await denied.click("connectServer");
-  assert.equal(denied.messages.some((message) => message.type === "KAI_TRACKER_PAIR"), false);
-  const local = createPopup(); await local.start();
-  local.elements.pairingLink.value = "https://127.0.0.1/#tracker-pair=kfp_01234567890123456789012345678901";
-  await local.click("connectServer");
-  assert.equal(local.permissionRequests.length, 0);
-  assert.equal(local.messages.some((message) => message.type === "KAI_TRACKER_PAIR"), false);
+test("updating an existing Sheet target does not require resending credentials", async () => {
+  const app = createPopup({ configured: true });
+  await app.start();
+  app.elements.sheetUrl.value = SHEET_URL;
+  app.elements.sheetGid.value = "123";
+  await app.click("saveSheetSettings");
+  const configure = app.messages.find((message) => message.type === "KAI_TRACKER_CONFIGURE");
+  assert.equal(Object.hasOwn(configure, "credentials"), false);
 });
 
-test("company edits are debounced and latest text is submitted with title/description edits", async () => {
-  const app = createPopup(); await app.start();
-  const initial = app.messages.filter((message) => message.type === "KAI_TRACKER_DUPLICATE").length;
-  await app.input("company", "New");
-  await app.input("company", "New Company");
-  await app.input("title", "Edited title");
-  await app.input("description", "Edited job description");
-  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_DUPLICATE").length, initial);
-  await new Promise((resolve) => setTimeout(resolve, 380));
-  const previews = app.messages.filter((message) => message.type === "KAI_TRACKER_DUPLICATE");
-  assert.equal(previews.length, initial + 1);
-  assert.equal(previews.at(-1).company, "New Company");
-  await app.click("saveSheet");
-  const saved = app.messages.find((message) => message.type === "KAI_TRACKER_SAVE");
-  assert.equal(saved.job.title, "Edited title");
-  assert.equal(saved.job.company, "New Company");
-  assert.equal(saved.job.description, "Edited job description");
+test("invalid credentials JSON never reaches the service worker", async () => {
+  const app = createPopup({ configured: false });
+  await app.start();
+  await app.chooseFile({ name: "broken.json", size: 20, async text() { return "{"; } });
+  await app.click("saveSheetSettings");
+  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_CONFIGURE"), false);
+  assert.match(app.elements.credentialsStatus.textContent, /not valid JSON/i);
 });
 
-test("queue displays connection isolation and cancellation explains possible prior save", async () => {
-  const entries = [{ requestId: "request-1", company: defaultJob.company, jobTitle: defaultJob.title, state: "retry", connectionMatches: false, origin: "https://old.example.test", mayHaveSaved: true, updatedAt: 10 }];
-  const app = createPopup({ entries }); await app.start();
-  assert.match(app.elements.queueList.textContent, /earlier connection/);
-  assert.match(app.elements.queueList.textContent, /Not transferred/);
-  const button = app.elements.queueList.children[0].children.find((child) => child.tagName === "BUTTON");
-  await button.dispatch("click");
-  assert.match(app.confirms[0], /may already have reached Kai Flow/);
-  assert.match(app.confirms[0], /will not remove a saved job/);
-  assert.deepEqual(app.messages.find((message) => message.type === "KAI_TRACKER_CANCEL"), { type: "KAI_TRACKER_CANCEL", requestId: "request-1" });
-});
-
-test("pending same-company request blocks another Save and appears in the queue", async () => {
-  const entries = [{ requestId: "request-1", company: defaultJob.company, jobTitle: defaultJob.title, state: "retry", connectionMatches: true, origin: "https://kai.example.test", mayHaveSaved: true, updatedAt: 10 }];
-  const app = createPopup({ entries }); await app.start();
+test("Remove settings clears the direct configuration after confirmation", async () => {
+  const app = createPopup({ configured: true });
+  await app.start();
+  await app.click("removeSheetSettings");
+  assert.equal(app.confirmations.length, 1);
+  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_CLEAR_CONFIG"), true);
+  assert.equal(app.elements.sheetSettings.open, true);
   assert.equal(app.elements.saveSheet.disabled, true);
-  assert.equal(app.elements.saveSheet.textContent, "In queue");
-  assert.match(app.elements.queueSummary.textContent, /1 waiting/);
 });
 
-test("popup width is fixed and Save remains outside scrolling content", () => {
-  const css = fs.readFileSync(path.join(root, "popup.css"), "utf8");
-  assert.match(css, /min-width:\s*420px/);
-  assert.doesNotMatch(css, /max-width:\s*100vw/);
-  assert.match(css, /\.scroll-content\s*\{[^}]*overflow-y:\s*auto/);
-  assert.match(popupHtml, /<\/div>\s*<section class="actions">/);
+test("Sheet duplicates and banned companies block Save and render concise text", async () => {
+  const duplicate = { rowNumber: 7, company: "Example Company", jobTitle: "Existing role", status: "tailored", jobDescriptionPreview: "Existing work" };
+  const duplicateApp = createPopup({ respond(message) {
+    if (message.type === "KAI_TRACKER_DUPLICATE") return { ok: true, result: { duplicate } };
+  } });
+  await duplicateApp.start();
+  assert.equal(duplicateApp.elements.saveSheet.disabled, true);
+  assert.match(duplicateApp.elements.duplicate.textContent, /Already in Google Sheet/);
+  assert.doesNotMatch(duplicateApp.elements.duplicate.textContent, /<img|onerror/iu);
+
+  const bannedApp = createPopup({ banned: ["Example Company"] });
+  await bannedApp.start();
+  assert.equal(bannedApp.elements.saveSheet.disabled, true);
+  assert.match(bannedApp.elements.duplicate.textContent, /Banned company/);
 });
 
-test("every active queue entry remains cancellable when an outage queues more than 30 jobs", async () => {
-  const entries = Array.from({ length: 60 }, (_, index) => ({ requestId: `request-${index}`, company: `Company ${index}`, jobTitle: "Role", state: "retry", connectionMatches: true, origin: "https://kai.example.test", mayHaveSaved: true, updatedAt: index }));
-  const app = createPopup({ entries }); await app.start();
-  assert.equal(app.elements.queueList.children.length, 60);
-  assert.ok(app.elements.queueList.children.every((item) => item.children.some((child) => child.tagName === "BUTTON")));
-});
-
-for (const code of ["TRACKER_SAVE_UNCERTAIN", "KAI_FLOW_SAVE_UNCONFIRMED"]) {
-  test(`${code} offers Check save and retries exactly the same payload`, async () => {
-    let saveCount = 0;
-    const app = createPopup({ respond(message) {
-      if (message.type !== "KAI_TRACKER_SAVE") return;
-      saveCount++;
-      if (saveCount === 1) return { ok: false, error: { code, message: "Save was not confirmed. Check the previous save." } };
-      return { ok: true, result: { replayed: true } };
-    } });
-    await app.start();
-    await app.select("Kai");
-    await app.click("saveSheet");
-    assert.equal(app.elements.saveSheet.textContent, "Check save");
-    assert.equal(app.elements.saveSheet.disabled, false);
-    assert.match(app.elements.status.textContent, /not confirmed/);
-    await app.click("saveSheet");
-    const saves = app.messages.filter((message) => message.type === "KAI_TRACKER_SAVE");
-    assert.equal(saves.length, 2);
-    assert.deepEqual(saves[1], saves[0]);
-    assert.equal(app.elements.saveSheet.textContent, "Save");
-    assert.match(app.elements.status.textContent, /Already saved.*No duplicate was created/);
-  });
-}
-
-test("a lost extension response also leaves an ambiguous save checkable", async () => {
+test("an unconfirmed direct save is never retried or queued by the popup", async () => {
+  let saves = 0;
   const app = createPopup({ respond(message) {
-    if (message.type === "KAI_TRACKER_SAVE") throw new Error("The message port closed.");
+    if (message.type === "KAI_TRACKER_SAVE") {
+      saves += 1;
+      return { ok: false, error: { code: "TRACKER_SAVE_UNCONFIRMED", message: "Check the Google Sheet before saving again." } };
+    }
   } });
   await app.start();
   await app.click("saveSheet");
-  assert.equal(app.elements.saveSheet.textContent, "Check save");
-  assert.equal(app.elements.saveSheet.disabled, false);
-  assert.match(app.elements.status.textContent, /could not confirm/);
+  assert.equal(saves, 1);
+  assert.match(app.elements.status.textContent, /Check the Google Sheet/);
+  assert.doesNotMatch(HTML, /Save queue|queueList|queueSummary/iu);
+});
+
+test("popup field order remains company, title, URL, profile, description", () => {
+  const positions = ["company", "title", "applyUrl", "profile", "description"].map((id) => HTML.indexOf(`id="${id}"`));
+  assert.equal(positions.every((position, index) => index === 0 || position > positions[index - 1]), true);
 });

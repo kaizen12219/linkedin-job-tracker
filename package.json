@@ -1,14 +1,11 @@
 {
   "name": "linkedin-job-tracker-extension",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Standalone Chrome extension for capturing LinkedIn jobs in a remote Kai Flow server.",
+  "description": "Standalone Chrome extension for capturing LinkedIn jobs directly in Google Sheets.",
   "scripts": {
     "test": "node --test tests/*.test.js",
     "preview:popup": "node tests/popup-preview-server.js",
-    "package:extension": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-extension.ps1",
-    "sheets:server": "node scripts/sheets-server.js",
-    "sheets:check": "node scripts/sheets-server.js --check",
-    "sheets:tabs": "node scripts/sheets-server.js --list-tabs"
+    "package:extension": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/package-extension.ps1"
   }
 }
