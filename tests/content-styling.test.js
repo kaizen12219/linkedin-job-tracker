@@ -12,6 +12,7 @@ class FakeCard {
     this.company = company;
     this.title = title;
     this.modern = modern;
+    this.isConnected = true;
     this.attributes = new Map();
     this.titleParagraph = { innerText: title, textContent: `${title}${title}` };
     this.companyParagraph = { innerText: company, textContent: company };
@@ -61,6 +62,7 @@ test("LinkedIn cards give duplicates and banned companies the same visible treat
   const classifications = [];
   let intervalCallback = null;
   const document = {
+    addEventListener() {},
     documentElement: { append(element) { installedCss = element.textContent || ""; } },
     head: { append(element) { installedCss = element.textContent || ""; } },
     querySelector(selector) {

@@ -44,6 +44,10 @@ The authoritative duplicate check runs again immediately before every write. Lin
 
 **Banned companies** remains a separate editable list. It uses Chrome synced storage when available, and Export/Import can transfer it across unrelated profiles or PCs. Banned and duplicate LinkedIn cards use the same concise visual treatment. Banned companies cannot be saved until removed from that list.
 
+Duplicate and banned search results are also automatically dismissed by clicking LinkedIn's own **Dismiss (×)** button, one job at a time, with a random 1.5–4.5 second pause before each attempt. The tracker acts only in a visible tab on an uncovered, on-screen dismiss button. Scroll to bring more results into view. It rechecks the current company classification and job identity after the pause, skips disabled or missing buttons, and attempts each job only once per page session. LinkedIn controls the resulting dismissed state and its Undo action. The clicks are programmatic; randomized timing does not guarantee avoidance of automation detection.
+
+Click any open job card—active, duplicate, or banned—to immediately click its native × button. Manual card clicks do not wait for a company lookup and work before Sheet classification or when the Sheet is offline. Automatic closing still applies only to duplicate and banned jobs, with randomized pauses. Once × has been clicked, either directly or by the tracker, clicking the card does not click × again during that page session. Native controls such as Undo keep their normal behavior.
+
 ## Save safety and limitations
 
 There is no persistent retry queue. Each Save performs one direct Google Sheets operation. A bounded local receipt is written before the Sheet call and can reconcile an uncertain response if the exact row reached Google. It does not replay work automatically.

@@ -145,7 +145,7 @@ test("manifest keeps its identity and grants only LinkedIn plus official Google 
   const identity = createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)
     .replace(/[0-9a-f]/gu, (hex) => String.fromCharCode(97 + parseInt(hex, 16)));
   assert.equal(identity, ID);
-  assert.equal(manifest.version, "0.4.0");
+  assert.equal(manifest.version, "0.4.3");
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
   assert.deepEqual(manifest.host_permissions.slice(0, 2), [
     "https://oauth2.googleapis.com/*", "https://sheets.googleapis.com/*"

@@ -1,6 +1,6 @@
 {
   "name": "linkedin-job-tracker-extension",
-  "version": "0.4.0",
+  "version": "0.4.3",
   "private": true,
   "description": "Standalone Chrome extension for capturing LinkedIn jobs directly in Google Sheets.",
   "scripts": {
