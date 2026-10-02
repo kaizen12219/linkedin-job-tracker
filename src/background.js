@@ -1,7 +1,19 @@
-importScripts("google-sheets-client.js", "banned-companies.js");
+importScripts("kai-local-store-client.js", "banned-companies.js", "capture-policy.js", "research-client.js", "job-collector.js");
 
-const sheetClient = GoogleSheetsTrackerClient.create();
+const sheetClient = KaiLocalStoreClient.create();
 const bannedCompanies = KaiFlowBannedCompanies.create();
+const researchClient = JobResearchClient.create({ sheetClient, bannedCompanies,
+  onSaved: async (company) => {
+    try { await rememberTrackedCompany(company); } catch { /* Confirmed Sheet writes remain successful. */ }
+    await refreshLinkedInStyles();
+    void refreshSnapshotAndStyles({ force: true });
+  },
+  onOutcome: async (record, message, result) => notify(record.tabId, message,
+    result ? "success" : record.state === "failed" || record.state === "save-unconfirmed" ? "error" : "info", record.job)
+});
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === JobResearchClient.ALARM) void researchClient.poll().catch(() => {});
+});
 const PROFILE_STORAGE_KEY = "kaiFlowSelectedProfile";
 const BADGE_TIMEOUT_MS = 4000;
 const COMPANY_SNAPSHOT_STORAGE_KEY = "kaiFlowCompanySnapshotV1";
@@ -17,6 +29,10 @@ let companySnapshotRefresh = null;
 let companySnapshotLastAttemptAt = 0;
 let companySnapshotGeneration = 0;
 let companySnapshotNeedsRefresh = false;
+const COLLECTION_STORAGE_KEY = "jobTrackerCollectionV1";
+let collectionQueue = Promise.resolve();
+const collectionWaits = new Map();
+const COLLECTION_MESSAGES = new Set(["KAI_TRACKER_RUN_STATE", "KAI_TRACKER_RUN_CHECKPOINT", "KAI_TRACKER_RUN_END", "KAI_TRACKER_RUN_WAIT"]);
 const POPUP_MESSAGES = new Set([
   "KAI_TRACKER_OPTIONS",
   "KAI_TRACKER_DUPLICATE",
@@ -31,6 +47,15 @@ const POPUP_MESSAGES = new Set([
 async function initialize() {
   try {
     await Promise.all([sheetClient.init(), bannedCompanies.list(), loadCompanySnapshot()]);
+    await withCollectionState(async (state, save) => {
+      if (!state) return;
+      try {
+        const tab = await chrome.tabs.get(state.tabId);
+        if (LinkedInJobCollector.searchKey(tab.url) !== state.searchKey) { await save(null); return; }
+        await chrome.tabs.update(state.tabId, { autoDiscardable: false });
+      } catch { await save(null); }
+    });
+    void researchClient.poll().catch(() => {});
     const status = await sheetClient.getStatus();
     if (!status.configured) {
       await clearCompanySnapshot();
@@ -54,24 +79,34 @@ void initialize();
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const popupMessage = POPUP_MESSAGES.has(message?.type);
   const classifyMessage = message?.type === "KAI_TRACKER_CLASSIFY_COMPANIES";
-  if (!popupMessage && !classifyMessage) return undefined;
+  const captureMessage = message?.type === "KAI_TRACKER_CAPTURE";
+  const collectionMessage = COLLECTION_MESSAGES.has(message?.type);
+  if (!popupMessage && !classifyMessage && !captureMessage && !collectionMessage) return undefined;
 
   if (popupMessage && !isPopupSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open the tracker popup to change or save data." } });
     return false;
   }
-  if (classifyMessage && !isLinkedInSender(sender)) {
+  if ((classifyMessage || captureMessage || collectionMessage) && !isLinkedInSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Job highlighting is available only on LinkedIn job pages." } });
     return false;
   }
 
-  handleTrackerMessage(message).then(
-    (result) => sendResponse({ ok: true, result }),
-    (error) => sendResponse({ ok: false, error: {
+  handleTrackerMessage(message, sender).then(
+    (result) => {
+      sendResponse({ ok: true, result });
+      if (captureMessage && !message.runId) void notify(sender.tab?.id, result.status === "researching"
+        ? "Job research started. This job will be added only if it qualifies."
+        : result.status === "skipped" ? result.reason : `Saved ${message.job.company} to Kai Flows.`, result.status === "inserted" ? "success" : "info").catch(() => {});
+    },
+    (error) => {
+      sendResponse({ ok: false, error: {
       code: error.code || "TRACKER_REQUEST_FAILED",
       message: error.message || "The tracker could not complete the request.",
       ...(error.details !== undefined ? { details: error.details } : {})
-    } })
+      } });
+      if (captureMessage && !message.runId) void notify(sender.tab?.id, error.message, "error").catch(() => {});
+    }
   );
   return true;
 });
@@ -92,8 +127,11 @@ function isLinkedInSender(sender) {
   }
 }
 
-async function handleTrackerMessage(message) {
+async function handleTrackerMessage(message, sender = {}) {
+  if (message.type === "KAI_TRACKER_RUN_WAIT") return waitForCollectionRun(message, sender);
+  if (COLLECTION_MESSAGES.has(message.type)) return handleCollectionMessage(message, sender);
   if (message.type === "KAI_TRACKER_CONFIGURE") {
+    await stopActiveCollection();
     const result = await sheetClient.configure({
       credentials: message.credentials,
       sheetUrl: message.sheetUrl,
@@ -105,6 +143,8 @@ async function handleTrackerMessage(message) {
     return result;
   }
   if (message.type === "KAI_TRACKER_CLEAR_CONFIG") {
+    await stopActiveCollection();
+    await researchClient.clear();
     const result = await sheetClient.clearConfiguration();
     await clearCompanySnapshot();
     await refreshLinkedInStyles();
@@ -123,16 +163,137 @@ async function handleTrackerMessage(message) {
     return classifyCompanies(message.companies, { refresh: message.refresh === true });
   }
 
-  if (await bannedCompanies.has(message.job?.company)) {
+  let profile = message.profile ?? "";
+  if (message.type === "KAI_TRACKER_CAPTURE") {
+    const settings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
+    profile = settings[PROFILE_STORAGE_KEY] ?? "";
+  }
+  if (message.runId) {
+    const claimed = await withCollectionState(async (state, save) => {
+      if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped. Nothing was added."), { code: "TRACKER_RUN_STOPPED" });
+      const jobId = String(message.job?.jobId || "");
+      if (!/^\d+$/u.test(jobId) || message.job.jobIdSource === "query" ||
+        LinkedInJobCollector.searchKey(message.job.sourceUrl) !== state.searchKey) throw new Error("The selected job could not be verified for this search.");
+      if (state.visited.includes(jobId)) return false;
+      // Persist before the Sheet/research request, so a reload or lost response
+      // cannot replay an uncertain save from this run.
+      state.visited.push(jobId);
+      await save(state);
+      return true;
+    });
+    if (!claimed) return { status: "skipped", reason: "This job was already processed in this run." };
+  }
+  const result = await captureJob(message.job, { profile, tabId: sender.tab?.id });
+  if (message.runId) await withCollectionState(async (state, save) => {
+    if (!collectionMatches(state, sender, message.runId)) return;
+    const field = result.status === "inserted" ? "saved" : result.status === "researching" ? "researching" : "skipped";
+    state.counts[field]++;
+    await save(state);
+  });
+  return result;
+}
+
+function withCollectionState(action) {
+  const operation = collectionQueue.catch(() => {}).then(async () => {
+    const storage = chrome.storage.session;
+    if (!storage) throw new Error("Session storage is unavailable. Reload the extension.");
+    const state = (await storage.get(COLLECTION_STORAGE_KEY))[COLLECTION_STORAGE_KEY] || null;
+    return action(state, async (value) => {
+      await storage.set({ [COLLECTION_STORAGE_KEY]: value });
+      if (state && state.id !== value?.id) {
+        const wait = collectionWaits.get(state.id);
+        if (wait) { clearTimeout(wait.timer); collectionWaits.delete(state.id); wait.resolve({ stopped: true }); }
+        if (typeof state.originalAutoDiscardable === "boolean") {
+          try { await chrome.tabs.update(state.tabId, { autoDiscardable: state.originalAutoDiscardable }); }
+          catch { /* Closed tabs need no restoration. */ }
+        }
+      }
+    });
+  });
+  collectionQueue = operation.catch(() => {});
+  return operation;
+}
+function collectionMatches(state, sender, id = state?.id) {
+  return !!state && state.id === id && state.tabId === sender.tab?.id &&
+    LinkedInJobCollector.searchKey(sender.url) === state.searchKey;
+}
+function publicCollection(state) {
+  if (!state) return null;
+  const { id, searchKey, visited, pages, counts } = state;
+  return { id, searchKey, visited, pages, counts };
+}
+async function waitForCollectionRun(message, sender) {
+  const delay = message.milliseconds;
+  if (!Number.isSafeInteger(delay) || delay < 1 || delay > 20_000) throw new Error("The collection delay is invalid.");
+  let waiting;
+  await withCollectionState(async (state) => {
+    if (!collectionMatches(state, sender, message.runId)) return;
+    const previous = collectionWaits.get(state.id);
+    if (previous) {
+      if (!sender.documentId || !previous.documentId || sender.documentId === previous.documentId) {
+        throw new Error("A collection delay is already pending.");
+      }
+      // A full Next navigation can replace the document while its last wait
+      // is pending. The newly authorized document takes over that same run.
+      clearTimeout(previous.timer); collectionWaits.delete(state.id); previous.resolve({ stopped: true });
+    }
+    // Schedule in the worker, outside the serialized state queue. Stop and
+    // settings changes must be able to cancel a wait immediately.
+    waiting = new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        collectionWaits.delete(state.id);
+        withCollectionState((latest) => ({ stopped: !collectionMatches(latest, sender, message.runId) }))
+          .then(resolve, () => resolve({ stopped: true }));
+      }, delay);
+      collectionWaits.set(state.id, { timer, resolve, documentId: sender.documentId });
+    });
+  });
+  return waiting || { stopped: true };
+}
+async function handleCollectionMessage(message, sender) {
+  return withCollectionState(async (state, save) => {
+    if (message.type === "KAI_TRACKER_RUN_STATE") {
+      if (state?.tabId === sender.tab?.id && !collectionMatches(state, sender)) { await save(null); await setBadge("", "#56687a"); }
+      return { state: collectionMatches(state, sender) ? publicCollection(state) : null };
+    }
+    if (message.type === "KAI_TRACKER_RUN_END" && state?.id === message.runId && state.tabId === sender.tab?.id) {
+      await save(null); await setBadge("", "#56687a"); return { stopped: true };
+    }
+    if (!collectionMatches(state, sender, message.runId)) return { stopped: true };
+    const visited = message.state?.visited;
+    const pages = message.state?.pages;
+    if (!Array.isArray(visited) || visited.length > 10_000 || !visited.every((id) => /^\d+$/u.test(id)) ||
+      !Array.isArray(pages) || pages.length > 1000 || !pages.every((value) => typeof value === "string" && value.length < 50_000)) throw new Error("The results history could not be recorded.");
+    state.visited = [...new Set([...state.visited, ...visited])];
+    state.pages = [...new Set([...state.pages, ...pages])];
+    for (const field of ["saved", "researching", "skipped"]) {
+      const count = message.state.counts?.[field];
+      if (!Number.isSafeInteger(count) || count < 0 || count > 10_000) throw new Error("The collection count could not be recorded.");
+      state.counts[field] = Math.max(state.counts[field], count);
+    }
+    await save(state);
+    return { state: publicCollection(state) };
+  });
+}
+async function stopActiveCollection() {
+  const previous = await withCollectionState(async (state, save) => { await save(null); return state; });
+  if (previous) await setBadge("", "#56687a");
+  if (previous) try { await chrome.tabs.sendMessage(previous.tabId, { type: "KAI_TRACKER_RUN_STOP" }); } catch { /* Navigated or closed tab. */ }
+}
+
+async function captureJob(job, { profile = "", tabId = null } = {}) {
+  const roleSkipReason = JobCapturePolicy.roleSkipReason(job);
+  if (roleSkipReason) return { status: "skipped", reason: roleSkipReason };
+  if (await bannedCompanies.has(job?.company)) {
     const failure = new Error("This company is in the tracker’s banned-company list. Nothing was added.");
     failure.code = "BANNED_COMPANY";
     throw failure;
   }
-  const result = await sheetClient.saveJob(message.job, { profile: message.profile ?? "" });
-  try { await rememberTrackedCompany(message.job?.company); } catch { /* A cache write must never turn a confirmed save into a failure. */ }
-  await refreshLinkedInStyles();
-  void refreshSnapshotAndStyles({ force: true });
-  return result;
+  if (job?.applicationsClosed === true) return { status: "skipped", reason: "Applications are closed. Nothing was added." };
+  if (job?.applicationsAvailable === false) return { status: "skipped", reason: "An active Apply control could not be verified. Nothing was added." };
+  const lookup = await sheetClient.lookupDuplicate(job.company);
+  if (lookup?.duplicate) throw Object.assign(new Error("This company already has a recorded job. Nothing was added."), { code: "DUPLICATE_COMPANY", details: lookup });
+  return researchClient.start(job, { profile, tabId });
 }
 
 async function classifyCompanies(values, { refresh = false } = {}) {
@@ -154,7 +315,7 @@ async function classifyCompanies(values, { refresh = false } = {}) {
   }
 
   if (!companySnapshotAvailable) {
-    const failure = new Error("The Google Sheet company list is not available yet.");
+    const failure = new Error("The Kai Flow company list is not available yet.");
     failure.code = "TRACKER_SNAPSHOT_UNAVAILABLE";
     throw failure;
   }
@@ -250,7 +411,7 @@ async function refreshCompanySnapshot({ force = false } = {}) {
     if (startingGeneration !== companySnapshotGeneration) return false;
     if (result.unchanged) {
       if (!companySnapshotAvailable || result.revision !== companySnapshotRevision) {
-        const failure = new Error("The Google Sheet returned an unmatched company revision.");
+        const failure = new Error("The Kai Flow returned an unmatched company revision.");
         failure.code = "TRACKER_PROTOCOL_ERROR";
         throw failure;
       }
@@ -317,10 +478,55 @@ async function refreshLinkedInStyles() {
 
 chrome.commands.onCommand.addListener((command, commandTab) => {
   if (command === "scrape-and-save-job") void runScrapeAndSaveShortcut(commandTab);
+  if (command === "toggle-job-collection") void toggleJobCollection(commandTab);
 });
+chrome.tabs.onRemoved?.addListener((tabId) => {
+  void withCollectionState(async (state, save) => { if (state?.tabId === tabId) { await save(null); await setBadge("", "#56687a"); } }).catch(() => {});
+});
+
+async function toggleJobCollection(commandTab) {
+  let tab = commandTab;
+  let startedId = "";
+  try {
+    const running = await withCollectionState((state) => !!state);
+    if (running) { await stopActiveCollection(); return; }
+    tab = tab?.id ? tab : await getActiveTab();
+    const searchKey = LinkedInJobCollector.searchKey(tab?.url);
+    if (!tab?.id || !searchKey) throw new Error("Open LinkedIn job search results before starting job collection.");
+    const toggle = await withCollectionState(async (state, save) => {
+      if (state) { await save(null); return { stop: state }; }
+      const status = await sheetClient.getStatus();
+      if (!status.configured) throw new Error("Start Kai Flow before starting job collection.");
+      await classifyCompanies([], { refresh: false });
+      const currentTab = await chrome.tabs.get(tab.id);
+      const next = { id: crypto.randomUUID(), tabId: tab.id, searchKey, originalAutoDiscardable: currentTab.autoDiscardable,
+        visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
+      startedId = next.id;
+      await save(next);
+      await chrome.tabs.update(tab.id, { autoDiscardable: false });
+      return { state: next, stop: state };
+    });
+    if (toggle.stop) try { await chrome.tabs.sendMessage(toggle.stop.tabId, { type: "KAI_TRACKER_RUN_STOP" }); } catch { /* The previous tab may have closed. */ }
+    if (!toggle.state) { await withCollectionState(async (state) => { if (!state) await setBadge("", "#56687a"); }); return; }
+    startedId = toggle.state.id;
+    const message = { type: "KAI_TRACKER_RUN_START", state: publicCollection(toggle.state) };
+    let response;
+    try { response = await chrome.tabs.sendMessage(tab.id, message); }
+    catch {
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"] });
+      response = await chrome.tabs.sendMessage(tab.id, message);
+    }
+    if (!response?.ok) throw new Error(response?.error || "The collection controls could not be started. Reload the LinkedIn tab.");
+    await withCollectionState(async (state) => { if (state?.id === startedId) await setBadge("RUN", "#1f7a3f"); });
+  } catch (error) {
+    if (startedId) await withCollectionState(async (state, save) => { if (state?.id === startedId) await save(null); });
+    await notify(tab?.id, error.message, "error");
+  }
+}
 
 async function runScrapeAndSaveShortcut(commandTab) {
   let tab = commandTab || null;
+  let job = null;
   try {
     await setBadge("...", "#56687a");
     tab = tab?.id ? tab : await getActiveTab();
@@ -329,6 +535,7 @@ async function runScrapeAndSaveShortcut(commandTab) {
 
     const scrapeResponse = await requestScrape(tab.id);
     if (!scrapeResponse?.ok) throw new Error(scrapeResponse?.error || "The scraper did not return data.");
+    job = scrapeResponse.data;
     if (await bannedCompanies.has(scrapeResponse.data.company)) {
       const failure = new Error("This company is in the tracker’s banned-company list. Nothing was added.");
       failure.code = "BANNED_COMPANY";
@@ -337,24 +544,21 @@ async function runScrapeAndSaveShortcut(commandTab) {
 
     const savedSettings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
     const profile = savedSettings[PROFILE_STORAGE_KEY] ?? "";
-    await sheetClient.saveJob(scrapeResponse.data, { profile });
-    try { await rememberTrackedCompany(scrapeResponse.data.company); } catch { /* The confirmed save still succeeds. */ }
-    await refreshLinkedInStyles();
-    void refreshSnapshotAndStyles({ force: true });
-    await setBadge("OK", "#1f7a3f");
-    await notify(tab.id, `Saved ${scrapeResponse.data.company || "job"} to Google Sheets.`, "success");
+    const result = await captureJob(scrapeResponse.data, { profile, tabId: tab.id });
+    await setBadge(result.status === "researching" ? "AI" : result.status === "skipped" ? "SKIP" : "OK", "#1f7a3f");
+    await notify(tab.id, result.status === "researching" ? "Research started."
+      : result.status === "skipped" ? job.applicationsClosed ? "Skipped: applications closed." : "Skipped: apply button unavailable."
+      : "Saved to Kai Flow.", "info", job);
   } catch (error) {
     if (error.code === "DUPLICATE_COMPANY") {
-      const duplicate = error.details?.duplicate;
-      const brief = duplicate ? `${duplicate.company} — ${duplicate.jobTitle}` : "This company";
       await setBadge("DUP", "#8a6d1d");
-      await notify(tab?.id, `${brief} already exists in the Google Sheet.`, "warning");
+      await notify(tab?.id, "Skipped: company already in sheet.", "warning", job);
     } else if (error.code === "BANNED_COMPANY") {
       await setBadge("BAN", "#b3261e");
-      await notify(tab?.id, error.message, "warning");
+      await notify(tab?.id, "Skipped: company is banned.", "warning", job);
     } else {
       await setBadge("ERR", "#b3261e");
-      await notify(tab?.id, error.message, "error");
+      await notify(tab?.id, error.message, "error", job);
     }
   } finally {
     setTimeout(() => chrome.action.setBadgeText({ text: "" }), BADGE_TIMEOUT_MS);
@@ -374,7 +578,7 @@ async function requestScrape(tabId) {
   } catch {
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ["src/scraper.js", "src/content.js"]
+        files: ["src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"]
     });
     return chrome.tabs.sendMessage(tabId, { type: "SCRAPE_LINKEDIN_JOB" });
   }
@@ -391,7 +595,9 @@ function isSupportedUrl(url) {
   }
 }
 
-async function notify(tabId, message, tone = "info") {
+async function notify(tabId, message, tone = "info", job = null) {
+  const label = [JobCapturePolicy.text(job?.company), JobCapturePolicy.text(job?.title ?? job?.jobTitle)].filter(Boolean).join(" — ");
+  if (label) message = `${label}\n${message}`;
   await chrome.action.setTitle({ title: `LinkedIn Job Scraper: ${message}` });
   if (!tabId) return;
   try {
@@ -423,6 +629,8 @@ function showShortcutToast(message, tone) {
     background: palette[tone] || palette.info,
     color: "#ffffff",
     font: "13px/1.4 Arial, Helvetica, sans-serif",
+    whiteSpace: "pre-line",
+    overflowWrap: "anywhere",
     boxShadow: "0 8px 24px rgba(0, 0, 0, 0.22)"
   });
   document.documentElement.append(toast);

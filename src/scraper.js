@@ -28,6 +28,7 @@
   ];
 
   const NON_COMPANY_PATTERNS = [
+    /^click to copy (?:company name|job title)$/i,
     /^(show|see|view|learn)\s+(more|less)(\s+about\s+(the\s+)?company)?\.?$/i,
     /^(follow|following|apply|save|share|search|results|job alert)$/i
   ];
@@ -38,12 +39,14 @@
     const companyResult = extractCompany(doc, root);
     const descriptionResult = extractDescription(doc, root);
     const applyResult = extractApplyUrl(doc, root, sourceUrl);
+    const metadata = extractCaptureMetadata(root, descriptionResult.value, sourceUrl, titleResult.value);
 
     const payload = {
       title: titleResult.value,
       company: companyResult.value,
       description: descriptionResult.value,
       applyUrl: applyResult.value,
+      ...metadata,
       sourceUrl,
       scrapedAt: new Date().toISOString(),
       confidence: {
@@ -78,9 +81,49 @@
     return queryFirst(doc, [
       '[data-sdui-screen*="SemanticJobDetails"]',
       '[data-sdui-screen*="JobDetails"]',
+      '.jobs-search__job-details--container',
+      '.jobs-details',
+      '.job-view-layout',
       'main[role="main"]',
       "main"
     ]) || doc.body || doc.documentElement;
+  }
+
+  function extractCaptureMetadata(root, description, sourceUrl, title) {
+    // Only inspect the selected details header. Search filters and other cards
+    // can contain Remote/Easy Apply for a different job.
+    const cardSelector = "li[data-occludable-job-id], .job-card-container, [data-view-name='job-card'], [componentkey^='job-card-component-ref-']";
+    // Some current layouts put the selected title in a standalone link rather
+    // than h1/h2. Use that exact title's link, never a search-result card link.
+    const selectedTitleLink = queryAll(root, "a[href*='/jobs/view/']").find((node) =>
+      !node.closest(cardSelector) && cleanTitle(readElementText(node)) === title);
+    const heading = queryFirst(root, ["h1", ".job-details-jobs-unified-top-card__job-title"]) ||
+      queryAll(root, "h2, h3").find((node) => queryFirst(node, ["a[href*='/jobs/view/']"])) || selectedTitleLink;
+    let header = heading?.parentElement;
+    for (let depth = 0; header && depth < 5; depth++, header = header.parentElement) {
+      if (header === root || queryAll(header, "button, a").some((node) => /\beasy apply\b|^apply$/iu.test(readElementText(node)))) break;
+    }
+    const scope = queryFirst(root, [".job-details-jobs-unified-top-card", ".jobs-unified-top-card"]) || header || root;
+    const controls = queryAll(scope, "button, a[role='button'], a[href]")
+      .filter((node) => !node.closest(cardSelector));
+    const isEasyApply = controls.some((node) => /\beasy apply\b/iu.test(`${readElementText(node)} ${node.getAttribute("aria-label") || ""}`));
+    const applicationsAvailable = controls.some((node) => !node.disabled && node.getAttribute("aria-disabled") !== "true" &&
+      (/\beasy apply\b|^apply(?:\s|$)/iu.test(readElementText(node)) || /\bapply\b/iu.test(node.getAttribute("aria-label") || "")));
+    const labels = queryAll(scope, "button, span, li, p").map((node) => readElementText(node).replace(/^[✓✔\s]+/u, ""));
+    const workplaceType = labels.some((value) => /^(?:on[- ]site|presencial)$/iu.test(value)) ? "on-site"
+      : labels.some((value) => /^(?:hybrid|híbrido)$/iu.test(value)) ? "hybrid"
+        : labels.some((value) => /^(?:remote|en remoto)$/iu.test(value)) ? "remote" : "unknown";
+    const applicationsClosed = /(?:no longer accepting applications|applications (?:are )?closed|job (?:has )?expired)/iu.test(readElementText(root));
+    const posterScope = queryFirst(root, [".hirer-card__hirer-information", ".job-details-jobs-unified-top-card__hirer", "[data-testid='job-poster']", ".jobs-poster"]);
+    const posterName = posterScope ? readElementText(queryFirst(posterScope, ["a[href*='/in/']", "h3", "strong"])) : "";
+    const descriptionEmails = [...new Set((description.match(/[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) || []).map((value) => value.replace(/[.,;]+$/u, "")))];
+    const titleLink = selectedTitleLink || (heading && queryFirst(heading, ["a[href*='/jobs/view/']"]));
+    const detailsId = (titleLink && titleLink.getAttribute("href")?.match(/\/jobs\/view\/(\d+)/u)?.[1]) ||
+      root.getAttribute?.("data-job-id") || root.getAttribute?.("data-entity-urn")?.match(/jobPosting:(\d+)/u)?.[1];
+    const pageId = sourceUrl.match(/\/jobs\/view\/(\d+)/u)?.[1];
+    const jobId = detailsId || pageId || new URL(sourceUrl).searchParams.get("currentJobId") || "";
+    return { isEasyApply, workplaceType, applicationsClosed, applicationsAvailable, posterName, descriptionEmails, jobId,
+      jobIdSource: detailsId ? "details" : pageId ? "page" : "query" };
   }
 
   function extractTitle(doc, root) {
@@ -199,7 +242,6 @@
 
   function extractApplyUrl(doc, root, sourceUrl) {
     const applyCandidates = queryAll(root, "a[href]")
-      .concat(queryAll(doc, "a[href]"))
       .map((link, index) => {
         const rawValue = absoluteUrl(link.getAttribute("href"), sourceUrl);
         const label = `${link.getAttribute("aria-label") || ""} ${readElementText(link)}`.trim();
@@ -375,7 +417,10 @@
       return ariaCompany;
     }
 
-    const titleCompany = cleanCompany(link.getAttribute("title") || "");
+    // Copy-enabled links use title for their interaction hint, not company
+    // metadata. Read their visible company text instead.
+    const titleCompany = link.getAttribute("data-kai-copy-field") === "company"
+      ? "" : cleanCompany(link.getAttribute("title") || "");
 
     if (isPlausibleCompany(titleCompany)) {
       return titleCompany;

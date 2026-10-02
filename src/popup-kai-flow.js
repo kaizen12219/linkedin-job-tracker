@@ -8,13 +8,6 @@ const connectionEl = document.querySelector("#connectionStatus");
 const statusEl = document.querySelector("#status");
 const duplicateEl = document.querySelector("#duplicate");
 const jsonEl = document.querySelector("#json");
-const sheetSettings = document.querySelector("#sheetSettings");
-const credentialsFile = document.querySelector("#credentialsFile");
-const credentialsStatus = document.querySelector("#credentialsStatus");
-const sheetUrlInput = document.querySelector("#sheetUrl");
-const sheetGidInput = document.querySelector("#sheetGid");
-const saveSettingsButton = document.querySelector("#saveSheetSettings");
-const removeSettingsButton = document.querySelector("#removeSheetSettings");
 const bannedInput = document.querySelector("#bannedCompanies");
 const bannedStatus = document.querySelector("#bannedStatus");
 const saveBannedButton = document.querySelector("#saveBanned");
@@ -23,7 +16,6 @@ const importBannedInput = document.querySelector("#importBanned");
 const fields = Object.fromEntries(["title", "company", "applyUrl", "description"]
   .map((name) => [name, document.querySelector(`#${name}`)]));
 const PROFILE_KEY = "kaiFlowSelectedProfile";
-const MAX_CREDENTIAL_FILE_BYTES = 64 * 1024;
 
 let latestPayload = null;
 let profiles = [];
@@ -36,7 +28,6 @@ let bannedCompanies = [];
 let lookupVersion = 0;
 let optionsVersion = 0;
 let connectionState = "unconfigured";
-let selectedCredentials = null;
 let duplicateTimer;
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -51,81 +42,6 @@ chrome.runtime.onMessage?.addListener((message, sender) => {
 
 scrapeButton.addEventListener("click", () => void scrapeCurrentTab());
 refreshButton.addEventListener("click", () => void loadOptions(true));
-
-credentialsFile.addEventListener("change", async () => {
-  const file = credentialsFile.files?.[0];
-  selectedCredentials = null;
-  if (!file) {
-    credentialsStatus.textContent = configured
-      ? "Stored credentials are unchanged. Choose a file only to replace them."
-      : "Choose the service-account JSON file.";
-    return;
-  }
-  try {
-    if (file.size > MAX_CREDENTIAL_FILE_BYTES) throw new Error("The credentials file is unexpectedly large.");
-    const parsed = JSON.parse(await file.text());
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("The credentials file must contain one JSON object.");
-    selectedCredentials = parsed;
-    credentialsStatus.textContent = `Selected ${file.name}. The private key will be stored only in this browser profile.`;
-  } catch (error) {
-    credentialsFile.value = "";
-    credentialsStatus.textContent = error instanceof SyntaxError ? "The selected file is not valid JSON." : error.message;
-  }
-});
-
-saveSettingsButton.addEventListener("click", async () => {
-  if (!selectedCredentials && !configured) {
-    setStatus("Choose the service-account credentials JSON file first.");
-    return;
-  }
-  saveSettingsButton.disabled = true;
-  removeSettingsButton.disabled = true;
-  setStatus("Checking Google Sheet access…");
-  try {
-    const result = await request({
-      type: "KAI_TRACKER_CONFIGURE",
-      ...(selectedCredentials ? { credentials: selectedCredentials } : {}),
-      sheetUrl: sheetUrlInput.value,
-      sheetGid: sheetGidInput.value
-    });
-    selectedCredentials = null;
-    credentialsFile.value = "";
-    renderSheetStatus(result);
-    sheetSettings.open = false;
-    credentialsStatus.textContent = "Credentials are stored locally. Choose a file only to replace them.";
-    setStatus(`Connected to ${result.sheetTitle || "the Google Sheet"}.`);
-    await loadOptions(true);
-  } catch (error) {
-    setStatus(error.message);
-    renderConnectionFailure(error);
-  } finally {
-    saveSettingsButton.disabled = false;
-    removeSettingsButton.disabled = false;
-  }
-});
-
-removeSettingsButton.addEventListener("click", async () => {
-  if (!confirm("Remove the saved Google Sheet and service-account credentials from this browser profile?")) return;
-  saveSettingsButton.disabled = true;
-  removeSettingsButton.disabled = true;
-  try {
-    const result = await request({ type: "KAI_TRACKER_CLEAR_CONFIG" });
-    selectedCredentials = null;
-    credentialsFile.value = "";
-    sheetUrlInput.value = "";
-    sheetGidInput.value = "";
-    renderSheetStatus(result);
-    sheetSettings.open = true;
-    credentialsStatus.textContent = "Choose the service-account JSON file.";
-    applyProfiles({ profiles: [] }, "");
-    setStatus("Google Sheet settings removed from this browser profile.");
-  } catch (error) {
-    setStatus(error.message);
-  } finally {
-    saveSettingsButton.disabled = false;
-    removeSettingsButton.disabled = false;
-  }
-});
 
 for (const [name, input] of Object.entries(fields)) input.addEventListener("input", () => {
   latestPayload = { ...(latestPayload || {}), [name]: input.value };
@@ -173,12 +89,13 @@ saveButton.addEventListener("click", async () => {
   if (saving || scraping || !latestPayload || !canSave() || !validProfile() || duplicate || isCurrentCompanyBanned()) return;
   saving = true;
   updateControls();
-  setStatus("Saving to Google Sheet…");
+  setStatus("Saving to Kai Flow…");
   try {
     const result = await request({ type: "KAI_TRACKER_SAVE", job: latestPayload, profile: profileSelect.value });
-    setStatus(result.replayed
+    setStatus(result.status === "researching" ? "Research started in a desktop session. This job will be added only if it qualifies."
+      : result.status === "skipped" ? result.reason : result.replayed
       ? "This exact job was already saved. No duplicate was created."
-      : "Saved to Google Sheet · Pending.");
+      : "Saved to Kai Flow · Pending.");
     void checkDuplicate();
   } catch (error) {
     if (error.code === "DUPLICATE_COMPANY" && error.details?.duplicate) {
@@ -192,7 +109,7 @@ saveButton.addEventListener("click", async () => {
       if (/UNAVAILABLE|OFFLINE|UNCONFIRMED|TIMEOUT/.test(error.code || "")) {
         connected = false;
         connectionState = "offline";
-        connectionEl.textContent = "Google Sheets unavailable · nothing queued";
+        connectionEl.textContent = "Kai Flow is unavailable";
       }
     }
   } finally {
@@ -238,7 +155,7 @@ async function request(message) {
   catch {
     const uncertain = message.type === "KAI_TRACKER_SAVE";
     const error = new Error(uncertain
-      ? "The save result could not be confirmed. Nothing will retry automatically; check the Google Sheet before saving this company again."
+      ? "The save result could not be confirmed. Nothing will retry automatically; check the Kai Flow before saving this company again."
       : "The tracker could not confirm the request. Reload the extension and try again.");
     error.code = uncertain ? "TRACKER_SAVE_UNCONFIRMED" : "TRACKER_UNAVAILABLE";
     throw error;
@@ -255,13 +172,12 @@ async function request(message) {
 async function loadOptions(refresh = false) {
   const version = ++optionsVersion;
   refreshButton.disabled = true;
-  connectionEl.textContent = "Checking Google Sheet…";
+  connectionEl.textContent = "Checking Kai Flow…";
   try {
     const currentStatus = await request({ type: "KAI_TRACKER_STATUS" });
     if (version !== optionsVersion) return;
     renderSheetStatus(currentStatus);
     if (!configured) {
-      sheetSettings.open = true;
       return;
     }
     const saved = await chrome.storage.local.get(PROFILE_KEY);
@@ -273,7 +189,7 @@ async function loadOptions(refresh = false) {
     applyProfiles(result, selected);
     connected = true;
     connectionState = "connected";
-    connectionEl.textContent = `Connected · ${currentStatus.sheetTitle || "Google Sheet"}`;
+    connectionEl.textContent = `Connected · ${currentStatus.sheetTitle || "Kai Flow"}`;
     renderJson();
     void checkDuplicate();
   } catch (error) {
@@ -294,15 +210,13 @@ function renderConnectionFailure(error) {
   if (/CONFIG_REQUIRED/.test(code)) {
     configured = false;
     connectionState = "unconfigured";
-    connectionEl.textContent = "Google Sheet not configured";
-    sheetSettings.open = true;
+    connectionEl.textContent = "Start Kai Flow";
   } else if (/AUTH|FORBIDDEN|NOT_FOUND|SCHEMA|INVALID_SERVICE_ACCOUNT|INVALID_SHEET/.test(code)) {
     connectionState = "invalid";
-    connectionEl.textContent = "Google Sheet settings need attention";
-    sheetSettings.open = true;
+    connectionEl.textContent = "Kai Flow needs attention";
   } else {
     connectionState = "offline";
-    connectionEl.textContent = "Google Sheets unavailable · nothing queued";
+    connectionEl.textContent = "Kai Flow is unavailable";
   }
   updateControls();
 }
@@ -323,21 +237,15 @@ function renderSheetStatus(status) {
   configured = Boolean(status.configured);
   connectionState = status.connection || (configured ? "checking" : "unconfigured");
   connected = connectionState === "connected";
-  if (status.sheetUrl) sheetUrlInput.value = status.sheetUrl;
-  if (status.sheetGid !== undefined && status.sheetGid !== "") sheetGidInput.value = String(status.sheetGid);
-  credentialsStatus.textContent = configured
-    ? "Credentials are stored locally. Choose a file only to replace them."
-    : "Choose the service-account JSON file.";
-  removeSettingsButton.disabled = false;
   connectionEl.textContent = !configured
-    ? "Google Sheet not configured"
+    ? "Start Kai Flow"
     : connected
-      ? `Connected · ${status.sheetTitle || "Google Sheet"}`
+      ? `Connected · ${status.sheetTitle || "Kai Flow"}`
       : connectionState === "invalid"
-        ? "Google Sheet settings need attention"
+        ? "Kai Flow needs attention"
         : connectionState === "offline"
-          ? "Google Sheets unavailable · nothing queued"
-          : "Checking Google Sheet…";
+          ? "Kai Flow is unavailable"
+          : "Checking Kai Flow…";
   updateControls();
 }
 
@@ -446,7 +354,7 @@ function renderDuplicate(value) {
     duplicateEl.append(heading, title, status, preview);
   } else if (value) {
     const heading = document.createElement("strong");
-    heading.textContent = "Already in Google Sheet";
+    heading.textContent = "Already in Kai Flow";
     const title = document.createElement("span");
     title.textContent = `${value.company || ""} · ${value.jobTitle || "Existing job"}`;
     const status = document.createElement("span");

@@ -10,7 +10,7 @@
     <main>
       <header class="header">
         <div>
-          <h1>Save to Kai Sheet</h1>
+          <h1>Save to Kai Flow</h1>
           <p id="status" role="status">Ready to read the LinkedIn job.</p>
         </div>
         <button id="scrape" type="button">Scrape</button>
@@ -18,26 +18,10 @@
 
       <div class="scroll-content">
         <section class="connection">
-          <p id="connectionStatus" role="status">Checking Google Sheet…</p>
+          <p id="connectionStatus" role="status">Checking Kai Flow…</p>
           <button id="refreshConnection" class="secondary" type="button">Refresh</button>
         </section>
-        <details id="sheetSettings">
-          <summary>Google Sheet settings</summary>
-          <div class="settings-fields">
-            <label>
-              <span>Service-account credentials JSON</span>
-              <input id="credentialsFile" type="file" accept=".json,application/json">
-            </label>
-            <p id="credentialsStatus">Choose the JSON file only on a browser profile you trust.</p>
-            <label><span>Google Sheet URL</span><input id="sheetUrl" type="url" autocomplete="off" placeholder="https://docs.google.com/spreadsheets/d/…/edit#gid=…"></label>
-            <label><span>Destination tab gid</span><input id="sheetGid" inputmode="numeric" pattern="[0-9]*" maxlength="12" placeholder="0"></label>
-            <p>The Sheet must be shared with the service account as an editor. The private key stays in this browser profile and is never synced.</p>
-            <div class="settings-actions">
-              <button id="saveSheetSettings" type="button">Save settings</button>
-              <button id="removeSheetSettings" class="secondary" type="button">Remove settings</button>
-            </div>
-          </div>
-        </details>
+        <p>Jobs are saved in Kai Flow. Use its publish button to copy them to Google Sheets.</p>
         <details id="bannedSettings">
           <summary>Banned companies</summary>
           <div class="settings-fields">

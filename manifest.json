@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "LinkedIn Job Scraper",
-  "description": "Capture LinkedIn jobs directly in a Google Sheet with an optional profile.",
-  "version": "0.4.3",
+  "description": "Capture LinkedIn jobs in Kai Flow, with Google Sheets available for publishing.",
+  "version": "0.6.1",
   "minimum_chrome_version": "120",
   "incognito": "not_allowed",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvsWi6U73aY1iXrGiSP3+FJmiI6A1qVASPcXhvJOCRof1W4lG+wcC3p5kY/qUQYYgbVepH24k8NgiStnUcq3ucGAB6b7wcvpfZ0uL60zpyKd00g1wKhDLCTMXOoR4+YotxTlvt1u+s2aZYtQTciSPtKkUzS96PtqDPN/jKhtxVvO8WcI2JmHG4LRL+sWp3N7i/alNQEFJ9HB7ardbso3XaBylRXVtdcysZnqheCHk0RYGygRO2MgrpRYJRA8a8AG0g8/X1i+Q2SE/L2Ihz7wxuu2UD+B216Fi8J21dl/E8s1aGZtwwjKt6rHmLFMxcmEZeUFlBOsqEiMwJdvzk5pWbwIDAQAB",
   "content_security_policy": {
-    "extension_pages": "script-src 'self'; object-src 'self'; connect-src https://oauth2.googleapis.com https://sheets.googleapis.com"
+    "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:8787"
   },
   "action": {
     "default_title": "Save LinkedIn Job to Kai Sheet",
@@ -16,10 +16,15 @@
   "background": {
     "service_worker": "src/background.js"
   },
-  "permissions": ["activeTab", "clipboardWrite", "scripting", "storage"],
+  "permissions": [
+    "activeTab",
+    "alarms",
+    "clipboardWrite",
+    "scripting",
+    "storage"
+  ],
   "host_permissions": [
-    "https://oauth2.googleapis.com/*",
-    "https://sheets.googleapis.com/*",
+    "http://127.0.0.1:8787/*",
     "https://linkedin.com/*",
     "https://*.linkedin.com/*",
     "https://www.linkedin.com/*"
@@ -30,7 +35,14 @@
         "default": "Ctrl+Shift+Y",
         "mac": "MacCtrl+Shift+Y"
       },
-      "description": "Scrape the active LinkedIn job and save it to Google Sheets"
+      "description": "Scrape the active LinkedIn job and save it to Kai Flow"
+    },
+    "toggle-job-collection": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+U",
+        "mac": "MacCtrl+Shift+U"
+      },
+      "description": "Start or stop collecting active LinkedIn search results"
     }
   },
   "content_scripts": [
@@ -42,7 +54,12 @@
         "https://www.linkedin.com/jobs/view/*",
         "https://www.linkedin.com/jobs/search-results/*"
       ],
-      "js": ["src/scraper.js", "src/content.js"],
+      "js": [
+        "src/scraper.js",
+        "src/detail-copy.js",
+        "src/job-collector.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
   ]

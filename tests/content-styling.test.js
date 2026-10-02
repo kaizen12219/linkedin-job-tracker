@@ -53,7 +53,7 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("LinkedIn cards give duplicates and banned companies the same visible treatment", async () => {
+test("LinkedIn cards classify duplicates and banned companies without restyling them", async () => {
   const duplicate = new FakeCard("Acme", "Platform Engineer", { modern: true });
   const banned = new FakeCard("Blocked Co", "Backend Engineer", { modern: true });
   const cards = [duplicate, banned];
@@ -132,13 +132,7 @@ test("LinkedIn cards give duplicates and banned companies the same visible treat
     "the current generated-class LinkedIn card structure must be discovered by its stable component marker");
   assert.equal(duplicate.getAttribute("data-kai-flow-job-state"), "duplicate");
   assert.equal(banned.getAttribute("data-kai-flow-job-state"), "banned");
-  assert.match(installedCss, /\[data-kai-flow-job-state\]\s*>\s*\*/u,
-    "the original LinkedIn card contents receive the dismissed-job treatment");
-  assert.match(installedCss, /opacity:\s*\.3/u);
-  assert.doesNotMatch(installedCss, /Already tracked|Banned company|::after|outline:|box-shadow:/u,
-    "styling must not add labels, decorations, or layout-changing content");
+  assert.equal(installedCss, "", "classification must preserve LinkedIn's native card appearance");
   assert.equal(duplicate.getAttribute("data-kai-flow-job-label"), null);
   assert.equal(banned.getAttribute("data-kai-flow-job-label"), null);
-  assert.doesNotMatch(installedCss, /data-kai-flow-job-state=["'](?:duplicate|banned)/u,
-    "one shared state selector keeps duplicate and banned cards visually identical");
 });

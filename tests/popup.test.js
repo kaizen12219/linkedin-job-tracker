@@ -169,9 +169,8 @@ async function settle() {
 }
 
 test("popup contains direct Google Sheet settings and no pairing or server controls", () => {
-  assert.match(HTML, /Service-account credentials JSON/);
-  assert.match(HTML, /Google Sheet URL/);
-  assert.match(HTML, /Destination tab gid/);
+  assert.doesNotMatch(HTML, /credentialsFile|sheetSettings|Destination tab gid/);
+  assert.match(HTML, /Jobs are saved in Kai Flow/);
   assert.doesNotMatch(HTML + SOURCE, /pairing|connectServer|Server connection|permissions\.request|\/api\/tracker/iu);
   assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/popup-kai-flow.js"]);
   assert.doesNotMatch(SOURCE, /fetch\s*\(/u);
@@ -189,61 +188,16 @@ test("configured popup loads Sheet profiles and saves the captured job directly"
   const save = app.messages.find((message) => message.type === "KAI_TRACKER_SAVE");
   assert.deepEqual(save.job, JOB);
   assert.equal(save.profile, "");
-  assert.match(app.elements.status.textContent, /Saved to Google Sheet · Pending/);
+  assert.match(app.elements.status.textContent, /Saved to Kai Flow · Pending/);
 });
 
 test("unconfigured popup opens settings and cannot save", async () => {
   const app = createPopup({ configured: false });
   await app.start();
-  assert.equal(app.elements.sheetSettings.open, true);
+  assert.equal(app.elements.sheetSettings.open, false);
   assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.connectionStatus.textContent, /not configured/i);
+  assert.match(app.elements.connectionStatus.textContent, /Start Kai Flow/i);
   assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_OPTIONS"), false);
-});
-
-test("credentials file, Sheet URL, and gid are sent once to the trusted worker configuration action", async () => {
-  const app = createPopup({ configured: false });
-  await app.start();
-  const credentials = { type: "service_account", client_email: "synthetic@example.test", private_key: "synthetic-private-key" };
-  await app.chooseFile({ name: "service-account.json", size: 200, async text() { return JSON.stringify(credentials); } });
-  app.elements.sheetUrl.value = SHEET_URL;
-  app.elements.sheetGid.value = "123";
-  await app.click("saveSheetSettings");
-  const configure = app.messages.find((message) => message.type === "KAI_TRACKER_CONFIGURE");
-  assert.deepEqual(configure, { type: "KAI_TRACKER_CONFIGURE", credentials, sheetUrl: SHEET_URL, sheetGid: "123" });
-  assert.equal(app.elements.credentialsFile.value, "");
-  assert.match(app.elements.credentialsStatus.textContent, /stored locally/i);
-  assert.equal(app.storageWrites.some((value) => JSON.stringify(value).includes("private_key")), false,
-    "the popup never stores credentials; only the trusted service worker does");
-});
-
-test("updating an existing Sheet target does not require resending credentials", async () => {
-  const app = createPopup({ configured: true });
-  await app.start();
-  app.elements.sheetUrl.value = SHEET_URL;
-  app.elements.sheetGid.value = "123";
-  await app.click("saveSheetSettings");
-  const configure = app.messages.find((message) => message.type === "KAI_TRACKER_CONFIGURE");
-  assert.equal(Object.hasOwn(configure, "credentials"), false);
-});
-
-test("invalid credentials JSON never reaches the service worker", async () => {
-  const app = createPopup({ configured: false });
-  await app.start();
-  await app.chooseFile({ name: "broken.json", size: 20, async text() { return "{"; } });
-  await app.click("saveSheetSettings");
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_CONFIGURE"), false);
-  assert.match(app.elements.credentialsStatus.textContent, /not valid JSON/i);
-});
-
-test("Remove settings clears the direct configuration after confirmation", async () => {
-  const app = createPopup({ configured: true });
-  await app.start();
-  await app.click("removeSheetSettings");
-  assert.equal(app.confirmations.length, 1);
-  assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_CLEAR_CONFIG"), true);
-  assert.equal(app.elements.sheetSettings.open, true);
-  assert.equal(app.elements.saveSheet.disabled, true);
 });
 
 test("Sheet duplicates and banned companies block Save and render concise text", async () => {
@@ -253,7 +207,7 @@ test("Sheet duplicates and banned companies block Save and render concise text",
   } });
   await duplicateApp.start();
   assert.equal(duplicateApp.elements.saveSheet.disabled, true);
-  assert.match(duplicateApp.elements.duplicate.textContent, /Already in Google Sheet/);
+  assert.match(duplicateApp.elements.duplicate.textContent, /Already in Kai Flow/);
   assert.doesNotMatch(duplicateApp.elements.duplicate.textContent, /<img|onerror/iu);
 
   const bannedApp = createPopup({ banned: ["Example Company"] });

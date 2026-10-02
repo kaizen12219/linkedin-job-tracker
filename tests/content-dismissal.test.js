@@ -9,7 +9,7 @@ const CONTENT = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8
 function card(company, id) {
   const attributes = new Map([["data-job-id", id]]);
   const result = {
-    company, title: "Engineer", isConnected: true, clicks: 0, visible: true,
+    company, title: "Engineer", isConnected: true, clicks: 0, selections: 0, visible: true,
     getAttribute: (name) => attributes.get(name) ?? null,
     setAttribute: (name, value) => attributes.set(name, value),
     removeAttribute: (name) => attributes.delete(name),
@@ -59,6 +59,10 @@ function harness(cards, options = {}) {
       preventDefault() { this.defaultPrevented = true; },
       stopImmediatePropagation() { this.stopped = true; }, ...overrides };
     events.click(event);
+    if (!event.stopped && !event.defaultPrevented && cards.includes(target)) {
+      target.selections++;
+      options.onSelect?.(target);
+    }
     return event;
   }
   for (const entry of cards) {
@@ -71,10 +75,11 @@ function harness(cards, options = {}) {
     };
   }
   vm.runInNewContext(CONTENT, {
+    Date: class extends Date { static now() { return time; } },
     document,
-    window: { innerWidth: 1000, innerHeight: 800 },
+    window: { innerWidth: 1000, innerHeight: 800, location: { href: "https://www.linkedin.com/jobs/search/" },
+      ...(options.scrape ? { LinkedInJobScraper: { scrape: options.scrape } } : {}) },
     MutationObserver: class { observe() {} },
-    Math: Object.assign(Object.create(Math), { random: options.random || (() => 0.5) }),
     clearTimeout: (id) => timers.delete(id),
     setTimeout(callback, delay) {
       delays.push(delay);
@@ -86,6 +91,7 @@ function harness(cards, options = {}) {
       onMessage: { addListener: (callback) => listeners.push(callback) },
       async sendMessage(message) {
         messages.push(message);
+        if (message.type === "KAI_TRACKER_CAPTURE") return { ok: true, result: { status: "researching" } };
         if (options.respond) {
           const response = await options.respond(message, messages.length);
           if (response) return response;
@@ -117,23 +123,66 @@ function harness(cards, options = {}) {
   };
 }
 
-test("clicks real dismiss controls one at a time with a fresh randomized pause", async () => {
+test("a user card selection waits for the matching detail identity and captures once", async () => {
+  const target = card("Mews", "123"); target.title = "Product Builder - Fintech";
+  let details = { jobId: "999", company: target.company, title: target.title, description: "Previous job description" };
+  const app = harness([target], { scrape: () => details });
+  app.states.delete("Mews"); app.click(target, { isTrusted: true }); await app.advance(0);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+  details = { ...details, jobId: "123", jobIdSource: "query" }; await app.advance(200);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+  details = { ...details, jobIdSource: "details", description: "Current description" }; await app.advance(200);
+  await app.advance(200);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+  app.click(target, { isTrusted: true }); await app.advance(200);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+});
+
+test("a trusted card click finishes its capture in a hidden tab without accepting stale details or replaying", async () => {
+  const target = card("Mews", "123"); target.title = "Senior JavaScript Engineer";
+  let details = { jobId: "999", jobIdSource: "details", company: target.company, title: target.title, description: "Previous job description" };
+  const app = harness([target], { scrape: () => details }); app.states.delete("Mews");
+  app.click(target, { isTrusted: true }); await app.advance(0);
+  assert.equal(target.clicks, 1, "the native X ran once after selection");
+  app.document.hidden = true;
+  details = { ...details, jobId: "123" }; await app.advance(1000);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0, "the old description still cannot qualify");
+  details = { ...details, description: "Develop and maintain JavaScript applications and automated tests." };
+  await app.advance(400);
+  const captures = app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE");
+  assert.equal(captures.length, 1); assert.equal(captures[0].job.jobId, "123");
+  assert.equal(app.document.hidden, true);
+  app.events.visibilitychange(); await app.advance(15000);
+  app.document.hidden = false; app.events.visibilitychange(); await app.advance(1000);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+  assert.equal(target.clicks, 1);
+});
+
+test("new job headers cannot capture the previous description or a recycled card identity", async () => {
+  const target = card("Mews", "123");
+  let details = { jobId: "999", company: target.company, title: target.title, description: "Previous description" };
+  const app = harness([target], { scrape: () => details }); app.states.delete("Mews");
+  app.click(target, { isTrusted: true }); details = { ...details, jobId: "123" };
+  await app.advance(1000); assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+  target.setAttribute("data-job-id", "777"); details = { ...details, jobId: "777", description: "Recycled job description" };
+  await app.advance(1000); assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+});
+
+test("synthetic selection and native X controls never trigger research", async () => {
+  const target = card("Mews", "123");
+  const app = harness([target], { scrape: () => ({ jobId: "123", company: target.company, title: target.title, description: "Description" }) });
+  app.states.delete("Mews"); app.click(target, { isTrusted: false }); app.click(target.button, { isTrusted: true });
+  await app.advance(1000); assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+});
+
+test("clicks confirmed duplicate and banned jobs consecutively without dismissal delays", async () => {
   const jobs = [card("Duplicate", "1"), card("Banned", "2"), card("Allowed", "3")];
-  const random = [0, 0.999];
-  const app = harness(jobs, { random: () => random.shift() ?? 0.5 });
+  const app = harness(jobs);
   app.states.set("Banned", "banned");
   app.states.delete("Allowed");
   await app.advance(250);
-  assert.deepEqual(jobs.map((job) => job.clicks), [0, 0, 0]);
-  await app.advance(1499);
-  assert.equal(jobs[0].clicks, 0);
-  await app.advance(1);
-  assert.deepEqual(jobs.map((job) => job.clicks), [1, 0, 0]);
-  await app.advance(4496);
-  assert.equal(jobs[1].clicks, 0);
-  await app.advance(1);
   assert.deepEqual(jobs.map((job) => job.clicks), [1, 1, 0]);
-  assert.deepEqual(app.delays, [250, 1500, 4497]);
+  assert.deepEqual(app.delays, [250, 0, 0]);
   assert.ok(app.messages.every((message) => message.refresh === false));
   app.refresh();
   await app.advance(10000);
@@ -142,37 +191,32 @@ test("clicks real dismiss controls one at a time with a fresh randomized pause",
 
 test("rechecks company classification immediately before clicking", async () => {
   const job = card("Acme", "1");
-  const app = harness([job]);
+  const app = harness([job], { respond(_message, count) {
+    if (count === 2) return { ok: true, result: { companies: [{ company: "Acme", banned: false, duplicate: null }] } };
+  } });
   await app.advance(250);
-  app.states.delete("Acme");
-  await app.advance(3000);
   assert.equal(job.clicks, 0);
   assert.equal(job.getAttribute("data-kai-flow-job-state"), null);
 });
 
-test("does not click recycled or removed cards during the delay", async () => {
+test("does not click cards recycled or removed before the final check completes", async () => {
   for (const change of [(job) => { job.company = "Different"; }, (job) => { job.setAttribute("data-job-id", "2"); }, (job) => { job.isConnected = false; }]) {
     const job = card("Acme", "1");
-    const app = harness([job]);
+    const app = harness([job], { respond(_message, count) { if (count === 2) change(job); } });
     await app.advance(250);
-    change(job);
-    await app.advance(5000);
     assert.equal(job.clicks, 0);
   }
 });
 
-test("skips hidden tabs and resumes with a full pause when visible", async () => {
+test("skips hidden tabs and resumes without a dismissal delay when visible", async () => {
   const job = card("Acme", "1");
   const app = harness([job]);
-  await app.advance(250);
   app.document.hidden = true;
   await app.advance(5000);
   assert.equal(job.clicks, 0);
   app.document.hidden = false;
   app.events.visibilitychange();
-  await app.advance(2999);
-  assert.equal(job.clicks, 0);
-  await app.advance(1);
+  await app.advance(0);
   assert.equal(job.clicks, 1);
 });
 
@@ -205,18 +249,18 @@ test("a failed final check leaves the job untouched", async () => {
   assert.equal(job.clicks, 0);
 });
 
-test("clicking any open card clicks X once, including active jobs, and cancels its automatic attempt", async () => {
+test("clicking any open card selects it before clicking X once, including active jobs", async () => {
   for (const state of ["duplicate", "banned", "active"]) {
     const job = card("Acme", "1");
     const app = harness([job]);
     app.states.set("Acme", state);
-    await app.advance(250);
     const event = app.click(job);
     app.click(job); // A fast second click must not toggle X again.
-    assert.equal(job.clicks, 1, "manual card clicks take effect immediately");
-    assert.equal(app.messages.length, 1, "manual clicks require no company lookup");
-    assert.equal(event.defaultPrevented, true);
-    assert.equal(event.stopped, true);
+    assert.equal(job.clicks, 0, "dismissal waits until native selection finishes");
+    assert.equal(job.selections, 2, "both original card clicks reach LinkedIn");
+    assert.equal(app.messages.length, 0, "manual clicks require no company lookup");
+    assert.equal(event.defaultPrevented, false);
+    assert.equal(event.stopped, false);
     await app.advance(0);
     assert.equal(job.clicks, 1);
     assert.equal(app.click(job).defaultPrevented, false);
@@ -228,7 +272,6 @@ test("clicking any open card clicks X once, including active jobs, and cancels i
 test("direct X clicks are remembered even if LinkedIn leaves the old button in place", async () => {
   const job = card("Acme", "1");
   const app = harness([job]);
-  await app.advance(250);
   job.button.click();
   app.click(job);
   await app.advance(10000);
@@ -261,7 +304,9 @@ test("card clicks leave Undo controls and modified navigation alone", async () =
 test("manual card closing works before classification and when the Sheet is offline", async () => {
   const job = card("Active", "1");
   const app = harness([job], { respond() { throw new Error("Offline"); } });
-  assert.equal(app.click(job).defaultPrevented, true);
+  assert.equal(app.click(job).defaultPrevented, false);
+  assert.equal(job.selections, 1);
+  await app.advance(0);
   assert.equal(job.clicks, 1);
   assert.equal(app.messages.length, 0);
   await app.advance(10000);
@@ -275,11 +320,36 @@ test("a manual card click during an automatic check still clicks X only once", a
   const app = harness([job], { respond(_message, count) {
     if (count === 2) return new Promise((resolve) => { finishCheck = resolve; });
   } });
-  await app.advance(3250);
+  await app.advance(250);
   assert.equal(typeof finishCheck, "function");
   app.click(job);
+  await app.advance(0);
   assert.equal(job.clicks, 1);
   finishCheck();
   await app.advance(10000);
+  assert.equal(job.clicks, 1);
+});
+
+test("selection that replaces or recycles the card cannot dismiss another job", async () => {
+  for (const onSelect of [
+    (job) => { job.isConnected = false; },
+    (job) => { job.setAttribute("data-job-id", "replacement"); }
+  ]) {
+    const job = card("Acme", "1");
+    const app = harness([job], { onSelect });
+    app.click(job);
+    await app.advance(0);
+    assert.equal(job.selections, 1);
+    assert.equal(job.clicks, 0);
+  }
+});
+
+test("a direct X click before deferred card dismissal is never repeated", async () => {
+  const job = card("Acme", "1");
+  const app = harness([job]);
+  app.click(job);
+  job.button.click();
+  await app.advance(0);
+  assert.equal(job.selections, 1);
   assert.equal(job.clicks, 1);
 });

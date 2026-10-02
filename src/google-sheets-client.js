@@ -11,7 +11,7 @@
   const MAX_COMPANY_SNAPSHOT_SIZE = 20_000;
   const MAX_RECEIPTS = 256;
   const SNAPSHOT_TTL_MS = 30_000;
-  const FIELD_LIMITS = { company: 1000, jobTitle: 1000, jobDescription: 49000, applyUrl: 4096, profile: 200 };
+  const FIELD_LIMITS = { company: 1000, jobTitle: 1000, jobDescription: 49000, applyUrl: 4096, profile: 200, info: 49000 };
   const REQUIRED_HEADERS = ["Date", "Company", "Job Title", "Job Description", "Apply URL", "Profile", "Status", "Salary", "Info"];
   const MANAGED_HEADERS = new Map([[10, "Trashed"], [11, "Added By"], [12, "Applied By"]]);
   const RESTRICTED_STATUSES = new Set([
@@ -45,6 +45,7 @@
       jobTitle: clean(raw.jobTitle ?? raw.title, "jobTitle", FIELD_LIMITS.jobTitle),
       jobDescription: clean(raw.jobDescription ?? raw.description, "jobDescription", FIELD_LIMITS.jobDescription),
       applyUrl: clean(raw.applyUrl, "applyUrl", FIELD_LIMITS.applyUrl),
+      info: clean(raw.info, "info", FIELD_LIMITS.info),
       profile: clean(profile, "profile", FIELD_LIMITS.profile)
     };
     if (!job.company || !job.jobTitle || !job.jobDescription) {
@@ -402,6 +403,7 @@
         jobDescription: String(row?.[3] ?? "").trim(),
         applyUrl: String(row?.[4] ?? "").trim(),
         profile: String(row?.[5] ?? "").trim(),
+        info: String(row?.[8] ?? "").trim(),
         status: normalizeStatus(row?.[6]),
         trashed: trashMarked(row?.[10]),
         addedBy: String(row?.[11] ?? "").trim(),
@@ -581,7 +583,7 @@
 
     async function fingerprint(config, job) {
       const input = JSON.stringify([config.target.spreadsheetId, config.target.sheetGid,
-        normalizeCompany(job.company), job.jobTitle, job.jobDescription, job.applyUrl, job.profile]);
+        normalizeCompany(job.company), job.jobTitle, job.jobDescription, job.applyUrl, job.profile, job.info]);
       const digest = await cryptoImpl.subtle.digest("SHA-256", new TextEncoder().encode(input));
       return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, "0")).join("");
     }
@@ -604,7 +606,7 @@
 
     function jobMatches(job, input) {
       return normalizeCompany(job.company) === normalizeCompany(input.company) && job.jobTitle === input.jobTitle &&
-        job.jobDescription === input.jobDescription && job.applyUrl === input.applyUrl && job.profile === input.profile;
+        job.jobDescription === input.jobDescription && job.applyUrl === input.applyUrl && job.profile === input.profile && job.info === input.info;
     }
 
     async function exactJob(config, sheetTitle, rowNumber) {
@@ -659,7 +661,7 @@
           valueInputOption: "RAW",
           data: [{ range, majorDimension: "ROWS", values: [[
             "", job.company, job.jobTitle, job.jobDescription, job.applyUrl, job.profile,
-            "added", "", "", "", "", "Job tracker", ""
+            "added", "", job.info, "", "", "Job tracker", ""
           ]] }]
         } });
       } catch (error) {

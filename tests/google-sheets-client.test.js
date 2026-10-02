@@ -140,20 +140,22 @@ async function configure(h, overrides = {}) {
   return h.client.configure({ credentials: CREDENTIALS, sheetUrl: SHEET_URL, sheetGid: String(GID), ...overrides });
 }
 
-test("manifest keeps its identity and grants only LinkedIn plus official Google API hosts", () => {
+test("manifest keeps its identity and allows only Google, LinkedIn and the fixed local research service", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json")));
   const identity = createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)
     .replace(/[0-9a-f]/gu, (hex) => String.fromCharCode(97 + parseInt(hex, 16)));
   assert.equal(identity, ID);
-  assert.equal(manifest.version, "0.4.3");
+  assert.equal(manifest.version, require("../package.json").version);
+  assert.equal(manifest.commands["toggle-job-collection"].suggested_key.default, "Ctrl+Shift+U");
+  assert.ok(manifest.content_scripts[0].js.indexOf("src/job-collector.js") < manifest.content_scripts[0].js.indexOf("src/content.js"));
   assert.equal(Object.hasOwn(manifest, "optional_host_permissions"), false);
-  assert.deepEqual(manifest.host_permissions.slice(0, 2), [
-    "https://oauth2.googleapis.com/*", "https://sheets.googleapis.com/*"
-  ]);
-  assert.equal(manifest.host_permissions.some((value) => /localhost|127\.|ngrok|\*:\/\//u.test(value)), false);
-  assert.match(manifest.content_security_policy.extension_pages, /oauth2\.googleapis\.com/);
-  assert.match(manifest.content_security_policy.extension_pages, /sheets\.googleapis\.com/);
-  assert.doesNotMatch(SOURCE + BACKGROUND, /WebSocket|\/api\/tracker|tracker-pair|127\.0\.0\.1|ngrok/iu);
+  assert.equal(manifest.host_permissions.some(value => value.includes("googleapis.com")), false);
+  assert.deepEqual(manifest.host_permissions.filter((value) => value.startsWith("http:")), ["http://127.0.0.1:8787/*"]);
+  assert.equal(manifest.host_permissions.some((value) => /localhost|ngrok|\*:\/\//u.test(value)), false);
+  assert.doesNotMatch(manifest.content_security_policy.extension_pages, /googleapis\.com/);
+
+  assert.match(manifest.content_security_policy.extension_pages, /http:\/\/127\.0\.0\.1:8787/);
+  assert.doesNotMatch(SOURCE + BACKGROUND, /WebSocket|\/api\/tracker|tracker-pair|ngrok/iu);
   assert.equal(fs.existsSync(path.join(ROOT, "src/kai-flow-client.js")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "src/tracker-security.js")), false);
 });
@@ -273,6 +275,7 @@ test("nonblank profile is rejected when the live Sheet options are empty", async
 });
 
 test("an uncertain write is reconciled from the local receipt without writing twice", async () => {
+  const researchedJob = { ...JOB, info: "Application email: hiring@example.com (job description) | Fully remote confirmed: Work fully remotely." };
   let writes = 0;
   let rows = [HEADERS];
   const h = harness({
@@ -288,10 +291,11 @@ test("an uncertain write is reconciled from the local receipt without writing tw
     }
   });
   await configure(h);
-  await assert.rejects(h.client.saveJob(JOB), { code: "TRACKER_SAVE_UNCONFIRMED" });
-  const replay = await h.client.saveJob(JOB);
+  await assert.rejects(h.client.saveJob(researchedJob), { code: "TRACKER_SAVE_UNCONFIRMED" });
+  const replay = await h.client.saveJob(researchedJob);
   assert.equal(replay.replayed, true);
   assert.equal(writes, 1);
+  assert.equal(h.getRows()[1][8], researchedJob.info);
 });
 
 test("simultaneous saves are serialized and each re-reads the Sheet before choosing a row", async () => {
