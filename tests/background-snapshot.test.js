@@ -17,7 +17,7 @@ const successfulResearch = async (_url, options) => ({ ok: true, json: async () 
 
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
-function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true } = {}) {
+function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [] } = {}) {
   const calls = [];
   const timers = new Map();
   let timerId = 0;
@@ -32,15 +32,15 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
     async getStatus() { calls.push({ action: "status" }); return { configured: true }; },
     async configure() { calls.push({ action: "configure" }); return { configured: true }; },
     async clearConfiguration() { calls.push({ action: "clear" }); return { configured: false }; },
-    async getOptions() { return { profiles: [] }; },
+    async getOptions() { return { profiles }; },
     async lookupDuplicate() { calls.push({ action: "duplicate" }); return { duplicate: null }; },
     async getCompanies(options) {
       calls.push({ action: "companies", options: clone(options) });
       const response = snapshots[Math.min(snapshotCursor++, snapshots.length - 1)];
       return typeof response === "function" ? response(options) : clone(response);
     },
-    async saveJob(job) {
-      calls.push({ action: "save", company: job.company });
+    async saveJob(job, options) {
+      calls.push({ action: "save", company: job.company, options: clone(options) });
       if (saveError) throw saveError;
       return { status: "inserted", job: { company: job.company, rowNumber: 10 } };
     }
@@ -85,6 +85,7 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
     KaiLocalStoreClient: { create() { return client; } }
   });
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/capture-policy.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "src/profile-routing.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/research-client.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/job-collector.js"), "utf8"), context);
   vm.runInContext(BANNED, context);
@@ -135,6 +136,32 @@ test("closed or unverified application controls cannot reach a Sheet save", asyn
     assert.equal(response.result.status, "skipped");
   }
   assert.equal(h.calls.some((call) => call.action === "save"), false);
+});
+
+test("popup, card click, collector and shortcut all save the search-selected UK profile as Pending", async () => {
+  for (const path of ["popup", "card", "collector", "shortcut"]) {
+    const target = { ...engineeringJob, selectedRegion: "uk", selectedRegionSource: "search-control" };
+    const h = harness({ profiles: ["kevin", "michal-stefanow-2page"], researchFetch: successfulResearch, stored: { kaiFlowSelectedProfile: "kevin" } });
+    await settle();
+    if (path === "shortcut") {
+      const send = h.chrome.tabs.sendMessage;
+      h.chrome.tabs.sendMessage = async (id, message) => message.type === "SCRAPE_LINKEDIN_JOB" ? { ok: true, data: target } : send(id, message);
+      await h.context.runScrapeAndSaveShortcut({ id: 7, url: target.sourceUrl });
+    } else if (path === "collector") {
+      const tab = { id: 7, url: target.sourceUrl };
+      await h.context.toggleJobCollection(tab);
+      const runId = h.sessionStored.jobTrackerCollectionV1.id;
+      const response = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: target, runId }, "linkedin", { tab });
+      assert.equal(response.response.ok, true);
+    } else {
+      const response = await h.send({ type: path === "popup" ? "KAI_TRACKER_SAVE" : "KAI_TRACKER_CAPTURE", job: target, profile: "kevin" }, path === "popup" ? "popup" : "linkedin");
+      assert.equal(response.ok, true);
+    }
+    await vm.runInContext("researchClient.poll()", h.context);
+    const saves = h.calls.filter((call) => call.action === "save");
+    assert.equal(saves.length, 1, path); assert.equal(saves[0].options.profile, "michal-stefanow-2page", path);
+    assert.equal(saves[0].options.trashed, undefined, path); assert.equal(h.stored.kaiFlowSelectedProfile, "kevin");
+  }
 });
 
 test("all capture paths skip Business Analyst before duplicate, remote or Easy Apply research", async () => {
@@ -293,6 +320,34 @@ test("automated capture claims each job durably once, including concurrent messa
   assert.equal(replay.response.result.status, "skipped"); assert.equal(resumed.calls.some((entry) => entry.action === "save"), false);
   const changed = await resumed.sendRaw({ type: "KAI_TRACKER_RUN_STATE" }, "linkedin", { tab, url: tab.url + "?keywords=different" });
   assert.equal(changed.response.result.state, null); assert.equal(resumed.sessionStored.jobTrackerCollectionV1, null);
+});
+test("automated collection accepts successive offline research captures without falsely counting saved jobs", async () => {
+  const requests = [];
+  const h = harness({ researchFetch: async (_url, options) => {
+    requests.push(JSON.parse(options.body));
+    throw new Error("Research worker connection refused.");
+  } });
+  await settle();
+  const tab = { id: 42, url: engineeringJob.sourceUrl };
+  await h.context.toggleJobCollection(tab);
+  const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  for (const [jobId, company] of [["123", "First Company"], ["456", "Second Company"]]) {
+    const captured = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, jobId, company }, runId }, "linkedin", { tab });
+    assert.equal(captured.response.ok, true);
+    assert.equal(captured.response.result.status, "researching"); assert.equal(captured.response.result.queued, true);
+    assert.equal(captured.response.result.requestId, requests.at(-1).requestId);
+  }
+  const state = h.sessionStored.jobTrackerCollectionV1;
+  assert.equal(state.id, runId); assert.deepEqual(state.visited, ["123", "456"]);
+  assert.deepEqual(state.counts, { saved: 0, researching: 2, skipped: 0 });
+  assert.equal(h.stored.jobTrackerResearchV1.length, 2);
+  assert.ok(h.stored.jobTrackerResearchV1.every((record) => record.state === "requesting" && !record.terminal));
+  assert.equal(new Set(requests.map((request) => request.requestId)).size, 2);
+  assert.equal(h.calls.filter((entry) => entry.action === "save").length, 0);
+
+  const replay = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, company: "First Company" }, runId }, "linkedin", { tab });
+  assert.equal(replay.response.result.status, "skipped"); assert.equal(requests.length, 2);
+  assert.equal(h.sessionStored.jobTrackerCollectionV1.counts.researching, 2);
 });
 test("an uncertain automatic write remains claimed after failure and cannot be replayed on worker recovery", async () => {
   const sessionStored = {}, tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };

@@ -62,7 +62,7 @@ function createPopup({
   banned = []
 } = {}) {
   const ids = [
-    "scrape", "copyJson", "saveSheet", "openApplyUrl", "refreshConnection", "profile",
+    "scrape", "copyJson", "saveSheet", "openApplyUrl", "refreshConnection", "folderSettings", "profile",
     "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description",
     "sheetSettings", "credentialsFile", "credentialsStatus", "sheetUrl", "sheetGid",
     "saveSheetSettings", "removeSheetSettings", "bannedSettings", "bannedCompanies", "bannedStatus",
@@ -92,6 +92,7 @@ function createPopup({
   const chrome = {
     runtime: {
       id: extensionId,
+      getURL: file => `chrome-extension://${extensionId}/${file}`,
       onMessage: { addListener() {} },
       async sendMessage(message) {
         messages.push(structuredClone(message));
@@ -131,6 +132,7 @@ function createPopup({
       async set(values) { storageWrites.push(structuredClone(values)); Object.assign(storage, values); }
     } },
     tabs: {
+      async create(options) { injected.push(structuredClone(options)); },
       async query() { return [{ id: 1, url: "https://www.linkedin.com/jobs/view/123" }]; },
       async sendMessage(tabId, message) {
         assert.equal(tabId, 1);
@@ -153,6 +155,7 @@ function createPopup({
     Blob,
     structuredClone
   });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "src/profile-routing.js"), "utf8"), context);
   vm.runInContext(SOURCE, context, { filename: "popup-kai-flow.js" });
   return {
     elements, messages, storageWrites, clipboard, injected, confirmations,
@@ -170,9 +173,9 @@ async function settle() {
 
 test("popup contains direct Google Sheet settings and no pairing or server controls", () => {
   assert.doesNotMatch(HTML, /credentialsFile|sheetSettings|Destination tab gid/);
-  assert.match(HTML, /Jobs are saved in Kai Flow/);
+  assert.match(HTML, /Jobs are saved directly in your ApplicantAlly data folder/);
   assert.doesNotMatch(HTML + SOURCE, /pairing|connectServer|Server connection|permissions\.request|\/api\/tracker/iu);
-  assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/popup-kai-flow.js"]);
+  assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/profile-routing.js", "src/popup-kai-flow.js"]);
   assert.doesNotMatch(SOURCE, /fetch\s*\(/u);
 });
 
@@ -188,7 +191,24 @@ test("configured popup loads Sheet profiles and saves the captured job directly"
   const save = app.messages.find((message) => message.type === "KAI_TRACKER_SAVE");
   assert.deepEqual(save.job, JOB);
   assert.equal(save.profile, "");
-  assert.match(app.elements.status.textContent, /Saved to Kai Flow · Pending/);
+  assert.match(app.elements.status.textContent, /Saved to ApplicantAlly · Pending/);
+});
+
+test("UK search selects Michal, Colombia/LATAM select Jose, and US waits for Kevin/Jagjeet analysis", async () => {
+  const profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"];
+  for (const [selectedRegion, expected] of [["uk", "michal-stefanow-2page"], ["colombia", "jose-ibero-2page"], ["latam", "jose-ibero-2page"], ["us", "__automatic_profile__"]]) {
+    const app = createPopup({ job: { ...JOB, selectedRegion, selectedRegionSource: "search-control" }, profiles, selectedProfile: "kevin" });
+    await app.start(); assert.equal(app.elements.profile.value, expected); assert.equal(app.elements.profile.disabled, true);
+    assert.equal(app.elements.saveSheet.disabled, false); assert.equal(app.storageWrites.length, 0);
+    await app.click("saveSheet");
+    assert.equal(app.messages.find((message) => message.type === "KAI_TRACKER_SAVE").profile, selectedRegion === "us" ? "" : expected);
+  }
+});
+
+test("missing required regional profile blocks capture instead of saving another candidate", async () => {
+  const app = createPopup({ job: { ...JOB, selectedRegion: "uk" }, profiles: ["kevin"], selectedProfile: "kevin" });
+  await app.start(); assert.equal(app.elements.profile.value, ""); assert.equal(app.elements.saveSheet.disabled, true);
+  assert.match(app.elements.status.textContent, /Michal Stefanow is unavailable/);
 });
 
 test("unconfigured popup opens settings and cannot save", async () => {
@@ -196,8 +216,10 @@ test("unconfigured popup opens settings and cannot save", async () => {
   await app.start();
   assert.equal(app.elements.sheetSettings.open, false);
   assert.equal(app.elements.saveSheet.disabled, true);
-  assert.match(app.elements.connectionStatus.textContent, /Start Kai Flow/i);
+  assert.match(app.elements.connectionStatus.textContent, /Choose ApplicantAlly folder/i);
   assert.equal(app.messages.some((message) => message.type === "KAI_TRACKER_OPTIONS"), false);
+  await app.click("folderSettings");
+  assert.equal(app.injected.at(-1).url, "chrome-extension://lomiekljcjnlhfpklnjmmhomknfigofn/folder.html");
 });
 
 test("Sheet duplicates and banned companies block Save and render concise text", async () => {
@@ -207,7 +229,7 @@ test("Sheet duplicates and banned companies block Save and render concise text",
   } });
   await duplicateApp.start();
   assert.equal(duplicateApp.elements.saveSheet.disabled, true);
-  assert.match(duplicateApp.elements.duplicate.textContent, /Already in Kai Flow/);
+  assert.match(duplicateApp.elements.duplicate.textContent, /Already in ApplicantAlly/);
   assert.doesNotMatch(duplicateApp.elements.duplicate.textContent, /<img|onerror/iu);
 
   const bannedApp = createPopup({ banned: ["Example Company"] });

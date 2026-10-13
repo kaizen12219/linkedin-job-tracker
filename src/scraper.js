@@ -40,6 +40,7 @@
     const descriptionResult = extractDescription(doc, root);
     const applyResult = extractApplyUrl(doc, root, sourceUrl);
     const metadata = extractCaptureMetadata(root, descriptionResult.value, sourceUrl, titleResult.value);
+    const searchRegion = globalThis.JobProfileRouting?.selectedSearchRegion(doc, sourceUrl) || { region: "", source: "" };
 
     const payload = {
       title: titleResult.value,
@@ -47,6 +48,8 @@
       description: descriptionResult.value,
       applyUrl: applyResult.value,
       ...metadata,
+      selectedRegion: searchRegion.region,
+      selectedRegionSource: searchRegion.source,
       sourceUrl,
       scrapedAt: new Date().toISOString(),
       confidence: {

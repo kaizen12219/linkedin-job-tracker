@@ -1,0 +1,11 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ApplicantAlly folder settings</title><link rel="stylesheet" href="popup.css"></head>
+<body class="folder-settings"><main>
+  <h1>ApplicantAlly data folder</h1>
+  <p>Choose your ApplicantAlly folder, or its <strong>data/workspace</strong> folder. Jobs and profiles are read directly from this folder, even when ApplicantAlly is closed.</p>
+  <p>Open the updated app once before selecting its folder. AI qualification uses the existing research worker.</p>
+  <p id="folderStatus" role="status">Checking folder access…</p>
+  <div class="actions"><button id="chooseFolder" type="button">Choose folder</button><button id="allowFolder" type="button" class="secondary">Allow access</button><button id="forgetFolder" type="button" class="secondary">Forget folder</button></div>
+</main><script src="src/folder-access.js"></script><script src="src/folder-settings.js"></script></body>
+</html>

@@ -26,6 +26,65 @@ test("clear excluded titles are rejected without approving any engineering-looki
   }
 });
 
+test("explicit engineering titles above Senior are skipped before research and cannot be saved", () => {
+  for (const title of ["Staff Software Engineer", "Senior Staff Engineer", "Principal Software Engineer",
+    "Distinguished Engineer", "Engineering Fellow", "Software Engineering Fellow", "Staff Frontend Developer",
+    "Principal Data Engineer", "Staff SRE", "Principal Technical Architect", "Software Engineer – Staff",
+    "Software Engineer (Principal)", "SRE, Staff", "Principal Engineer - Backend", "Principal C# Developer",
+    "Staff Golang Developer", "Software Engineer Staff (Backend)", "Director of Engineering", "Head of Engineering", "CTO"]) {
+    const target = { ...job, title };
+    assert.ok(policy.roleSkipReason(target), title);
+    assert.equal(policy.needsResearch(target), false, title);
+    assert.equal(policy.verifiedJob(target, { ...result, title, application: { ...application, title } }), null, title);
+  }
+});
+
+test("a job explicitly assigning this position an above-Senior level is excluded even with an ordinary title", () => {
+  for (const level of [
+    "This position is equivalent to Staff Engineer level.",
+    "This is a Principal-level engineering position.",
+    "The role is at Staff level on our engineering ladder.",
+    "You will join as a Distinguished Engineer.",
+    "This Software Engineer IV position maps to Principal Engineer on our career ladder."
+  ]) {
+    const target = { ...job, title: "Software Engineer", description: `${duties} ${level}` };
+    assert.ok(policy.roleSkipReason(target), level);
+    assert.equal(policy.needsResearch(target), false, level);
+    assert.equal(policy.verifiedJob(target, { ...result, title: target.title,
+      application: { ...application, title: target.title } }), null, level);
+  }
+});
+
+test("Senior and ambiguous engineering titles remain eligible without confusing unrelated words for a level", () => {
+  for (const [title, description] of [
+    ["Junior Software Engineer", duties], ["Software Engineer", duties], ["Mid-level Software Engineer", duties],
+    ["Senior Software Engineer", duties], ["Lead Software Engineer", duties], ["Tech Lead", duties],
+    ["Technical Architect", duties], ["Software Engineer IV", duties], ["Software Engineer L6", duties],
+    ["Software Engineer – Staffing Agency", duties], ["Software Engineer – principal product", duties], ["Senior Software Engineer - CTO Office", duties],
+    ["Software Engineer", `${duties} Collaborate with Staff and Principal Engineers on implementation decisions.`],
+    ["Senior Software Engineer", `${duties} Work with our Distinguished Engineer and Engineering Fellow.`],
+    ["Software Engineer", `${duties} This position reports to our Principal Engineer.`],
+    ["Software Engineer", `${duties} Our team includes Staff Engineers and you will learn from them.`]
+  ]) {
+    const target = { ...job, title, description, isEasyApply: false };
+    assert.equal(policy.roleSkipReason(target), "", title);
+    assert.equal(policy.needsResearch(target), true, title);
+    assert.ok(policy.verifiedJob(target, { ...result, title, application: undefined }), title);
+  }
+});
+
+test("AI classification of above-Senior duties cannot save a generic or Lead engineering title", () => {
+  const evidence = "Set the company-wide engineering strategy and technical standards across multiple engineering teams.";
+  for (const title of ["Software Engineer", "Lead Software Engineer", "Technical Architect"]) {
+    const target = { ...job, title, description: evidence, isEasyApply: false };
+    assert.equal(policy.roleSkipReason(target), "", title);
+    assert.equal(policy.needsResearch(target), true, title);
+    assert.equal(policy.verifiedJob(target, { ...result, title, application: undefined,
+      role: { eligible: false, category: "software-development", evidence,
+        reason: "Above-Senior scope: company-wide technical strategy across multiple teams." } }), null, title);
+  }
+});
+
 test("Senior JavaScript Engineer and .NET Developer require GPT duties evidence on both Apply paths", () => {
   for (const [title, evidence] of [["Senior JavaScript Engineer", "Design and build JavaScript services, maintain production APIs and write automated tests."],
     [".NET Developer", "Develop C# and .NET applications, implement backend services and maintain automated tests."]]) {

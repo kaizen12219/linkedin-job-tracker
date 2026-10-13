@@ -9,28 +9,113 @@ const role = { eligible: true, category: "software-development", evidence: dutie
 const job = { company: "Mews", title: "Product Builder - Fintech", description: `${duties} This role is fully remote. Apply to hiring@mews.com.`, workplaceType: "remote", isEasyApply: true,
   sourceUrl: "https://www.linkedin.com/jobs/view/123", applyUrl: "https://www.linkedin.com/jobs/view/123", jobId: "123", privateKey: "do-not-send", profile: "do-not-send" };
 const result = { decision: "save", company: job.company, title: job.title, role, application: { url: "https://mews.com/careers/jobs/123", company: job.company, title: job.title, applicationsOpen: true, free: true, evidence: "Open application form observed with submit button." } };
-function harness({ stored = {}, saveError = null, failPostOnce = false } = {}) {
-  const calls = [], saves = [], outcomes = [], remembered = [];
+function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
+  postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
+  profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
+  const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [];
+  let researchWrites = 0;
   let state = { configured: true, sheetUrl: "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1" };
   let response = { state: "completed", completedAt: new Date().toISOString(), result };
   let banned = false;
-  const storage = { async get(key) { return { [key]: clone(stored[key]) }; }, async set(values) { Object.assign(stored, clone(values)); }, async remove(key) { delete stored[key]; } };
-  const alarms = { async create() {}, async clear() {} };
+  const storage = { async get(key) { return { [key]: clone(stored[key]) }; }, async set(values) {
+    if (failClientKeyWrite && Object.hasOwn(values, "jobTrackerResearchClientV1")) throw new Error("Browser client key storage write failed.");
+    if (Object.hasOwn(values, "jobTrackerResearchV1") && ++researchWrites === failResearchWriteAt) throw new Error("Research storage write failed.");
+    Object.assign(stored, clone(values));
+  }, async remove(key) { delete stored[key]; } };
+  const alarms = { async create(name, options) { alarmCalls.push({ name, options: clone(options) }); }, async clear(name) { alarmCalls.push({ name, cleared: true }); } };
   const fetchImpl = async (url, options) => {
     calls.push({ url, options: { ...options, signal: undefined } });
+    if (networkError) throw networkError;
     if (options.method === "POST") {
       if (failPostOnce) { failPostOnce = false; throw new Error("connection lost"); }
+      if (postStatus >= 400) return { ok: false, status: postStatus, json: async () => {
+        if (postJsonError) throw postJsonError;
+        return { error: "Research service rejected the request." };
+      } };
       return { ok: true, json: async () => ({ state: "researching" }) };
     }
     return { ok: true, json: async () => clone(response) };
   };
-  const sheetClient = { async getStatus() { return clone(state); }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return { status: "inserted" }; } };
+  const sheetClient = { async getStatus() { return clone(state); }, async getOptions() { return { profiles: clone(profiles) }; }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return { status: "inserted" }; } };
   const context = vm.createContext({ URL, AbortSignal, Uint8Array, Date, fetch: fetchImpl, crypto, chrome: { storage: { local: storage }, alarms, runtime: { id: "stable-id" } } });
-  for (const name of ["capture-policy", "research-client"]) vm.runInContext(fs.readFileSync(require.resolve(`../src/${name}.js`), "utf8"), context);
+  for (const name of ["capture-policy", "profile-routing", "research-client"]) vm.runInContext(fs.readFileSync(require.resolve(`../src/${name}.js`), "utf8"), context);
   const client = context.JobResearchClient.create({ storage, fetchImpl, cryptoImpl: crypto, alarms, extensionId: "stable-id", sheetClient,
     bannedCompanies: { async has() { return banned; } }, onSaved: async (company) => remembered.push(company), onOutcome: async (_record, message) => outcomes.push(message) });
-  return { client, stored, calls, saves, outcomes, remembered, setResponse(value) { response = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
+  return { client, stored, calls, saves, outcomes, remembered, alarmCalls, setResponse(value) { response = value; },
+    setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
 }
+test("an unavailable research worker queues a durable capture and recovers with the same ID after restart", async () => {
+  const first = harness({ networkError: new Error("connection refused") });
+  const started = await first.client.start(job, { profile: "Candidate", tabId: 42 });
+  assert.equal(started.status, "researching"); assert.equal(started.queued, true);
+  assert.equal(first.stored.jobTrackerResearchV1[0].state, "requesting");
+  assert.equal(first.stored.jobTrackerResearchV1[0].terminal, undefined);
+  assert.equal(first.stored.jobTrackerResearchV1[0].requestId, started.requestId);
+  assert.equal(first.alarmCalls.at(-1).options.periodInMinutes, 0.5);
+  const replay = await first.client.start(job, { profile: "Candidate" });
+  assert.equal(replay.queued, true); assert.equal(replay.replayed, true);
+  assert.equal(replay.requestId, started.requestId); assert.equal(first.calls.length, 1);
+  assert.equal(first.saves.length, 0);
+
+  const resumed = harness({ stored: first.stored });
+  await resumed.client.poll(); await resumed.client.poll();
+  assert.equal(JSON.parse(resumed.calls[0].options.body).requestId, started.requestId);
+  assert.equal(resumed.saves.length, 1); assert.equal(resumed.saves[0].options.requestId, started.requestId);
+  assert.equal(resumed.saves[0].options.profile, "Candidate");
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "saved");
+});
+test("timeouts and temporary HTTP failures retain accepted research requests for retry", async () => {
+  for (const status of [408, 429, 502, 503, 504]) {
+    const first = harness({ postStatus: status });
+    const started = await first.client.start(job);
+    assert.equal(started.status, "researching", String(status)); assert.equal(started.queued, true, String(status));
+    assert.equal(first.stored.jobTrackerResearchV1[0].state, "requesting", String(status));
+    assert.equal(first.stored.jobTrackerResearchV1[0].terminal, undefined, String(status));
+    const resumed = harness({ stored: first.stored }); await resumed.client.poll();
+    assert.equal(JSON.parse(resumed.calls[0].options.body).requestId, started.requestId, String(status));
+    assert.equal(resumed.saves.length, 1, String(status));
+  }
+  const timeout = harness({ networkError: Object.assign(new Error("Request timed out."), { name: "TimeoutError" }) });
+  const queued = await timeout.client.start(job);
+  assert.equal(queued.queued, true); assert.equal(timeout.stored.jobTrackerResearchV1[0].state, "requesting");
+});
+test("a rejected research request fails explicitly rather than masquerading as a queued capture", async () => {
+  const h = harness({ postStatus: 422 });
+  await assert.rejects(h.client.start(job), (error) => error.status === 422 && error.retryableResearch !== true);
+  assert.equal(h.stored.jobTrackerResearchV1[0].terminal, true); assert.equal(h.stored.jobTrackerResearchV1[0].state, "failed");
+  await h.client.poll(); assert.equal(h.calls.length, 1); assert.equal(h.saves.length, 0);
+});
+test("a temporary HTTP failure with a non-JSON response still queues safely", async () => {
+  const h = harness({ postStatus: 503, postJsonError: new SyntaxError("Unexpected HTML error page.") });
+  const queued = await h.client.start(job);
+  assert.equal(queued.status, "researching"); assert.equal(queued.queued, true);
+  assert.equal(h.stored.jobTrackerResearchV1[0].state, "requesting"); assert.equal(h.saves.length, 0);
+});
+test("research storage failures before or after submission are not swallowed as service outages", async () => {
+  for (const failResearchWriteAt of [1, 2]) {
+    const h = harness({ failResearchWriteAt });
+    await assert.rejects(h.client.start(job), /Research storage write failed/);
+    assert.equal(h.calls.length, failResearchWriteAt - 1);
+    assert.equal(h.saves.length, 0);
+    if (failResearchWriteAt === 2) assert.equal(h.stored.jobTrackerResearchV1[0].state, "requesting");
+  }
+  const keyFailure = harness({ failClientKeyWrite: true });
+  await assert.rejects(keyFailure.client.start(job), /Browser client key storage write failed/);
+  assert.equal(keyFailure.calls.length, 0); assert.equal(keyFailure.saves.length, 0);
+});
+test("an offline poll checks the worker once instead of blocking behind every pending capture", async () => {
+  for (const pendingState of ["requesting", "researching"]) {
+    const h = harness();
+    await h.client.start(job);
+    await h.client.start({ ...job, jobId: "456", sourceUrl: "https://www.linkedin.com/jobs/view/456", company: "Other Company" });
+    for (const record of h.stored.jobTrackerResearchV1) record.state = pendingState;
+    h.calls.length = 0; h.setNetworkError(new Error("connection refused"));
+    await h.client.poll();
+    assert.equal(h.calls.length, 1, pendingState); assert.equal(h.saves.length, 0);
+    assert.equal(h.stored.jobTrackerResearchV1.length, 2);
+    assert.ok(h.stored.jobTrackerResearchV1.every((record) => !record.terminal && record.state === pendingState));
+  }
+});
 test("a local outage retries the same capture after worker recovery without duplicating it", async () => {
   const first = harness({ saveError: Object.assign(new Error("offline"), { code: "LOCAL_STORE_UNAVAILABLE" }) });
   const started = await first.client.start(job, { profile: "Candidate" }); await first.client.poll();
@@ -56,6 +141,24 @@ test("research persists first, sends only public job fields, then writes verifie
   assert.deepEqual(h.remembered, ["Mews"]); assert.equal(h.stored.jobTrackerResearchV1[0].state, "saved");
 });
 
+test("model-capacity backoff remains pending until verified research completes with the frozen US profile routing", async () => {
+  const h = harness();
+  const started = await h.client.start({ ...job, selectedRegion: "us", profileRoutingVersion: 1 });
+  const routing = clone(h.stored.jobTrackerResearchV1[0].profileRouting);
+  h.setResponse({ state: "queued", retryableResearch: true, retryAt: Date.now() + 60_000,
+    retryCount: 2, error: "Selected model is at capacity." });
+  await h.client.poll(); await h.client.poll();
+  assert.equal(h.saves.length, 0); assert.equal(h.outcomes.length, 0);
+  assert.notEqual(h.stored.jobTrackerResearchV1[0].terminal, true);
+  assert.deepEqual(h.stored.jobTrackerResearchV1[0].profileRouting, routing);
+  h.setResponse({ state: "completed", completedAt: new Date().toISOString(),
+    result: { ...result, experience: { minimumYears: null, scope: "ordinary", evidence: duties } } });
+  await h.client.poll(); await h.client.poll();
+  assert.equal(h.saves.length, 1);
+  assert.equal(h.saves[0].options.requestId, started.requestId);
+  assert.equal(h.saves[0].options.profile, "jagjeet");
+});
+
 test("excluded roles never submit research and legacy pending exclusions cannot poll or write", async () => {
   const h = harness();
   assert.equal((await h.client.start({ ...job, title: "Business Analyst", workplaceType: "hybrid" })).status, "skipped");
@@ -68,6 +171,68 @@ test("excluded roles never submit research and legacy pending exclusions cannot 
   assert.match(h.outcomes[0], /outside software engineering/);
 });
 
+test("above-Senior title exclusions never submit and existing queued captures cannot poll or save", async () => {
+  for (const title of ["Staff Software Engineer", "Senior Staff Engineer", "Principal Software Engineer",
+    "Distinguished Engineer", "Engineering Fellow", "Staff SRE", "Principal Technical Architect",
+    "Software Engineer – Staff", "Software Engineer (Principal)", "SRE, Staff", "Director of Engineering", "Head of Engineering", "CTO"]) {
+    const h = harness();
+    const started = await h.client.start({ ...job, title });
+    assert.equal(started.status, "skipped", title);
+    assert.equal(h.calls.length, 0, title);
+    assert.equal(h.saves.length, 0, title);
+    assert.equal(h.stored.jobTrackerResearchV1, undefined, title);
+  }
+  for (const pendingState of ["requesting", "researching", "waiting-save"]) {
+    const first = harness();
+    await first.client.start(job, { profile: "kevin" });
+    const record = first.stored.jobTrackerResearchV1[0];
+    record.job.title = "Staff Software Engineer";
+    record.state = pendingState;
+    const resumed = harness({ stored: first.stored });
+    await resumed.client.poll(); await resumed.client.poll();
+    assert.equal(resumed.calls.length, 0, pendingState);
+    assert.equal(resumed.saves.length, 0, pendingState);
+    assert.equal(resumed.stored.jobTrackerResearchV1[0].terminal, true, pendingState);
+    assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "skipped", pendingState);
+    assert.equal(resumed.outcomes.length, 1, pendingState);
+  }
+});
+
+test("old queued descriptions assigning this role Staff equivalence are discarded before worker calls", async () => {
+  for (const pendingState of ["requesting", "researching", "waiting-save"]) {
+    const first = harness();
+    await first.client.start(job, { profile: "kevin" });
+    const record = first.stored.jobTrackerResearchV1[0];
+    record.job.description += " This position is equivalent to Staff Engineer level.";
+    record.state = pendingState;
+    const resumed = harness({ stored: first.stored });
+    await resumed.client.poll(); await resumed.client.poll();
+    assert.equal(resumed.calls.length, 0, pendingState);
+    assert.equal(resumed.saves.length, 0, pendingState);
+    assert.equal(resumed.stored.jobTrackerResearchV1[0].terminal, true, pendingState);
+    assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "skipped", pendingState);
+    assert.deepEqual(resumed.outcomes, ["Skipped: role is above Senior level."], pendingState);
+  }
+});
+
+test("AI rejects above-Senior scope in ordinary titles before choosing a profile or saving", async () => {
+  const evidence = "Set the company-wide engineering strategy and technical standards across multiple engineering teams.";
+  for (const title of ["Software Engineer", "Lead Software Engineer", "Technical Architect"]) {
+    const h = harness();
+    await h.client.start({ ...job, title, description: evidence, selectedRegion: "us", isEasyApply: false });
+    assert.equal(h.calls.length, 1, title);
+    h.setResponse({ state: "completed", completedAt: new Date().toISOString(),
+      result: { decision: "save", company: job.company, title,
+        role: { eligible: false, category: "software-development", evidence,
+          reason: "Above-Senior scope: company-wide technical strategy across multiple teams." } } });
+    await h.client.poll(); await h.client.poll();
+    assert.equal(h.saves.length, 0, title);
+    assert.equal(h.stored.jobTrackerResearchV1[0].terminal, true, title);
+    assert.equal(h.stored.jobTrackerResearchV1[0].state, "skipped", title);
+    assert.equal(h.stored.jobTrackerResearchV1[0].profileSelection, undefined, title);
+  }
+});
+
 test("ordinary Remote JavaScript and .NET roles research first and cannot save a legacy or unclear classification", async () => {
   for (const title of ["Senior JavaScript Engineer", ".NET Developer"]) {
     for (const classification of [undefined, { eligible: false, category: "unclear", reason: "Primary duties are unclear." }, role]) {
@@ -77,7 +242,11 @@ test("ordinary Remote JavaScript and .NET roles research first and cannot save a
       h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { ...result, title, application: undefined, role: classification } });
       await h.client.poll();
       assert.equal(h.saves.length, classification === role ? 1 : 0);
-      if (classification !== role) assert.equal(h.outcomes[0], "Skipped: software engineering role not confirmed.");
+      if (classification !== role) {
+        assert.equal(h.outcomes[0], "Skipped: software engineering role not confirmed.");
+        assert.equal(h.stored.jobTrackerResearchV1[0].terminal, true);
+        assert.equal(h.stored.jobTrackerResearchV1[0].state, "skipped");
+      }
     }
   }
 });
@@ -95,7 +264,8 @@ test("skips, invalid callbacks, expired findings and changed Sheet targets never
 });
 test("research submission recovery reuses the same ID without replaying an uncertain Sheet write", async () => {
   const h = harness({ failPostOnce: true, saveError: Object.assign(new Error("Unconfirmed save"), { code: "TRACKER_SAVE_UNCONFIRMED" }) });
-  await assert.rejects(h.client.start(job), /unavailable/);
+  const started = await h.client.start(job);
+  assert.equal(started.status, "researching"); assert.equal(started.queued, true);
   const id = h.stored.jobTrackerResearchV1[0].requestId;
   await h.client.poll(); await h.client.poll();
   assert.equal(JSON.parse(h.calls[1].options.body).requestId, id);
@@ -164,4 +334,53 @@ test("Hybrid with an explicit fully remote offer still researches Easy Apply and
   h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { ...result, fullyRemote: true, remoteEvidence: "This role is fully remote." } });
   await h.client.poll();
   assert.equal(h.saves.length, 1); assert.match(h.saves[0].data.info, /Fully remote confirmed/);
+});
+
+test("the search country overrides the remembered profile without sharing candidate settings", async () => {
+  for (const [selectedRegion, expected] of [["uk", "michal-stefanow-2page"], ["colombia", "jose-ibero-2page"], ["latam", "jose-ibero-2page"]]) {
+    const h = harness();
+    const target = { ...job, sourceUrl: `${job.sourceUrl}?geoId=103644278`, selectedRegion, selectedRegionSource: "search-control" };
+    const started = await h.client.start(target, { profile: "kevin" });
+    assert.equal(started.profile, expected);
+    const payload = JSON.parse(h.calls[0].options.body);
+    assert.equal(payload.job.selectedRegion, selectedRegion); assert.equal(payload.job.selectedRegionSource, "search-control");
+    assert.equal(payload.job.profileRoutingVersion, 1); assert.equal(payload.job.profile, undefined); assert.equal(payload.job.profiles, undefined);
+    await h.client.poll(); assert.equal(h.saves[0].options.profile, expected); assert.equal(h.saves[0].options.trashed, undefined);
+  }
+});
+
+test("US required years and no-years scope choose Kevin or Jagjeet without automatic Trash", async () => {
+  for (const [minimumYears, title, evidence, scope, expected] of [
+    [3, "Senior Software Engineer", "3 years of software engineering experience required; 5 years preferred.", "senior", "jagjeet"],
+    [4, "Senior Software Engineer", "4–7 years of professional software engineering experience required.", "senior", "jagjeet"],
+    [5, "Software Engineer", "5+ years of professional software engineering experience required.", "ordinary", "kevin"],
+    [null, "Forward Deployed Engineer", "Own complex data migrations from legacy EHRs and billing systems, end to end", "senior", "kevin"],
+    [null, "Software Engineer", "Implement features within the existing architecture and maintain unit tests.", "ordinary", "jagjeet"],
+    [null, "Senior Software Engineer", "Implement features within the existing architecture and maintain unit tests.", "ordinary", "kevin"]
+  ]) {
+    const h = harness();
+    const target = { ...job, title, isEasyApply: false, selectedRegion: "us", description: `${job.description} ${evidence}${minimumYears === null ? " No minimum years of experience." : ""}` };
+    const started = await h.client.start(target, { profile: "jose-ibero-2page" });
+    const retry = await h.client.start(target, { profile: "different-profile" });
+    assert.equal(retry.requestId, started.requestId); assert.equal(h.calls.length, 1);
+    h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { decision: "save", company: target.company, title, role, experience: { minimumYears, scope, evidence } } });
+    await h.client.poll(); assert.equal(h.saves[0].options.profile, expected); assert.equal(h.saves[0].options.trashed, undefined);
+    assert.doesNotMatch(h.outcomes[0], /Trash/);
+  }
+});
+
+test("US evidence is required; retries retain the selected profile and discard retired Trash flags", async () => {
+  const evidence = "5+ years of professional software development experience required.";
+  const target = { ...job, selectedRegion: "us", description: `${job.description} ${evidence}` };
+  const missing = harness(); await missing.client.start(target); await missing.client.poll();
+  assert.equal(missing.saves.length, 0); assert.match(missing.outcomes[0], /experience requirements could not be confirmed/);
+  const first = harness({ saveError: Object.assign(new Error("offline"), { code: "LOCAL_STORE_UNAVAILABLE" }) });
+  const started = await first.client.start(target);
+  first.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { ...result, experience: { minimumYears: 5, scope: "ordinary", evidence } } });
+  await first.client.poll(); assert.equal(first.stored.jobTrackerResearchV1[0].profile, "kevin");
+  first.stored.jobTrackerResearchV1[0].saveTrashed = true; first.stored.jobTrackerResearchV1[0].profileSelection.trashed = true;
+  const resumed = harness({ stored: first.stored, profiles: ["other-profile"] }); await resumed.client.poll();
+  assert.equal(resumed.saves[0].options.profile, "kevin"); assert.equal(resumed.saves[0].options.requestId, started.requestId);
+  assert.equal(resumed.saves[0].options.trashed, undefined); assert.equal(resumed.stored.jobTrackerResearchV1[0].saveTrashed, undefined);
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].profileSelection.trashed, undefined);
 });

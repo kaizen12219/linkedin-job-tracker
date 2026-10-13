@@ -67,7 +67,7 @@ test("collection skips filtered/dismissed jobs, submits each active job once, an
   assert.equal(h.app.running(), false); assert.equal(h.timers.size, 0);
   for (const capture of h.captures) {
     const selected = h.actions.find((entry) => entry.type === "select" && entry.id === capture.job.jobId);
-    assert.ok(capture.time - selected.time >= 10_000, "save waits for settling and a meaningful review");
+    assert.ok(capture.time - selected.time >= 5_000, "save waits for settling and a meaningful review");
   }
   assert.ok(h.checkpoints[0].visited.includes("3"), "progress is stored before Next");
 });
@@ -79,7 +79,23 @@ test("review time grows with description size and stays within variable bounded 
   assert.notEqual(collector.reviewDelay("word ".repeat(3000), () => 0), collector.reviewDelay("word ".repeat(3000), () => 1));
   for (const size of [0, 60, 350, 3000]) for (const random of [0, 0.2, 0.5, 1]) {
     const delay = collector.reviewDelay("word ".repeat(size), () => random);
-    assert.ok(delay >= 10_000 && delay <= 90_000);
+    assert.ok(delay >= 5_000 && delay <= 45_000);
+  }
+});
+test("short-job pacing reaches research in under twelve seconds and continues to Next", async () => {
+  for (const random of [() => 0, () => 1]) {
+    const h = harness([[row(1, { description: 'Build production software.', easy: true })], [row(2)]], { random });
+    await h.advance(12_000);
+    assert.equal(h.captures.length, 1);
+    assert.equal(h.captures[0].job.jobId, '1');
+    assert.ok(h.captures[0].time >= 5_000 && h.captures[0].time <= 12_000);
+    assert.ok(h.actions.find(action => action.type === 'top').time >= 450);
+    assert.ok(h.actions.find(action => action.type === 'top').time <= 1250);
+    await h.advance(150_000);
+    assert.deepEqual(h.captures.map(entry => entry.job.jobId), ['1', '2']);
+    assert.equal(h.actions.filter(action => action.type === 'next').length, 1);
+    assert.equal(h.finishes[0].state.counts.researching, 1);
+    assert.match(h.finishes[0].message, /last results page/);
   }
 });
 test("Stop cancels review immediately and prevents any save or subsequent selection", async () => {
@@ -96,7 +112,7 @@ test("hidden tabs continue paced collection without waiting for visibility", asy
   await h.advance(90_000);
   assert.equal(h.captures.length, 1);
   assert.equal(h.statuses.some((entry) => entry.message.startsWith("Paused")), false);
-  assert.ok(h.captures[0].time - h.actions.find((entry) => entry.type === "select").time >= 10_000);
+  assert.ok(h.captures[0].time - h.actions.find((entry) => entry.type === "select").time >= 5_000);
 });
 
 test("late worker wakes count elapsed review time and recheck changed details before saving", async () => {

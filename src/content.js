@@ -229,9 +229,7 @@
 
   async function captureSelectedJob() {
     const selection = captureSelection;
-    // A trusted card click already authorized this handoff. Switching away
-    // while LinkedIn loads the selected details must not abandon it.
-    if (!selection) return;
+    if (!selection || document.hidden) return;
     if (Date.now() > selection.expiresAt) { captureSelection = null; return; }
     let job;
     try { job = window.LinkedInJobScraper.scrape(document, window.location.href); } catch { scheduleCapture(200); return; }

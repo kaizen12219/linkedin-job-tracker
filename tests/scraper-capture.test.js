@@ -3,15 +3,15 @@ const test = require("node:test");
 const fs = require("node:fs");
 const { JSDOM } = require("jsdom");
 const source = fs.readFileSync(require.resolve("../src/scraper.js"), "utf8");
-function scrape(t, label, button, { closed = false, link = true, modern = false, standalone = false } = {}) {
-  const dom = new JSDOM(`<main><nav><button>Remote</button><button>Easy Apply</button></nav>
+function scrape(t, label, button, { closed = false, link = true, modern = false, standalone = false, country = "", sourceUrl = "https://www.linkedin.com/jobs/search/?currentJobId=321" } = {}) {
+  const dom = new JSDOM(`<header>${country ? `<button>${country}</button>` : ""}</header><main><nav><button>Remote</button><button>Easy Apply</button></nav>
     <li data-occludable-job-id="999"><a href="/jobs/view/999">Other job</a><a href="https://other.com/apply">Apply</a><span>Remote</span></li>
     <div class="jobs-search__job-details--container"><div class="job-details-jobs-unified-top-card">
     <a href="/company/mews">Mews</a><${standalone ? "p" : modern ? "h2" : "h1"}>${link ? '<a href="/jobs/view/123">Product Builder - Fintech</a>' : 'Product Builder - Fintech'}</${standalone ? "p" : modern ? "h2" : "h1"}>
     <span>${label}</span><button aria-label="${button} for Product Builder">${button}</button>${closed ? '<p>No longer accepting applications</p>' : ''}</div>
     <div data-testid="job-poster"><a href="/in/sam">Sam Recruiter</a></div>
-    <section componentkey="JobDetails_AboutTheJob"><div data-testid="expandable-text-box">This role offers fully remote work. Apply to hiring@mews.com.</div></section></div></main>`, { url: "https://www.linkedin.com/jobs/search/?currentJobId=321", runScripts: "outside-only" });
-  t.after(() => dom.window.close()); dom.window.eval(source);
+    <section componentkey="JobDetails_AboutTheJob"><div data-testid="expandable-text-box">This role offers fully remote work. Apply to hiring@mews.com.</div></section></div></main>`, { url: sourceUrl, runScripts: "outside-only" });
+  t.after(() => dom.window.close()); dom.window.eval(fs.readFileSync(require.resolve("../src/profile-routing.js"), "utf8")); dom.window.eval(source);
   return dom.window.LinkedInJobScraper.scrape();
 }
 test("selected job labels override unrelated Remote and Easy Apply search filters", (t) => {
@@ -22,6 +22,14 @@ test("selected job labels override unrelated Remote and Easy Apply search filter
   assert.equal(data.jobId, "123"); assert.equal(data.jobIdSource, "details");
   assert.equal(data.posterName, "Sam Recruiter"); assert.deepEqual(Array.from(data.descriptionEmails), ["hiring@mews.com"]);
   assert.notEqual(data.applyUrl, "https://other.com/apply");
+});
+
+test("scraping records the search dropdown's country and source for each selected job", (t) => {
+  for (const [country, selectedRegion] of [["United Kingdom", "uk"], ["United States", "us"], ["Colombia", "colombia"], ["Latin America", "latam"]]) {
+    const data = scrape(t, "Remote", "Apply", { country, sourceUrl: "https://www.linkedin.com/jobs/search/?geoId=103644278" });
+    assert.equal(data.selectedRegion, selectedRegion); assert.equal(data.selectedRegionSource, "search-control");
+  }
+  assert.equal(scrape(t, "Remote", "Apply", { sourceUrl: "https://www.linkedin.com/jobs/search/?geoId=101165590" }).selectedRegion, "uk");
 });
 test("Remote, Hybrid, unknown, Easy Apply and closed applications are captured", (t) => {
   for (const [label, expected] of [["✓ Remote", "remote"], ["Hybrid", "hybrid"], ["", "unknown"]]) {

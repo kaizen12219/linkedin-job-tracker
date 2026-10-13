@@ -13,12 +13,12 @@
   }
   function reviewDelay(description, random = Math.random) {
     const words = String(description || "").trim().split(/\s+/u).filter(Boolean).length;
-    // A short review, with more time for longer descriptions and bounded jitter.
-    return Math.round(Math.min(90_000, Math.max(10_000, Math.min(80_000, words / (220 + random() * 100) * 60_000) * (0.85 + random() * 0.3))));
+    // Half the original review time, with the same description sizing and jitter.
+    return Math.round(0.5 * Math.min(90_000, Math.max(10_000, Math.min(80_000, words / (220 + random() * 100) * 60_000) * (0.85 + random() * 0.3))));
   }
   function create(adapter, { random = Math.random, now = () => Date.now(), schedule = setTimeout, unschedule = clearTimeout } = {}) {
     let current = null;
-    const actionDelay = () => Math.round(900 + random() * 1600);
+    const actionDelay = () => Math.round(450 + random() * 800);
     const fingerprint = (job) => JSON.stringify([job.jobId, job.jobIdSource, job.company, job.title, job.description, job.applyUrl,
       job.workplaceType, job.isEasyApply, job.applicationsAvailable, job.applicationsClosed, job.posterName, job.descriptionEmails]);
     const active = (run) => current === run && !run.stopped;
@@ -133,9 +133,9 @@
           }
           const more = await adapter.more();
           if (more === "loading") {
-            loadingWait += 2500;
+            loadingWait += 1250;
             if (loadingWait > 30_000) throw new Error("Results did not finish loading. Job collection stopped.");
-            if (!await pause(run, 2500)) break;
+            if (!await pause(run, 1250)) break;
             continue;
           }
           loadingWait = 0;

@@ -7,6 +7,7 @@ const assets = new Map([
   ["/", ["popup.html", "text/html"]],
   ["/popup.css", ["popup.css", "text/css"]],
   ["/src/popup-kai-flow.js", ["src/popup-kai-flow.js", "text/javascript"]],
+  ["/src/profile-routing.js", ["src/profile-routing.js", "text/javascript"]],
   ["/fixture.js", ["tests/popup-preview-fixture.js", "text/javascript"]]
 ]);
 const server = http.createServer(async (request, response) => {

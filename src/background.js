@@ -1,8 +1,13 @@
-importScripts("kai-local-store-client.js", "banned-companies.js", "capture-policy.js", "research-client.js", "job-collector.js");
+importScripts("folder-access.js", "kai-local-store-client.js", "banned-companies.js", "capture-policy.js", "profile-routing.js", "research-client.js", "job-collector.js");
 
 const sheetClient = KaiLocalStoreClient.create();
 const bannedCompanies = KaiFlowBannedCompanies.create();
 const researchClient = JobResearchClient.create({ sheetClient, bannedCompanies,
+  onProfileSelected: async (record, selection) => {
+    try { await chrome.runtime.sendMessage({ type: "KAI_TRACKER_PROFILE_SELECTED", jobId: record.job.jobId, sourceUrl: record.job.sourceUrl,
+      company: record.job.company, title: record.job.title, description: record.job.description, ...selection }); }
+    catch { /* The popup may be closed; the persisted selection is unchanged. */ }
+  },
   onSaved: async (company) => {
     try { await rememberTrackedCompany(company); } catch { /* Confirmed Sheet writes remain successful. */ }
     await refreshLinkedInStyles();
@@ -96,8 +101,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (result) => {
       sendResponse({ ok: true, result });
       if (captureMessage && !message.runId) void notify(sender.tab?.id, result.status === "researching"
-        ? "Job research started. This job will be added only if it qualifies."
-        : result.status === "skipped" ? result.reason : `Saved ${message.job.company} to Kai Flows.`, result.status === "inserted" ? "success" : "info").catch(() => {});
+        ? result.queued ? "Job queued for research. It will retry automatically when the local research worker is running."
+        : "Job research started. This job will be added only if it qualifies."
+        : result.status === "skipped" ? result.reason : `Saved ${message.job.company} to ApplicantAlly.`, result.status === "inserted" ? "success" : "info").catch(() => {});
     },
     (error) => {
       sendResponse({ ok: false, error: {
@@ -112,7 +118,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 function isPopupSender(sender) {
-  return sender?.id === chrome.runtime.id && sender?.url === chrome.runtime.getURL("popup.html");
+  return sender?.id === chrome.runtime.id && ["popup.html", "folder.html"].some(file => sender?.url === chrome.runtime.getURL(file));
 }
 
 function isLinkedInSender(sender) {
@@ -315,7 +321,7 @@ async function classifyCompanies(values, { refresh = false } = {}) {
   }
 
   if (!companySnapshotAvailable) {
-    const failure = new Error("The Kai Flow company list is not available yet.");
+    const failure = new Error("The ApplicantAlly company list is not available yet.");
     failure.code = "TRACKER_SNAPSHOT_UNAVAILABLE";
     throw failure;
   }
@@ -411,7 +417,7 @@ async function refreshCompanySnapshot({ force = false } = {}) {
     if (startingGeneration !== companySnapshotGeneration) return false;
     if (result.unchanged) {
       if (!companySnapshotAvailable || result.revision !== companySnapshotRevision) {
-        const failure = new Error("The Kai Flow returned an unmatched company revision.");
+        const failure = new Error("The ApplicantAlly returned an unmatched company revision.");
         failure.code = "TRACKER_PROTOCOL_ERROR";
         throw failure;
       }
@@ -496,7 +502,7 @@ async function toggleJobCollection(commandTab) {
     const toggle = await withCollectionState(async (state, save) => {
       if (state) { await save(null); return { stop: state }; }
       const status = await sheetClient.getStatus();
-      if (!status.configured) throw new Error("Start Kai Flow before starting job collection.");
+      if (!status.configured) throw new Error("Choose your ApplicantAlly data folder before starting job collection.");
       await classifyCompanies([], { refresh: false });
       const currentTab = await chrome.tabs.get(tab.id);
       const next = { id: crypto.randomUUID(), tabId: tab.id, searchKey, originalAutoDiscardable: currentTab.autoDiscardable,
@@ -513,7 +519,7 @@ async function toggleJobCollection(commandTab) {
     let response;
     try { response = await chrome.tabs.sendMessage(tab.id, message); }
     catch {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"] });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"] });
       response = await chrome.tabs.sendMessage(tab.id, message);
     }
     if (!response?.ok) throw new Error(response?.error || "The collection controls could not be started. Reload the LinkedIn tab.");
@@ -546,9 +552,9 @@ async function runScrapeAndSaveShortcut(commandTab) {
     const profile = savedSettings[PROFILE_STORAGE_KEY] ?? "";
     const result = await captureJob(scrapeResponse.data, { profile, tabId: tab.id });
     await setBadge(result.status === "researching" ? "AI" : result.status === "skipped" ? "SKIP" : "OK", "#1f7a3f");
-    await notify(tab.id, result.status === "researching" ? "Research started."
+    await notify(tab.id, result.status === "researching" ? result.queued ? "Job queued for research. It will retry automatically when the local research worker is running." : "Research started."
       : result.status === "skipped" ? job.applicationsClosed ? "Skipped: applications closed." : "Skipped: apply button unavailable."
-      : "Saved to Kai Flow.", "info", job);
+      : "Saved to ApplicantAlly.", "info", job);
   } catch (error) {
     if (error.code === "DUPLICATE_COMPANY") {
       await setBadge("DUP", "#8a6d1d");
@@ -578,7 +584,7 @@ async function requestScrape(tabId) {
   } catch {
     await chrome.scripting.executeScript({
       target: { tabId },
-        files: ["src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"]
+        files: ["src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"]
     });
     return chrome.tabs.sendMessage(tabId, { type: "SCRAPE_LINKEDIN_JOB" });
   }

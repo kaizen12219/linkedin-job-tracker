@@ -6,8 +6,24 @@
     "infrastructure-engineering", "data-ai-engineering", "test-automation"]);
   // Title keywords can only reject clear exclusions. They never approve a job.
   const EXCLUDED_TITLE = /\b(?:business\s+(?:systems?\s+)?analyst|data\s+analyst|(?:product|project|program(?:me)?)\s+manager|scrum\s+master|recruiter|recruitment\s+(?:consultant|manager|coordinator)|talent\s+acquisition|sales\s+(?:representative|executive|manager)|account\s+executive|business\s+development\s+(?:representative|manager)|(?:it|desktop|technical)\s+support|help\s*desk|service\s+desk|manual\s+(?:qa|test(?:er|ing)?))\b/iu;
+  const HIGHER_LEVEL = "(?:staff|principal|distinguished|fellow|chief)";
+  const ENGINEERING_ROLE = "(?:engineer(?:ing)?|developer|architect|scientist|sre|sdet)";
+  const ROLE_MODIFIERS = "(?:(?:software|backend|back end|frontend|front end|full stack|fullstack|platform|cloud|data|ai|ml|machine learning|test|automation|mobile|security|embedded|systems?|network|technical|qa|quality|senior|solutions?|product)\\s+){0,6}";
+  const HIGHER_PREFIX = new RegExp(`\\b${HIGHER_LEVEL}(?:\\s*\\+)?[\\s,:/]+(?:[\\p{L}\\d.+#]+\\s+){0,6}${ENGINEERING_ROLE}\\b`, "iu");
+  const HIGHER_SUFFIX = new RegExp(`\\b${ENGINEERING_ROLE}\\b[\\s,/:()|]+(?:senior\\s+)?${HIGHER_LEVEL}(?:\\s+level)?(?=\\s*(?:$|[(),/:|]))`, "iu");
+  const HIGHER_MANAGEMENT = /\b(?:engineering|software\s+(?:engineering|development))\s+(?:manager|director|head)\b|\b(?:head|director|vp|vice\s+president)[\s,:]+(?:of\s+)?(?:(?:software|platform|data|cloud|ai)\s+){0,3}(?:engineering|technology)\b|\bchief\s+(?:technology|technical|engineering)\s+officer\b|\bcto\s*(?:$|[(/,|])|\b(?:technical|engineering|software\s+engineering)\s+fellow\b|\b(?:distinguished|principal)\s+member\s+of\s+(?:the\s+)?technical\s+staff\b/iu;
+  const OWN_ROLE = "(?:(?:this|the|our)\\s+(?:(?:software|backend|frontend|platform|data|engineer|engineering|iv|v|vi|l\\d+)\\s+){0,6}(?:role|position|job)|this)";
+  const HIGHER_ASSIGNMENT = new RegExp(`\\b(?:${OWN_ROLE}\\s+(?:is|will\\s+be|sits|operates|functions|maps|corresponds)\\s+(?:(?:a|an|at|as|the|to|equivalent|aligned|with|graded|levelled|leveled)\\s+){0,6}|you\\s+(?:will\\s+)?(?:join|operate|work|be\\s+hired|be\\s+appointed)\\s+(?:(?:as|at|a|an|the)\\s+){0,4})${HIGHER_LEVEL}(?:\\s*\\+)?(?:\\s+level\\b|[\\s,:/]+${ROLE_MODIFIERS}${ENGINEERING_ROLE}\\b)`, "iu");
+  function aboveSenior(job) {
+    const title = text(job?.title ?? job?.jobTitle).replace(/[-–—]/gu, " ");
+    const description = text(job?.description ?? job?.jobDescription).replace(/[-–—]/gu, " ");
+    // Company ladders differ: numbered ranks and Lead/Architect alone cannot
+    // establish Staff+ level. References to senior colleagues are not this role.
+    return HIGHER_PREFIX.test(title) || HIGHER_SUFFIX.test(title) || HIGHER_MANAGEMENT.test(title) || HIGHER_ASSIGNMENT.test(description);
+  }
   function roleSkipReason(job) {
-    return EXCLUDED_TITLE.test(text(job?.title ?? job?.jobTitle)) ? "Skipped: role is outside software engineering." : "";
+    if (EXCLUDED_TITLE.test(text(job?.title ?? job?.jobTitle))) return "Skipped: role is outside software engineering.";
+    return aboveSenior(job) ? "Skipped: role is above Senior level." : "";
   }
   function verifiedRole(job, result) {
     const role = result?.role;

@@ -19,6 +19,9 @@ const PROFILE_KEY = "kaiFlowSelectedProfile";
 
 let latestPayload = null;
 let profiles = [];
+let profileOptions = { profiles: [] };
+let captureProfile = null;
+let automaticProfileError = "";
 let connected = false;
 let configured = false;
 let scraping = false;
@@ -38,13 +41,26 @@ document.addEventListener("DOMContentLoaded", () => {
 
 chrome.runtime.onMessage?.addListener((message, sender) => {
   if (sender?.id === chrome.runtime.id && message?.type === "KAI_TRACKER_PROFILES_CHANGED") void loadOptions(true);
+  if (sender?.id === chrome.runtime.id && message?.type === "KAI_TRACKER_PROFILE_SELECTED" && latestPayload &&
+    message.sourceUrl === latestPayload.sourceUrl && message.jobId === latestPayload.jobId && message.company === latestPayload.company &&
+    message.title === latestPayload.title && message.description === latestPayload.description) {
+    captureProfile = message.profile;
+    applyProfiles(profileOptions, profileSelect.value);
+    setStatus(`Profile: ${message.label}. ${message.reason}`);
+    updateControls();
+  }
 });
 
 scrapeButton.addEventListener("click", () => void scrapeCurrentTab());
 refreshButton.addEventListener("click", () => void loadOptions(true));
+document.querySelector("#folderSettings").addEventListener("click", () => void chrome.tabs.create({ url: chrome.runtime.getURL("folder.html") }));
 
 for (const [name, input] of Object.entries(fields)) input.addEventListener("input", () => {
   latestPayload = { ...(latestPayload || {}), [name]: input.value };
+  if (["title", "description"].includes(name)) {
+    captureProfile = null;
+    applyProfiles(profileOptions, profileSelect.value);
+  }
   if (name === "company") {
     ++lookupVersion;
     renderDuplicate(null);
@@ -61,9 +77,10 @@ for (const [name, input] of Object.entries(fields)) input.addEventListener("inpu
 });
 
 profileSelect.addEventListener("change", async () => {
+  if (JobProfileRouting.jobRegion(latestPayload)) return;
   try {
     await chrome.storage.local.set({ [PROFILE_KEY]: profileSelect.value });
-    setStatus(profileSelect.value ? `Profile: ${profileSelect.value}.` : "No profile selected. You can assign one later in Kai Sheet.");
+    setStatus(profileSelect.value ? `Profile: ${profileSelect.value}.` : "No profile selected. You can assign one later in ApplicantAlly.");
   } catch {
     setStatus("Could not remember the profile for the shortcut. This save will still use your selection.");
   }
@@ -74,7 +91,7 @@ profileSelect.addEventListener("change", async () => {
 copyJsonButton.addEventListener("click", async () => {
   if (!latestPayload) return;
   try {
-    await navigator.clipboard.writeText(JSON.stringify({ ...latestPayload, profile: profileSelect.value }, null, 2));
+    await navigator.clipboard.writeText(JSON.stringify({ ...latestPayload, profile: selectedProfileValue() }, null, 2));
     setStatus("Copied JSON.");
   } catch {
     setStatus("Could not copy. You can select the text under Raw JSON.");
@@ -89,13 +106,15 @@ saveButton.addEventListener("click", async () => {
   if (saving || scraping || !latestPayload || !canSave() || !validProfile() || duplicate || isCurrentCompanyBanned()) return;
   saving = true;
   updateControls();
-  setStatus("Saving to Kai Flow…");
+  setStatus("Saving to ApplicantAlly…");
   try {
-    const result = await request({ type: "KAI_TRACKER_SAVE", job: latestPayload, profile: profileSelect.value });
-    setStatus(result.status === "researching" ? "Research started in a desktop session. This job will be added only if it qualifies."
+    const result = await request({ type: "KAI_TRACKER_SAVE", job: latestPayload, profile: selectedProfileValue() });
+    if (result.profile && result.profileRouting) { captureProfile = result.profile; applyProfiles(profileOptions, profileSelect.value); }
+    setStatus(result.status === "researching" ? result.queued ? "Job queued for research. It will retry automatically when the local research worker is running."
+      : "Research started in a desktop session. This job will be added only if it qualifies."
       : result.status === "skipped" ? result.reason : result.replayed
       ? "This exact job was already saved. No duplicate was created."
-      : "Saved to Kai Flow · Pending.");
+      : "Saved to ApplicantAlly · Pending.");
     void checkDuplicate();
   } catch (error) {
     if (error.code === "DUPLICATE_COMPANY" && error.details?.duplicate) {
@@ -109,7 +128,7 @@ saveButton.addEventListener("click", async () => {
       if (/UNAVAILABLE|OFFLINE|UNCONFIRMED|TIMEOUT/.test(error.code || "")) {
         connected = false;
         connectionState = "offline";
-        connectionEl.textContent = "Kai Flow is unavailable";
+        connectionEl.textContent = "ApplicantAlly is unavailable";
       }
     }
   } finally {
@@ -155,7 +174,7 @@ async function request(message) {
   catch {
     const uncertain = message.type === "KAI_TRACKER_SAVE";
     const error = new Error(uncertain
-      ? "The save result could not be confirmed. Nothing will retry automatically; check the Kai Flow before saving this company again."
+      ? "The save result could not be confirmed. Nothing will retry automatically; check the ApplicantAlly before saving this company again."
       : "The tracker could not confirm the request. Reload the extension and try again.");
     error.code = uncertain ? "TRACKER_SAVE_UNCONFIRMED" : "TRACKER_UNAVAILABLE";
     throw error;
@@ -169,10 +188,10 @@ async function request(message) {
   return response.result;
 }
 
-async function loadOptions(refresh = false) {
+async function loadOptions(refresh = true) {
   const version = ++optionsVersion;
   refreshButton.disabled = true;
-  connectionEl.textContent = "Checking Kai Flow…";
+  connectionEl.textContent = "Checking ApplicantAlly…";
   try {
     const currentStatus = await request({ type: "KAI_TRACKER_STATUS" });
     if (version !== optionsVersion) return;
@@ -189,7 +208,7 @@ async function loadOptions(refresh = false) {
     applyProfiles(result, selected);
     connected = true;
     connectionState = "connected";
-    connectionEl.textContent = `Connected · ${currentStatus.sheetTitle || "Kai Flow"}`;
+    connectionEl.textContent = `Connected · ${currentStatus.sheetTitle || "ApplicantAlly"}`;
     renderJson();
     void checkDuplicate();
   } catch (error) {
@@ -210,26 +229,39 @@ function renderConnectionFailure(error) {
   if (/CONFIG_REQUIRED/.test(code)) {
     configured = false;
     connectionState = "unconfigured";
-    connectionEl.textContent = "Start Kai Flow";
+    connectionEl.textContent = "Choose ApplicantAlly folder";
   } else if (/AUTH|FORBIDDEN|NOT_FOUND|SCHEMA|INVALID_SERVICE_ACCOUNT|INVALID_SHEET/.test(code)) {
     connectionState = "invalid";
-    connectionEl.textContent = "Kai Flow needs attention";
+    connectionEl.textContent = "ApplicantAlly needs attention";
   } else {
     connectionState = "offline";
-    connectionEl.textContent = "Kai Flow is unavailable";
+    connectionEl.textContent = "ApplicantAlly is unavailable";
   }
   updateControls();
 }
 
 function applyProfiles(result, selected) {
+  profileOptions = result;
+  const previousError = automaticProfileError;
+  automaticProfileError = "";
   profiles = [...new Set((result.profiles || []).filter((value) => typeof value === "string" && value.trim()))];
   profileSelect.replaceChildren(new Option("No profile", ""));
   for (const profile of profiles) profileSelect.append(new Option(result.profileLabels?.[profile] || profile, profile));
-  if (selected && !profiles.includes(selected)) {
+  const region = JobProfileRouting.jobRegion(latestPayload);
+  if (region) {
+    try {
+      const routing = JobProfileRouting.snapshot(latestPayload, result);
+      if (region === "us" && !captureProfile) {
+        profileSelect.append(new Option("Automatic · Kevin Lee or Jagjeet Wani (US)", JobProfileRouting.AUTOMATIC));
+        selected = JobProfileRouting.AUTOMATIC;
+      } else selected = captureProfile || JobProfileRouting.choose(latestPayload, routing).profile;
+    } catch (error) { automaticProfileError = error.message; selected = ""; setStatus(error.message); }
+  } else if (selected && !profiles.includes(selected)) {
     profileSelect.append(new Option(`${selected} — unavailable`, selected));
     setStatus("Your saved profile is unavailable. Select a valid profile or No profile before saving.");
   }
   profileSelect.value = selected;
+  if (region && !automaticProfileError && previousError && statusEl.textContent === previousError) setStatus(capturedStatus());
   renderJson();
 }
 
@@ -238,14 +270,14 @@ function renderSheetStatus(status) {
   connectionState = status.connection || (configured ? "checking" : "unconfigured");
   connected = connectionState === "connected";
   connectionEl.textContent = !configured
-    ? "Start Kai Flow"
+    ? "Choose ApplicantAlly folder"
     : connected
-      ? `Connected · ${status.sheetTitle || "Kai Flow"}`
+      ? `Connected · ${status.sheetTitle || "ApplicantAlly"}`
       : connectionState === "invalid"
-        ? "Kai Flow needs attention"
+        ? "ApplicantAlly needs attention"
         : connectionState === "offline"
-          ? "Kai Flow is unavailable"
-          : "Checking Kai Flow…";
+          ? "ApplicantAlly is unavailable"
+          : "Checking ApplicantAlly…";
   updateControls();
 }
 
@@ -281,6 +313,7 @@ async function scrapeCurrentTab() {
   if (scraping || saving) return;
   scraping = true;
   latestPayload = null;
+  captureProfile = null;
   renderDuplicate(null);
   ++lookupVersion;
   setStatus("Reading the LinkedIn job…");
@@ -291,11 +324,12 @@ async function scrapeCurrentTab() {
     let response;
     try { response = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_LINKEDIN_JOB" }); }
     catch {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/scraper.js", "src/content.js"] });
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/profile-routing.js", "src/scraper.js", "src/content.js"] });
       response = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_LINKEDIN_JOB" });
     }
     if (!response?.ok) throw new Error(response?.error || "The scraper did not return a job.");
     latestPayload = response.data;
+    applyProfiles(profileOptions, profileSelect.value);
     for (const name of Object.keys(fields)) fields[name].value = latestPayload[name] || "";
     const applyUrl = safeWebUrl(latestPayload.applyUrl);
     openApplyUrlLink.href = applyUrl || "#";
@@ -305,8 +339,8 @@ async function scrapeCurrentTab() {
     setStatus(missing.length
       ? `Missing ${missing.join(", ")}. Expand the full job on LinkedIn and scrape again.`
       : connected && !validProfile()
-        ? "Your saved profile is unavailable. Select a valid profile or No profile before saving."
-        : "Job captured. Profile is optional.");
+        ? automaticProfileError || "Your saved profile is unavailable. Select a valid profile or No profile before saving."
+        : capturedStatus());
     void checkDuplicate();
   } catch (error) {
     latestPayload = null;
@@ -354,7 +388,7 @@ function renderDuplicate(value) {
     duplicateEl.append(heading, title, status, preview);
   } else if (value) {
     const heading = document.createElement("strong");
-    heading.textContent = "Already in Kai Flow";
+    heading.textContent = "Already in ApplicantAlly";
     const title = document.createElement("span");
     title.textContent = `${value.company || ""} · ${value.jobTitle || "Existing job"}`;
     const status = document.createElement("span");
@@ -409,7 +443,13 @@ function setBannedStatus(message) {
 }
 
 function validProfile() {
-  return !profileSelect.value || profiles.includes(profileSelect.value);
+  return !automaticProfileError && (!profileSelect.value || profileSelect.value === JobProfileRouting.AUTOMATIC || profiles.includes(profileSelect.value));
+}
+function selectedProfileValue() { return profileSelect.value === JobProfileRouting.AUTOMATIC ? "" : profileSelect.value; }
+function capturedStatus() {
+  const region = JobProfileRouting.jobRegion(latestPayload);
+  return region === "us" ? "Job captured. Research will select Kevin Lee or Jagjeet Wani from the experience requirements."
+    : region ? "Job captured. Profile selected from the LinkedIn search location." : "Job captured. Profile is optional.";
 }
 
 function canSave() {
@@ -420,13 +460,13 @@ function updateControls() {
   const complete = latestPayload && ["company", "title", "description"].every((key) => String(latestPayload[key] || "").trim());
   saveButton.disabled = !canSave() || !complete || !validProfile() || saving || scraping || Boolean(duplicate) || isCurrentCompanyBanned();
   saveButton.textContent = saving ? "Saving…" : "Save";
-  profileSelect.disabled = !configured || saving;
+  profileSelect.disabled = !configured || saving || Boolean(JobProfileRouting.jobRegion(latestPayload));
   scrapeButton.disabled = scraping || saving;
   copyJsonButton.disabled = !latestPayload || saving;
 }
 
 function renderJson() {
-  jsonEl.textContent = JSON.stringify(latestPayload ? { ...latestPayload, profile: profileSelect.value } : {}, null, 2);
+  jsonEl.textContent = JSON.stringify(latestPayload ? { ...latestPayload, profile: selectedProfileValue() } : {}, null, 2);
 }
 
 function setStatus(message) {

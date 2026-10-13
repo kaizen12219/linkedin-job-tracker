@@ -5,9 +5,14 @@
   const CLIENT_KEY = "jobTrackerResearchClientV1";
   const ALARM = "job-tracker-research";
   const MAX_AGE = 24 * 60 * 60 * 1000;
+  const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504]);
+  function researchUnavailable(status) {
+    return Object.assign(new Error("Job research is temporarily unavailable. This job is queued and will retry automatically when the local research worker is running."),
+      { code: "RESEARCH_UNAVAILABLE", retryableResearch: true, ...(status ? { status } : {}) });
+  }
   function create({ storage = chrome.storage.local, fetchImpl = fetch, cryptoImpl = crypto,
     alarms = chrome.alarms, extensionId = chrome.runtime.id, sheetClient, bannedCompanies,
-    onSaved = async () => {}, onOutcome = async () => {} } = {}) {
+    onSaved = async () => {}, onOutcome = async () => {}, onProfileSelected = async () => {} } = {}) {
     let tail = Promise.resolve();
     const serial = (operation) => {
       const result = tail.then(operation, operation);
@@ -34,23 +39,28 @@
       return value;
     }
     async function request(route, body) {
+      // Storage errors must remain errors: only a failed research request can
+      // authorize continuing collection with a durably queued job.
+      const key = await clientKey();
       let response;
       try {
         response = await fetchImpl(`${ENDPOINT}${route}`, {
           method: body ? "POST" : "GET", redirect: "error", cache: "no-store",
-          headers: { "X-Job-Tracker-Extension": extensionId, "X-Job-Tracker-Client": await clientKey(),
+          headers: { "X-Job-Tracker-Extension": extensionId, "X-Job-Tracker-Client": key,
             ...(body ? { "Content-Type": "application/json" } : {}) },
           ...(body ? { body: JSON.stringify(body) } : {}), signal: AbortSignal.timeout(12000)
         });
       } catch {
-        throw new Error("Rezi Builder research is unavailable. Start the local Rezi Builder; this job has not been saved.");
+        throw researchUnavailable();
       }
+      // Busy/unavailable services may return HTML rather than JSON.
+      if (!response.ok && RETRYABLE_STATUS.has(response.status)) throw researchUnavailable(response.status);
       const value = await response.json();
       if (!response.ok) throw Object.assign(new Error(value.error || "Research request failed."), { status: response.status });
       return value;
     }
     function publicJob(job) {
-      return Object.fromEntries(["company", "title", "description", "applyUrl", "sourceUrl", "jobId", "isEasyApply", "workplaceType", "posterName", "applicationsClosed"]
+      return Object.fromEntries(["company", "title", "description", "applyUrl", "sourceUrl", "jobId", "isEasyApply", "workplaceType", "posterName", "applicationsClosed", "selectedRegion", "selectedRegionSource", "profileRoutingVersion"]
         .map((name) => [name, job[name]]).filter(([, value]) => value !== undefined));
     }
     async function start(job, { profile = "", tabId = null } = {}) {
@@ -58,27 +68,34 @@
         const roleSkipReason = JobCapturePolicy.roleSkipReason(job);
         if (roleSkipReason) return { status: "skipped", reason: roleSkipReason };
         const state = await sheetClient.getStatus();
-        if (!state.configured) throw new Error("Start Kai Flow before researching jobs.");
+        if (!state.configured) throw new Error("Choose your ApplicantAlly data folder before researching jobs.");
+        const region = JobProfileRouting.jobRegion(job);
+        const capturedJob = region ? { ...job, selectedRegion: region, profileRoutingVersion: JobProfileRouting.VERSION } : job;
         const records = await read();
-        const identity = JSON.stringify([job.jobId || job.sourceUrl || "", job.company, job.title, job.description, state.sheetUrl, profile]);
+        const identity = JSON.stringify([job.jobId || job.sourceUrl || "", job.company, job.title, job.description, state.sheetUrl, region ? "automatic" : profile, ...(region ? [region] : [])]);
         const existing = records.find((entry) => entry.identity === identity && !entry.terminal);
-        if (existing) return { status: "researching", requestId: existing.requestId, replayed: true };
+        if (existing) return { status: "researching", ...(existing.state === "requesting" ? { queued: true } : {}), requestId: existing.requestId, replayed: true, profile: existing.profile, profileRouting: existing.profileRouting };
         if (records.filter((entry) => !entry.terminal).length >= 100) throw new Error("Too many jobs are being researched. Wait for the current jobs to finish.");
-        const record = { requestId: cryptoImpl.randomUUID(), identity, job, profile, tabId,
+        const routing = region ? JobProfileRouting.snapshot(capturedJob, await sheetClient.getOptions({ refresh: true })) : null;
+        const selection = routing && region !== "us" ? JobProfileRouting.choose(capturedJob, routing) : null;
+        const record = { requestId: cryptoImpl.randomUUID(), identity, job: capturedJob, profile: selection?.profile ?? (routing ? "" : profile), tabId,
+          ...(routing ? { profileRouting: routing } : {}), ...(selection ? { profileSelection: selection } : {}),
           sheetUrl: state.sheetUrl, createdAt: Date.now(), state: "requesting" };
         const active = records.filter((entry) => !entry.terminal);
         const history = records.filter((entry) => entry.terminal && Date.now() - entry.createdAt < MAX_AGE).slice(-(199 - active.length));
         const next = [...history, ...active, record];
         await write(next);
+        if (selection) await onProfileSelected(record, selection);
         try {
-          await request("", { requestId: record.requestId, job: publicJob(job) });
+          await request("", { requestId: record.requestId, job: publicJob(record.job) });
           record.state = "researching";
           await write(next);
         } catch (error) {
-          if (error.status && error.status !== 503) { record.terminal = true; record.state = "failed"; await write(next); }
+          if (error.retryableResearch) return { status: "researching", queued: true, requestId: record.requestId, profile: record.profile, profileRouting: record.profileRouting };
+          if (error.status) { record.terminal = true; record.state = "failed"; await write(next); }
           throw error;
         }
-        return { status: "researching", requestId: record.requestId };
+        return { status: "researching", requestId: record.requestId, profile: record.profile, profileRouting: record.profileRouting };
       });
     }
     async function poll() {
@@ -104,6 +121,9 @@
             }
             response = await request(`/${encodeURIComponent(record.requestId)}`);
           } catch (error) {
+            // One outage must not hold the capture queue for 12 seconds per job.
+            // The next alarm retries, retaining the original request IDs.
+            if (error.retryableResearch) break;
             if (error.status === 404 || error.status === 409) { record.terminal = true; record.state = "failed"; }
             continue;
           }
@@ -127,11 +147,24 @@
             continue;
           }
           try {
+            if (record.profileRouting && !record.profileSelection) {
+              record.profileSelection = JobProfileRouting.choose(record.job, record.profileRouting, response.result?.experience);
+              record.profile = record.profileSelection.profile;
+              await write(records);
+              await onProfileSelected(record, record.profileSelection);
+            }
+            // Old queued captures may contain the retired Kevin-to-Trash flag.
+            // Every capture now saves through the normal Pending creation path.
+            if (Object.hasOwn(record, "saveTrashed") || Object.hasOwn(record.profileSelection || {}, "trashed")) {
+              delete record.saveTrashed;
+              if (record.profileSelection) delete record.profileSelection.trashed;
+              await write(records);
+            }
             if (await bannedCompanies.has(job.company)) throw Object.assign(new Error("Skipped: company is banned."), { code: "BANNED_COMPANY" });
             const result = await sheetClient.saveJob(job, { profile: record.profile, requestId: record.requestId });
             record.state = "saved";
             await onSaved(job.company);
-            await onOutcome(record, "Saved to Kai Flow.", result);
+            await onOutcome(record, "Saved to ApplicantAlly.", result);
           } catch (error) {
             if (error.code === "LOCAL_STORE_UNAVAILABLE") {
               record.terminal = false;
@@ -140,8 +173,9 @@
             }
             record.state = error.code === "TRACKER_SAVE_UNCONFIRMED" ? "save-unconfirmed" : "failed";
             await onOutcome(record, error.code === "BANNED_COMPANY" ? error.message
-              : error.code === "TRACKER_SAVE_UNCONFIRMED" ? "Save not confirmed. Check Kai Flow."
-              : "Could not save to Kai Flow.");
+              : error.code === "TRACKER_SAVE_UNCONFIRMED" ? "Save not confirmed. Check ApplicantAlly."
+              : /^PROFILE_ROUTING_/u.test(error.code || "") ? error.message
+              : "Could not save to ApplicantAlly.");
           }
         }
         await write(records);

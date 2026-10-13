@@ -158,7 +158,7 @@ test("legacy and modern result cards collect using actual scraper details, skip 
     assert.match(h.notices.at(-1).text, /last results page/);
     assert.equal(h.notices.length, 2, "only start and completion alerts appear, without per-job progress");
     assert.equal(h.document.querySelector("[data-job-tracker-collection]"), null, "notices disappear and no persistent panel remains");
-    for (const capture of h.captures) assert.ok(capture.time - h.selections.find((entry) => entry.id === capture.job.jobId).time >= 10_000);
+    for (const capture of h.captures) assert.ok(capture.time - h.selections.find((entry) => entry.id === capture.job.jobId).time >= 5_000);
   }
 });
 
@@ -225,6 +225,7 @@ test("hidden LinkedIn results still select, dismiss and capture once across page
   for (const dismissRemovesCard of [false, true]) {
     const h = fixture(t, [[item(1)], [item(2, { easy: true })]], { modern: true, standaloneTitle: true, dismissRemovesCard });
     h.hide(true);
+    assert.equal(h.document.hasFocus(), false, "collection does not require the LinkedIn document to have focus");
     await h.advance(300_000);
     assert.deepEqual(h.captures.map((entry) => entry.job.jobId), ["1", "2"]);
     assert.deepEqual(h.dismissals, ["1", "2"]);

@@ -10,7 +10,7 @@
     <main>
       <header class="header">
         <div>
-          <h1>Save to Kai Flow</h1>
+          <h1>Save to ApplicantAlly</h1>
           <p id="status" role="status">Ready to read the LinkedIn job.</p>
         </div>
         <button id="scrape" type="button">Scrape</button>
@@ -18,10 +18,11 @@
 
       <div class="scroll-content">
         <section class="connection">
-          <p id="connectionStatus" role="status">Checking Kai Flow…</p>
+          <p id="connectionStatus" role="status">Checking folder access…</p>
+          <button id="folderSettings" class="secondary" type="button">Folder settings</button>
           <button id="refreshConnection" class="secondary" type="button">Refresh</button>
         </section>
-        <p>Jobs are saved in Kai Flow. Use its publish button to copy them to Google Sheets.</p>
+        <p>Jobs are saved directly in your ApplicantAlly data folder. Use the app’s publish button to copy them to Google Sheets.</p>
         <details id="bannedSettings">
           <summary>Banned companies</summary>
           <div class="settings-fields">
@@ -74,6 +75,7 @@
       </section>
     </main>
 
+    <script src="src/profile-routing.js"></script>
     <script src="src/popup-kai-flow.js"></script>
   </body>
 </html>

@@ -138,26 +138,6 @@ test("a user card selection waits for the matching detail identity and captures 
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
 });
 
-test("a trusted card click finishes its capture in a hidden tab without accepting stale details or replaying", async () => {
-  const target = card("Mews", "123"); target.title = "Senior JavaScript Engineer";
-  let details = { jobId: "999", jobIdSource: "details", company: target.company, title: target.title, description: "Previous job description" };
-  const app = harness([target], { scrape: () => details }); app.states.delete("Mews");
-  app.click(target, { isTrusted: true }); await app.advance(0);
-  assert.equal(target.clicks, 1, "the native X ran once after selection");
-  app.document.hidden = true;
-  details = { ...details, jobId: "123" }; await app.advance(1000);
-  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0, "the old description still cannot qualify");
-  details = { ...details, description: "Develop and maintain JavaScript applications and automated tests." };
-  await app.advance(400);
-  const captures = app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE");
-  assert.equal(captures.length, 1); assert.equal(captures[0].job.jobId, "123");
-  assert.equal(app.document.hidden, true);
-  app.events.visibilitychange(); await app.advance(15000);
-  app.document.hidden = false; app.events.visibilitychange(); await app.advance(1000);
-  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
-  assert.equal(target.clicks, 1);
-});
-
 test("new job headers cannot capture the previous description or a recycled card identity", async () => {
   const target = card("Mews", "123");
   let details = { jobId: "999", company: target.company, title: target.title, description: "Previous description" };
