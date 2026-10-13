@@ -22,6 +22,17 @@
           <button id="folderSettings" class="secondary" type="button">Folder settings</button>
           <button id="refreshConnection" class="secondary" type="button">Refresh</button>
         </section>
+        <section class="fields" aria-label="AI research settings">
+          <label>
+            <span>AI research model</span>
+            <select id="researchModel" aria-describedby="researchModelStatus researchModelHelp" disabled>
+              <option value="">Session default</option>
+            </select>
+          </label>
+          <p id="researchModelStatus" role="status">Loading the signed-in session’s models…</p>
+          <p id="researchModelHelp">Applies to new job sessions. Running and queued sessions keep their model.</p>
+          <button id="refreshResearchModels" class="secondary" type="button">Refresh models</button>
+        </section>
         <p>Jobs are saved directly in your ApplicantAlly data folder. Use the app’s publish button to copy them to Google Sheets.</p>
         <details id="bannedSettings">
           <summary>Banned companies</summary>

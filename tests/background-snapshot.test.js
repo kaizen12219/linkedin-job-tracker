@@ -129,6 +129,32 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
+test("AI model discovery and preference changes accept only trusted popup messages", async () => {
+  const fetchCalls = [];
+  const catalog = { models: [{ id: "session-alpha", name: "Session Alpha" }], defaultModel: "session-alpha" };
+  const h = harness({ researchFetch: async (url, options) => {
+    fetchCalls.push({ url, method: options.method });
+    return { ok: true, json: async () => catalog };
+  } });
+  await settle();
+  for (const type of ["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET"]) {
+    for (const sender of ["linkedin", "foreign"]) {
+      const { response } = await h.sendRaw({ type, model: "session-alpha" }, sender);
+      assert.equal(response.ok, false); assert.equal(response.error.code, "TRACKER_FORBIDDEN");
+    }
+    const result = await h.sendRaw({ type, model: "session-alpha" }, "popup", { id: "another-extension" });
+    assert.equal(result.response.ok, false);
+  }
+  assert.equal(fetchCalls.length, 0);
+  assert.equal(h.stored.jobTrackerResearchModelV1, undefined);
+  const options = await h.send({ type: "KAI_TRACKER_RESEARCH_MODELS" }, "popup");
+  assert.equal(options.ok, true); assert.equal(options.result.models[0].name, "Session Alpha");
+  const saved = await h.send({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model: "session-alpha" }, "popup");
+  assert.equal(saved.result.selectedModel, "session-alpha");
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-alpha");
+  assert.ok(fetchCalls.every(call => call.url.endsWith("/job-research/models") && call.method === "GET"));
+});
+
 test("closed or unverified application controls cannot reach a Sheet save", async () => {
   const h = harness(); await settle();
   for (const flags of [{ applicationsClosed: true }, { applicationsAvailable: false }]) {

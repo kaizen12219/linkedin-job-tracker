@@ -11,6 +11,8 @@ This extension captures qualifying LinkedIn jobs into ApplicantAlly. Research us
 5. Start the research worker with `scripts/start-research.ps1` and keep Codex signed in.
 6. Capture a job. Profiles, duplicate checks and saves use the selected folder directly.
 
+The popup’s **AI research model** selector loads model names from the signed-in session’s catalog. Choose a model or **Session default**, and use **Refresh models** after changing accounts or when choices change. The setting applies to new job sessions. A queued capture freezes its chosen model, and retries and recovered sessions retain it. Discovery uses the existing local research worker; profile reads and saves continue to use ApplicantAlly’s folder directly.
+
 Jobs, results, and résumé links are stored in ApplicantAlly’s app-folder data. In the extension popup, open **Folder settings → Choose folder** and select your extracted ApplicantAlly folder or its `data/workspace` directory. Chrome remembers the folder handle. The tracker reads profiles and duplicate records and writes new job files directly, including while ApplicantAlly is closed. ApplicantAlly watches these files when open and loads them on startup. Google Sheets receives a snapshot only when you use ApplicantAlly’s publish button.
 
 ## Capture a job

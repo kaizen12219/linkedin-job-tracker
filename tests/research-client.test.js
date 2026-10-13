@@ -9,8 +9,10 @@ const role = { eligible: true, category: "software-development", evidence: dutie
 const job = { company: "Mews", title: "Product Builder - Fintech", description: `${duties} This role is fully remote. Apply to hiring@mews.com.`, workplaceType: "remote", isEasyApply: true,
   sourceUrl: "https://www.linkedin.com/jobs/view/123", applyUrl: "https://www.linkedin.com/jobs/view/123", jobId: "123", privateKey: "do-not-send", profile: "do-not-send" };
 const result = { decision: "save", company: job.company, title: job.title, role, application: { url: "https://mews.com/careers/jobs/123", company: job.company, title: job.title, applicationsOpen: true, free: true, evidence: "Open application form observed with submit button." } };
+const modelCatalog = { models: [{ id: "session-model-alpha", name: "Research Alpha" }, { id: "session-model-beta", name: "Research Beta" }], defaultModel: "session-model-alpha" };
 function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
+  catalog = modelCatalog, catalogError = null,
   profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
   const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [];
   let researchWrites = 0;
@@ -26,6 +28,10 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   const fetchImpl = async (url, options) => {
     calls.push({ url, options: { ...options, signal: undefined } });
     if (networkError) throw networkError;
+    if (url.endsWith("/models")) {
+      if (catalogError) throw catalogError;
+      return { ok: true, json: async () => clone(catalog) };
+    }
     if (options.method === "POST") {
       if (failPostOnce) { failPostOnce = false; throw new Error("connection lost"); }
       if (postStatus >= 400) return { ok: false, status: postStatus, json: async () => {
@@ -44,6 +50,109 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   return { client, stored, calls, saves, outcomes, remembered, alarmCalls, setResponse(value) { response = value; },
     setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
 }
+
+test("model options use the signed-in session catalog and labels with the saved selection", async () => {
+  const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-beta" } });
+  const options = await h.client.getModels();
+  assert.deepEqual(clone(options.models).map(({ id, name }) => ({ id, name })), modelCatalog.models);
+  assert.equal(options.defaultModel, "session-model-alpha");
+  assert.equal(options.selectedModel, "session-model-beta");
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].url, "http://127.0.0.1:8787/job-research/models");
+  assert.equal(h.calls[0].options.method, "GET");
+  assert.equal(h.calls[0].options.headers["X-Job-Tracker-Extension"], "stable-id");
+  assert.match(h.calls[0].options.headers["X-Job-Tracker-Client"], /^[a-f0-9]{64}$/u);
+});
+
+test("choosing a model validates against the current catalog and preserves the preference on rejection", async () => {
+  const h = harness();
+  await h.client.setModel("session-model-beta");
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-model-beta");
+  await assert.rejects(h.client.setModel("not-in-this-session"), /model|available/iu);
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-model-beta");
+  assert.ok(h.calls.every((call) => call.url.endsWith("/models") && call.options.method === "GET"));
+  assert.equal(h.stored.jobTrackerResearchV1, undefined);
+  assert.equal((await h.client.getModels()).selectedModel, "session-model-beta");
+});
+
+test("resetting to the session default works while the catalog is offline", async () => {
+  const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-beta" }, networkError: new Error("connection refused") });
+  await h.client.setModel("");
+  assert.equal(h.stored.jobTrackerResearchModelV1 || "", "");
+  assert.equal(h.calls.length, 0, "reset must not depend on a reachable model catalog");
+  h.setNetworkError(null);
+  assert.equal((await h.client.getModels()).selectedModel, "");
+});
+
+test("an unavailable catalog fails explicitly and leaves existing captures and the model preference intact", async () => {
+  const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-alpha" }, catalogError: new Error("catalog connection refused") });
+  const started = await h.client.start(job);
+  const pending = clone(h.stored.jobTrackerResearchV1);
+  await assert.rejects(h.client.getModels(), /unavailable|worker|models/iu);
+  await assert.rejects(h.client.setModel("session-model-beta"), /unavailable|worker|models/iu);
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-model-alpha");
+  assert.deepEqual(h.stored.jobTrackerResearchV1, pending);
+  await h.client.poll();
+  assert.equal(h.saves.length, 1);
+  assert.equal(h.saves[0].options.requestId, started.requestId);
+});
+
+test("offline captures freeze their selected model across preference changes, replay and worker restart", async () => {
+  const first = harness({ stored: { jobTrackerResearchModelV1: "session-model-alpha" }, networkError: new Error("connection refused") });
+  const started = await first.client.start(job, { profile: "Candidate" });
+  assert.equal(started.queued, true);
+  assert.equal(first.stored.jobTrackerResearchV1[0].model, "session-model-alpha");
+  const submitted = JSON.parse(first.calls[0].options.body);
+  assert.equal(submitted.model, "session-model-alpha");
+  assert.equal(submitted.job.model, undefined);
+  assert.equal(submitted.job.privateKey, undefined);
+  assert.equal(submitted.job.profile, undefined);
+  assert.equal(submitted.profile, undefined);
+  first.stored.jobTrackerResearchModelV1 = "session-model-beta";
+  const replay = await first.client.start(job, { profile: "Candidate" });
+  assert.equal(replay.requestId, started.requestId);
+  assert.equal(replay.replayed, true);
+  assert.equal(first.calls.length, 1);
+  assert.equal(first.stored.jobTrackerResearchV1[0].model, "session-model-alpha");
+  const resumed = harness({ stored: first.stored });
+  await resumed.client.poll();
+  const retried = JSON.parse(resumed.calls[0].options.body);
+  assert.equal(retried.requestId, started.requestId);
+  assert.equal(retried.model, "session-model-alpha");
+  assert.equal(resumed.saves.length, 1);
+  assert.equal(resumed.saves[0].options.requestId, started.requestId);
+  await resumed.client.start({ ...job, jobId: "456", sourceUrl: "https://www.linkedin.com/jobs/view/456", company: "Different Company" });
+  const newRequest = JSON.parse(resumed.calls.at(-1).options.body);
+  assert.equal(newRequest.model, "session-model-beta");
+  assert.notEqual(newRequest.requestId, started.requestId);
+});
+
+test("session-default captures do not acquire a later model preference when their requests are retried", async () => {
+  const first = harness({ networkError: new Error("connection refused") });
+  const started = await first.client.start(job);
+  assert.equal(first.stored.jobTrackerResearchV1[0].model, "");
+  assert.equal(Object.hasOwn(JSON.parse(first.calls[0].options.body), "model"), false);
+  first.stored.jobTrackerResearchModelV1 = "session-model-beta";
+  const resumed = harness({ stored: first.stored });
+  await resumed.client.poll();
+  const body = JSON.parse(resumed.calls[0].options.body);
+  assert.equal(body.requestId, started.requestId);
+  assert.equal(Object.hasOwn(body, "model"), false);
+  assert.equal(resumed.saves.length, 1);
+});
+
+test("legacy queued captures without a model retain their original request shape", async () => {
+  const first = harness({ networkError: new Error("connection refused") });
+  const started = await first.client.start(job);
+  delete first.stored.jobTrackerResearchV1[0].model;
+  first.stored.jobTrackerResearchModelV1 = "session-model-beta";
+  const resumed = harness({ stored: first.stored });
+  await resumed.client.poll();
+  const body = JSON.parse(resumed.calls[0].options.body);
+  assert.deepEqual(Object.keys(body).sort(), ["job", "requestId"]);
+  assert.equal(body.requestId, started.requestId);
+  assert.equal(resumed.saves.length, 1);
+});
 test("an unavailable research worker queues a durable capture and recovers with the same ID after restart", async () => {
   const first = harness({ networkError: new Error("connection refused") });
   const started = await first.client.start(job, { profile: "Candidate", tabId: 42 });

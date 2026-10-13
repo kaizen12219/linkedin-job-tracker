@@ -2,6 +2,7 @@
 const fixtureMode = new URLSearchParams(location.search).get("mode");
 const fixtureStorage = {};
 let fixtureSaved = false;
+let fixtureResearchModel = fixtureMode === "model-unavailable" ? "retired-model" : "";
 const fixtureJob = { company: "Example Systems", title: "Senior Software Engineer", description: "Build reliable tools for distributed teams.\n\nResponsibilities\n" + "Work with the product team to improve the experience.\n".repeat(35), applyUrl: "https://jobs.example.test/engineer" };
 window.chrome = {
   runtime: { sendMessage: async (message) => {
@@ -17,6 +18,14 @@ window.chrome = {
     if (message.type === "KAI_TRACKER_CLEAR_CONFIG") return { ok: true, result: { configured: false, connection: "unconfigured" } };
     if (message.type === "KAI_TRACKER_BANNED_GET") return { ok: true, result: { companies: [] } };
     if (message.type === "KAI_TRACKER_BANNED_SET") return { ok: true, result: { companies: message.companies || [] } };
+    if (["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET"].includes(message.type)) {
+      if (["models-offline", "offline"].includes(fixtureMode)) return { ok: false, error: { code: "RESEARCH_UNAVAILABLE", message: "The research worker is unavailable. Start it and refresh the AI models." } };
+      if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") {
+        fixtureResearchModel = message.model;
+        return { ok: true, result: { selectedModel: fixtureResearchModel } };
+      }
+      return { ok: true, result: { models: [{ id: "gpt-6.1-sol", name: "GPT-6.1-Sol" }, { id: "gpt-6-astra", name: "GPT-6-Astra" }], defaultModel: "gpt-6.1-sol", selectedModel: fixtureResearchModel } };
+    }
     if (fixtureMode === "offline" && message.type !== "KAI_TRACKER_SAVE") return { ok: false, error: { code: "TRACKER_OFFLINE", message: "Google Sheets is unavailable. Nothing is queued." } };
     if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles: ["sample-profile-a", "sample-profile-b"] } };
     if (message.type === "KAI_TRACKER_DUPLICATE") return { ok: true, result: { duplicate: fixtureMode === "duplicate" || fixtureSaved ? { company: fixtureJob.company, jobTitle: fixtureJob.title, status: "added", jobDescriptionPreview: "Build reliable tools for distributed teams." } : null } };

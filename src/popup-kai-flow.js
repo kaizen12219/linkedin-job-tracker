@@ -4,6 +4,9 @@ const saveButton = document.querySelector("#saveSheet");
 const openApplyUrlLink = document.querySelector("#openApplyUrl");
 const refreshButton = document.querySelector("#refreshConnection");
 const profileSelect = document.querySelector("#profile");
+const researchModelSelect = document.querySelector("#researchModel");
+const researchModelStatus = document.querySelector("#researchModelStatus");
+const refreshResearchModelsButton = document.querySelector("#refreshResearchModels");
 const connectionEl = document.querySelector("#connectionStatus");
 const statusEl = document.querySelector("#status");
 const duplicateEl = document.querySelector("#duplicate");
@@ -32,12 +35,78 @@ let lookupVersion = 0;
 let optionsVersion = 0;
 let connectionState = "unconfigured";
 let duplicateTimer;
+let researchModelsVersion = 0;
+let researchModelsLoaded = false;
+let researchModelSaving = false;
+let selectedResearchModel = "";
 
 document.addEventListener("DOMContentLoaded", () => {
   void loadBannedCompanies();
+  void loadResearchModels();
   void loadOptions();
   void scrapeCurrentTab();
 });
+
+refreshResearchModelsButton.addEventListener("click", () => void loadResearchModels());
+researchModelSelect.addEventListener("change", async () => {
+  if (researchModelSaving || !researchModelsLoaded) return;
+  const previous = selectedResearchModel;
+  const model = researchModelSelect.value;
+  researchModelSaving = true;
+  ++researchModelsVersion;
+  researchModelSelect.disabled = true;
+  refreshResearchModelsButton.disabled = true;
+  researchModelStatus.textContent = "Saving the AI model…";
+  try {
+    const result = await request({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model });
+    selectedResearchModel = result.selectedModel;
+    researchModelSelect.value = selectedResearchModel;
+    researchModelStatus.textContent = "AI model saved for new job sessions.";
+  } catch (error) {
+    researchModelSelect.value = previous;
+    researchModelStatus.textContent = error.message;
+  } finally {
+    researchModelSaving = false;
+    researchModelSelect.disabled = !researchModelsLoaded;
+    refreshResearchModelsButton.disabled = false;
+  }
+});
+
+async function loadResearchModels() {
+  if (researchModelSaving) return;
+  const version = ++researchModelsVersion;
+  researchModelSelect.disabled = true;
+  refreshResearchModelsButton.disabled = true;
+  researchModelStatus.textContent = "Loading the signed-in session’s models…";
+  try {
+    const catalog = await request({ type: "KAI_TRACKER_RESEARCH_MODELS" });
+    if (version !== researchModelsVersion) return;
+    selectedResearchModel = catalog.selectedModel;
+    const defaultName = catalog.models.find((model) => model.id === catalog.defaultModel)?.name || catalog.defaultModel;
+    researchModelSelect.replaceChildren(new Option(`Session default · ${defaultName}`, ""));
+    for (const model of catalog.models) researchModelSelect.append(new Option(model.name, model.id));
+    const unavailable = selectedResearchModel && !catalog.models.some((model) => model.id === selectedResearchModel);
+    if (unavailable) {
+      const option = new Option(`${selectedResearchModel} — unavailable`, selectedResearchModel);
+      option.disabled = true;
+      researchModelSelect.append(option);
+    }
+    researchModelSelect.value = selectedResearchModel;
+    researchModelsLoaded = true;
+    researchModelStatus.textContent = unavailable
+      ? "Your saved model is unavailable. Choose another model for new sessions."
+      : "Models reported by the signed-in session.";
+  } catch (error) {
+    if (version !== researchModelsVersion) return;
+    researchModelsLoaded = false;
+    researchModelStatus.textContent = error.message;
+  } finally {
+    if (version === researchModelsVersion) {
+      researchModelSelect.disabled = !researchModelsLoaded;
+      refreshResearchModelsButton.disabled = false;
+    }
+  }
+}
 
 chrome.runtime.onMessage?.addListener((message, sender) => {
   if (sender?.id === chrome.runtime.id && message?.type === "KAI_TRACKER_PROFILES_CHANGED") void loadOptions(true);

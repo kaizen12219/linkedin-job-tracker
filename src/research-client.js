@@ -3,6 +3,7 @@
   const ENDPOINT = "http://127.0.0.1:8787/job-research";
   const STORAGE_KEY = "jobTrackerResearchV1";
   const CLIENT_KEY = "jobTrackerResearchClientV1";
+  const MODEL_KEY = "jobTrackerResearchModelV1";
   const ALARM = "job-tracker-research";
   const MAX_AGE = 24 * 60 * 60 * 1000;
   const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504]);
@@ -59,6 +60,45 @@
       if (!response.ok) throw Object.assign(new Error(value.error || "Research request failed."), { status: response.status });
       return value;
     }
+    async function selectedModel() {
+      const value = (await storage.get(MODEL_KEY))[MODEL_KEY];
+      return typeof value === "string" ? value : "";
+    }
+    async function getModels() {
+      let catalog;
+      try { catalog = await request("/models"); }
+      catch (error) {
+        if (error.retryableResearch) error.message = "The research worker is unavailable. Start it and refresh the AI models.";
+        throw error;
+      }
+      if (!catalog || !Array.isArray(catalog.models) || typeof catalog.defaultModel !== "string" ||
+        catalog.models.some((model) => typeof model?.id !== "string" || !model.id || typeof model.name !== "string")) {
+        throw Object.assign(new Error("The signed-in session's model list could not be read. Refresh the AI models."),
+          { code: "RESEARCH_MODELS_UNAVAILABLE" });
+      }
+      return { models: catalog.models.map((model) => ({ id: model.id, name: model.name,
+        ...(typeof model.description === "string" ? { description: model.description } : {}),
+        ...(Array.isArray(model.reasoningEfforts) ? { reasoningEfforts: model.reasoningEfforts.filter((effort) => typeof effort === "string") } : {}),
+        ...(typeof model.defaultReasoningEffort === "string" ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}) })),
+        defaultModel: catalog.defaultModel, selectedModel: await selectedModel() };
+    }
+    async function setModel(model) {
+      if (typeof model !== "string" || model.length > 200) {
+        throw Object.assign(new Error("Choose an AI model from the signed-in session's list."), { code: "RESEARCH_MODEL_INVALID" });
+      }
+      if (model && !(await getModels()).models.some((entry) => entry.id === model)) {
+        throw Object.assign(new Error("That AI model is unavailable in the signed-in session. Refresh the model list and choose again."),
+          { code: "RESEARCH_MODEL_UNAVAILABLE" });
+      }
+      await storage.set({ [MODEL_KEY]: model });
+      return { selectedModel: model };
+    }
+    function submission(record) {
+      return { requestId: record.requestId, job: publicJob(record.job), ...(record.model ? { model: record.model } : {}) };
+    }
+    function freezeAcceptedModel(record, response) {
+      if (!record.model && typeof response?.model === "string" && response.model) record.model = response.model;
+    }
     function publicJob(job) {
       return Object.fromEntries(["company", "title", "description", "applyUrl", "sourceUrl", "jobId", "isEasyApply", "workplaceType", "posterName", "applicationsClosed", "selectedRegion", "selectedRegionSource", "profileRoutingVersion"]
         .map((name) => [name, job[name]]).filter(([, value]) => value !== undefined));
@@ -78,7 +118,7 @@
         if (records.filter((entry) => !entry.terminal).length >= 100) throw new Error("Too many jobs are being researched. Wait for the current jobs to finish.");
         const routing = region ? JobProfileRouting.snapshot(capturedJob, await sheetClient.getOptions({ refresh: true })) : null;
         const selection = routing && region !== "us" ? JobProfileRouting.choose(capturedJob, routing) : null;
-        const record = { requestId: cryptoImpl.randomUUID(), identity, job: capturedJob, profile: selection?.profile ?? (routing ? "" : profile), tabId,
+        const record = { requestId: cryptoImpl.randomUUID(), identity, job: capturedJob, model: await selectedModel(), profile: selection?.profile ?? (routing ? "" : profile), tabId,
           ...(routing ? { profileRouting: routing } : {}), ...(selection ? { profileSelection: selection } : {}),
           sheetUrl: state.sheetUrl, createdAt: Date.now(), state: "requesting" };
         const active = records.filter((entry) => !entry.terminal);
@@ -87,7 +127,7 @@
         await write(next);
         if (selection) await onProfileSelected(record, selection);
         try {
-          await request("", { requestId: record.requestId, job: publicJob(record.job) });
+          freezeAcceptedModel(record, await request("", submission(record)));
           record.state = "researching";
           await write(next);
         } catch (error) {
@@ -116,7 +156,7 @@
           let response;
           try {
             if (record.state === "requesting") {
-              await request("", { requestId: record.requestId, job: publicJob(record.job) });
+              freezeAcceptedModel(record, await request("", submission(record)));
               record.state = "researching";
             }
             response = await request(`/${encodeURIComponent(record.requestId)}`);
@@ -182,7 +222,7 @@
       });
     }
     function clear() { return serial(async () => { await storage.remove(STORAGE_KEY); await alarms.clear(ALARM); }); }
-    return { start, poll, clear };
+    return { start, poll, clear, getModels, setModel };
   }
   root.JobResearchClient = Object.freeze({ create, ALARM });
 })(typeof globalThis === "undefined" ? this : globalThis);

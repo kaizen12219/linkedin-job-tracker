@@ -57,6 +57,7 @@ function createPopup({
   job = JOB,
   profiles = ["Kai", "Alex"],
   selectedProfile = "",
+  selectedModel = "",
   configured = true,
   respond,
   banned = []
@@ -66,7 +67,7 @@ function createPopup({
     "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description",
     "sheetSettings", "credentialsFile", "credentialsStatus", "sheetUrl", "sheetGid",
     "saveSheetSettings", "removeSheetSettings", "bannedSettings", "bannedCompanies", "bannedStatus",
-    "saveBanned", "exportBanned", "importBanned"
+    "saveBanned", "exportBanned", "importBanned", "researchModel", "researchModelStatus", "refreshResearchModels"
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element(id === "profile" ? "select" : "div")]));
   elements.profile.append(Object.assign(new Element("option", ""), { textContent: "No profile" }));
@@ -109,6 +110,14 @@ function createPopup({
           profileOptions: { profiles }
         } };
         if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles } };
+        if (message.type === "KAI_TRACKER_RESEARCH_MODELS") return { ok: true, result: {
+          models: [{ id: "session-alpha", name: "Session Alpha" }, { id: "session-beta", name: "Session Beta" }],
+          defaultModel: "session-alpha", selectedModel
+        } };
+        if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") {
+          selectedModel = message.model;
+          return { ok: true, result: { selectedModel } };
+        }
         if (message.type === "KAI_TRACKER_CONFIGURE") {
           configured = true;
           return { ok: true, result: { configured: true, connection: "connected", sheetUrl: SHEET_URL, sheetGid: 123, sheetTitle: "Jobs" } };
@@ -163,6 +172,7 @@ function createPopup({
     async click(id) { await elements[id].dispatch("click"); await settle(); },
     async input(id, value) { elements[id].value = value; await elements[id].dispatch("input"); await settle(); },
     async select(value) { elements.profile.value = value; await elements.profile.dispatch("change"); await settle(); },
+    async selectModel(value) { elements.researchModel.value = value; await elements.researchModel.dispatch("change"); await settle(); },
     async chooseFile(file) { elements.credentialsFile.files = [file]; await elements.credentialsFile.dispatch("change"); await settle(); }
   };
 }
@@ -256,4 +266,62 @@ test("an unconfirmed direct save is never retried or queued by the popup", async
 test("popup field order remains company, title, URL, profile, description", () => {
   const positions = ["company", "title", "applyUrl", "profile", "description"].map((id) => HTML.indexOf(`id="${id}"`));
   assert.equal(positions.every((position, index) => index === 0 || position > positions[index - 1]), true);
+});
+
+test("research models load before folder setup and selections persist through the background only", async () => {
+  const app = createPopup({ configured: false, selectedModel: "session-beta" });
+  await app.start();
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.deepEqual(app.elements.researchModel.children.map(option => [option.textContent, option.value]),
+    [["Session default · Session Alpha", ""], ["Session Alpha", "session-alpha"], ["Session Beta", "session-beta"]]);
+  await app.selectModel("");
+  assert.deepEqual(app.messages.find(message => message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"),
+    { type: "KAI_TRACKER_RESEARCH_MODEL_SET", model: "" });
+  assert.equal(app.storageWrites.length, 0);
+  assert.equal(app.elements.researchModel.value, "");
+  assert.match(app.elements.researchModelStatus.textContent, /saved for new job sessions/);
+  assert.equal(app.elements.saveSheet.disabled, true);
+});
+
+test("an unavailable saved model remains visible until an explicit replacement is saved", async () => {
+  const app = createPopup({ selectedModel: "retired-model" });
+  await app.start();
+  assert.equal(app.elements.researchModel.value, "retired-model");
+  assert.equal(app.elements.researchModel.children.at(-1).disabled, true);
+  assert.match(app.elements.researchModelStatus.textContent, /saved model is unavailable/);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"), false);
+  await app.selectModel("session-beta");
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.equal(app.elements.saveSheet.disabled, false);
+});
+
+test("a rejected model choice reverts the control and leaves profile and save controls usable", async () => {
+  const app = createPopup({ selectedModel: "session-alpha", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") return { ok: false, error: { message: "Selected model is no longer available." } };
+  } });
+  await app.start();
+  await app.selectModel("session-beta");
+  assert.equal(app.elements.researchModel.value, "session-alpha");
+  assert.match(app.elements.researchModelStatus.textContent, /no longer available/);
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.refreshResearchModels.disabled, false);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  assert.equal(app.storageWrites.length, 0);
+});
+
+test("model discovery outages do not disable folder captures and refresh recovers the catalog", async () => {
+  let offline = true;
+  const app = createPopup({ respond(message) {
+    if (offline && message.type === "KAI_TRACKER_RESEARCH_MODELS") return { ok: false, error: { message: "Start the research worker and refresh." } };
+  } });
+  await app.start();
+  assert.equal(app.elements.researchModel.disabled, true);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  assert.match(app.elements.researchModelStatus.textContent, /Start the research worker/);
+  offline = false;
+  await app.click("refreshResearchModels");
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.researchModel.children.length, 3);
+  assert.equal(app.elements.connectionStatus.textContent, "Connected · Jobs");
 });
