@@ -12,14 +12,14 @@ const result = { decision: "save", company: job.company, title: job.title, role,
 const modelCatalog = { models: [{ id: "session-model-alpha", name: "Research Alpha" }, { id: "session-model-beta", name: "Research Beta" }], defaultModel: "session-model-alpha" };
 function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
-  catalog = modelCatalog, catalogError = null, nativeMessaging,
+  catalog = modelCatalog, catalogError = null, nativeMessaging, acceptedSettings = {},
   profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
   const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [];
   let researchWrites = 0;
   let state = { configured: true, sheetUrl: "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1" };
   let response = { state: "completed", completedAt: new Date().toISOString(), result };
   let banned = false;
-  const storage = { async get(key) { return { [key]: clone(stored[key]) }; }, async set(values) {
+  const storage = { async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, clone(stored[name])])); }, async set(values) {
     if (failClientKeyWrite && Object.hasOwn(values, "jobTrackerResearchClientV1")) throw new Error("Browser client key storage write failed.");
     if (Object.hasOwn(values, "jobTrackerResearchV1") && ++researchWrites === failResearchWriteAt) throw new Error("Research storage write failed.");
     Object.assign(stored, clone(values));
@@ -38,7 +38,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
         if (postJsonError) throw postJsonError;
         return { error: "Research service rejected the request." };
       } };
-      return { ok: true, json: async () => ({ state: "researching" }) };
+      return { ok: true, json: async () => ({ state: "researching", ...acceptedSettings }) };
     }
     return { ok: true, json: async () => clone(response) };
   };
@@ -175,6 +175,85 @@ test("legacy queued captures without a model retain their original request shape
   assert.equal(body.requestId, started.requestId);
   assert.equal(resumed.saves.length, 1);
 });
+
+const effortCatalog = { defaultModel: "session-model-alpha", defaultReasoningEffort: "xhigh", models: [
+  { id: "session-model-alpha", name: "Research Alpha", reasoningEfforts: ["medium", "high", "xhigh", "ultra"], defaultReasoningEffort: "medium" },
+  { id: "session-model-beta", name: "Research Beta", reasoningEfforts: ["medium", "high"], defaultReasoningEffort: "medium" }
+] };
+
+test("reasoning levels come from the current model catalog, including the session-default model", async () => {
+  const h = harness({ catalog: effortCatalog });
+  assert.deepEqual(clone(await h.client.setReasoningEffort("ultra")), { selectedModel: "", selectedReasoningEffort: "ultra" });
+  const options = await h.client.getModels();
+  assert.equal(options.defaultReasoningEffort, "xhigh");
+  assert.equal(options.selectedReasoningEffort, "ultra");
+  assert.deepEqual(clone(options.models[0].reasoningEfforts), effortCatalog.models[0].reasoningEfforts);
+  await h.client.start(job);
+  const body = JSON.parse(h.calls.at(-1).options.body);
+  assert.equal(Object.hasOwn(body, "model"), false);
+  assert.equal(body.reasoningEffort, "ultra");
+  assert.equal(body.job.reasoningEffort, undefined);
+});
+
+test("model changes retain a supported level or reset it atomically to automatic", async () => {
+  const h = harness({ catalog: effortCatalog });
+  await h.client.setReasoningEffort("high");
+  assert.deepEqual(clone(await h.client.setModel("session-model-beta")), { selectedModel: "session-model-beta", selectedReasoningEffort: "high" });
+  assert.deepEqual(clone(await h.client.setModel("")), { selectedModel: "", selectedReasoningEffort: "high" });
+  await h.client.setReasoningEffort("ultra");
+  const [settings] = await Promise.all([h.client.setModel("session-model-beta"), h.client.start(job)]);
+  assert.equal(settings.selectedReasoningEffort, "");
+  const captured = h.stored.jobTrackerResearchV1[0];
+  assert.equal(captured.model, "session-model-beta");
+  assert.equal(captured.reasoningEffort, "");
+  assert.equal(h.stored.jobTrackerResearchEffortV1, "");
+});
+
+test("unsupported or malformed levels leave the saved model and level intact", async () => {
+  const h = harness({ catalog: effortCatalog, stored: { jobTrackerResearchModelV1: "session-model-beta", jobTrackerResearchEffortV1: "high" } });
+  await assert.rejects(h.client.setReasoningEffort("ultra"), error => error.code === "RESEARCH_EFFORT_UNAVAILABLE");
+  await assert.rejects(h.client.setReasoningEffort({ level: "high" }), error => error.code === "RESEARCH_EFFORT_INVALID");
+  assert.equal(h.stored.jobTrackerResearchEffortV1, "high");
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-model-beta");
+  h.setNetworkError(new Error("offline"));
+  await assert.rejects(h.client.setReasoningEffort("medium"), error => error.retryableResearch === true);
+  assert.equal(h.stored.jobTrackerResearchEffortV1, "high");
+  assert.equal((await h.client.setReasoningEffort("")).selectedReasoningEffort, "");
+});
+
+test("offline captures freeze their model and level across preference changes, replay and extension restart", async () => {
+  const first = harness({ stored: { jobTrackerResearchModelV1: "session-model-alpha", jobTrackerResearchEffortV1: "ultra" }, networkError: new Error("offline") });
+  const started = await first.client.start(job);
+  first.stored.jobTrackerResearchModelV1 = "session-model-beta";
+  first.stored.jobTrackerResearchEffortV1 = "medium";
+  assert.equal((await first.client.start(job)).requestId, started.requestId);
+  const resumed = harness({ stored: first.stored });
+  await resumed.client.poll();
+  const retried = JSON.parse(resumed.calls[0].options.body);
+  assert.equal(retried.requestId, started.requestId);
+  assert.equal(retried.model, "session-model-alpha");
+  assert.equal(retried.reasoningEffort, "ultra");
+  await resumed.client.start({ ...job, jobId: "456", company: "Different Company" });
+  const newRequest = JSON.parse(resumed.calls.at(-1).options.body);
+  assert.equal(newRequest.model, "session-model-beta");
+  assert.equal(newRequest.reasoningEffort, "medium");
+});
+
+test("automatic and legacy captures ignore later level preferences and freeze the worker's accepted default", async () => {
+  const first = harness({ networkError: new Error("offline") });
+  const started = await first.client.start(job);
+  delete first.stored.jobTrackerResearchV1[0].reasoningEffort;
+  first.stored.jobTrackerResearchEffortV1 = "ultra";
+  const resumed = harness({ stored: first.stored, acceptedSettings: { model: "session-model-alpha", reasoningEffort: "xhigh" } });
+  resumed.setResponse({ state: "researching" });
+  await resumed.client.poll();
+  const body = JSON.parse(resumed.calls[0].options.body);
+  assert.equal(body.requestId, started.requestId);
+  assert.equal(Object.hasOwn(body, "reasoningEffort"), false);
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].model, "session-model-alpha");
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].reasoningEffort, "xhigh");
+});
+
 test("an unavailable research worker queues a durable capture and recovers with the same ID after restart", async () => {
   const first = harness({ networkError: new Error("connection refused") });
   const started = await first.client.start(job, { profile: "Candidate", tabId: 42 });

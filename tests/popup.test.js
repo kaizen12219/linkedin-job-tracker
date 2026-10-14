@@ -14,6 +14,10 @@ const JOB = Object.freeze({
   description: "Build and maintain accessible software.",
   applyUrl: "https://example.test/jobs/123"
 });
+const MODELS = [
+  { id: "session-alpha", name: "Session Alpha", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultReasoningEffort: "medium" },
+  { id: "session-beta", name: "Session Beta", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"], defaultReasoningEffort: "medium" }
+];
 
 class Element {
   constructor(tagName = "div", value = "") {
@@ -58,6 +62,8 @@ function createPopup({
   profiles = ["Kai", "Alex"],
   selectedProfile = "",
   selectedModel = "",
+  selectedReasoningEffort = "",
+  models = MODELS,
   configured = true,
   respond,
   banned = []
@@ -67,7 +73,7 @@ function createPopup({
     "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description",
     "sheetSettings", "credentialsFile", "credentialsStatus", "sheetUrl", "sheetGid",
     "saveSheetSettings", "removeSheetSettings", "bannedSettings", "bannedCompanies", "bannedStatus",
-    "saveBanned", "exportBanned", "importBanned", "researchModel", "researchModelStatus", "refreshResearchModels", "startResearch"
+    "saveBanned", "exportBanned", "importBanned", "researchModel", "researchEffort", "researchModelStatus", "refreshResearchModels", "startResearch"
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element(id === "profile" ? "select" : "div")]));
   elements.profile.append(Object.assign(new Element("option", ""), { textContent: "No profile" }));
@@ -111,12 +117,16 @@ function createPopup({
         } };
         if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles } };
         if (message.type === "KAI_TRACKER_RESEARCH_MODELS") return { ok: true, result: {
-          models: [{ id: "session-alpha", name: "Session Alpha" }, { id: "session-beta", name: "Session Beta" }],
-          defaultModel: "session-alpha", selectedModel
+          models, defaultModel: "session-alpha", defaultReasoningEffort: "xhigh", selectedModel, selectedReasoningEffort
         } };
         if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") {
           selectedModel = message.model;
-          return { ok: true, result: { selectedModel } };
+          if (selectedReasoningEffort && !models.find(model => model.id === (selectedModel || "session-alpha"))?.reasoningEfforts?.includes(selectedReasoningEffort)) selectedReasoningEffort = "";
+          return { ok: true, result: { selectedModel, selectedReasoningEffort } };
+        }
+        if (message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET") {
+          selectedReasoningEffort = message.reasoningEffort;
+          return { ok: true, result: { selectedModel, selectedReasoningEffort } };
         }
         if (message.type === "KAI_TRACKER_RESEARCH_START") return { ok: true, result: { status: "ready", alreadyRunning: false } };
         if (message.type === "KAI_TRACKER_CONFIGURE") {
@@ -174,6 +184,7 @@ function createPopup({
     async input(id, value) { elements[id].value = value; await elements[id].dispatch("input"); await settle(); },
     async select(value) { elements.profile.value = value; await elements.profile.dispatch("change"); await settle(); },
     async selectModel(value) { elements.researchModel.value = value; await elements.researchModel.dispatch("change"); await settle(); },
+    async selectEffort(value) { elements.researchEffort.value = value; await elements.researchEffort.dispatch("change"); await settle(); },
     async chooseFile(file) { elements.credentialsFile.files = [file]; await elements.credentialsFile.dispatch("change"); await settle(); }
   };
 }
@@ -445,4 +456,137 @@ test("an older model request cannot replace the recovered model catalog", async 
   assert.equal(app.elements.researchModel.value, "session-beta");
   assert.equal(app.elements.researchModel.disabled, false);
   assert.match(app.elements.researchModelStatus.textContent, /Models reported/);
+});
+
+test("reasoning levels come from the selected model and use ApplicantAlly labels", async () => {
+  const app = createPopup({ configured: false });
+  await app.start();
+  assert.match(HTML, /<span>Reasoning level<\/span>/);
+  assert.match(HTML, /Running and queued sessions keep their model and reasoning level/);
+  assert.equal(app.elements.researchEffort.disabled, false);
+  assert.deepEqual(app.elements.researchEffort.children.map(option => [option.textContent, option.value]), [
+    ["Automatic · Extra high (xhigh)", ""], ["Low", "low"], ["Medium", "medium"], ["High", "high"],
+    ["Extra high (xhigh)", "xhigh"], ["Maximum (max)", "max"], ["Ultra", "ultra"]
+  ]);
+  await app.selectEffort("medium");
+  assert.deepEqual(app.messages.find(message => message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET"),
+    { type: "KAI_TRACKER_RESEARCH_EFFORT_SET", reasoningEffort: "medium" });
+  assert.equal(app.elements.researchEffort.value, "medium");
+  assert.equal(app.elements.researchModel.value, "");
+  assert.match(app.elements.researchModelStatus.textContent, /Reasoning level saved/);
+  assert.deepEqual(app.storageWrites, []);
+  await app.selectModel("session-beta");
+  assert.equal(app.elements.researchEffort.value, "medium");
+  assert.equal(app.elements.researchEffort.children.some(option => option.value === "ultra"), false);
+});
+
+test("switching models displays the returned compatible level or automatic reset", async () => {
+  const app = createPopup({ selectedModel: "session-alpha", selectedReasoningEffort: "ultra" });
+  await app.start();
+  assert.equal(app.elements.researchEffort.value, "ultra");
+  await app.selectModel("session-beta");
+  assert.equal(app.elements.researchEffort.value, "");
+  assert.equal(app.elements.researchEffort.children.some(option => option.value === "ultra"), false);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET"), false);
+});
+
+test("automatic level uses the selected model default when the research default is unsupported", async () => {
+  const app = createPopup({ selectedModel: "session-beta", models: [MODELS[0],
+    { id: "session-beta", name: "Session Beta", reasoningEfforts: ["low", "medium"], defaultReasoningEffort: "medium" }
+  ] });
+  await app.start();
+  assert.deepEqual(app.elements.researchEffort.children.map(option => [option.textContent, option.value]),
+    [["Automatic · Medium", ""], ["Low", "low"], ["Medium", "medium"]]);
+});
+
+test("catalogs without reasoning metadata offer only automatic, without invented levels", async () => {
+  const app = createPopup({ models: [{ id: "session-alpha", name: "Session Alpha" }] });
+  await app.start();
+  assert.deepEqual(app.elements.researchEffort.children.map(option => [option.textContent, option.value]), [["Automatic", ""]]);
+  assert.equal(app.elements.researchEffort.disabled, true);
+  assert.equal(app.elements.researchModel.disabled, false);
+});
+
+test("an unavailable saved level remains visible until an explicit level change", async () => {
+  const app = createPopup({ selectedModel: "session-beta", selectedReasoningEffort: "ultra" });
+  await app.start();
+  assert.equal(app.elements.researchEffort.value, "ultra");
+  assert.equal(app.elements.researchEffort.children.at(-1).disabled, true);
+  assert.match(app.elements.researchModelStatus.textContent, /saved reasoning level is unavailable/);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET"), false);
+  await app.selectEffort("");
+  assert.equal(app.elements.researchEffort.value, "");
+  assert.equal(app.elements.researchEffort.children.some(option => option.value === "ultra"), false);
+});
+
+test("a rejected reasoning choice rolls back both controls while captures remain usable", async () => {
+  const app = createPopup({ selectedModel: "session-alpha", selectedReasoningEffort: "high", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET") return { ok: false, error: { message: "Ultra is no longer supported." } };
+  } });
+  await app.start();
+  await app.selectEffort("ultra");
+  assert.equal(app.elements.researchModel.value, "session-alpha");
+  assert.equal(app.elements.researchEffort.value, "high");
+  assert.equal(app.elements.researchEffort.disabled, false);
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  assert.match(app.elements.researchModelStatus.textContent, /no longer supported/);
+});
+
+test("a rejected model choice preserves its saved reasoning level", async () => {
+  const app = createPopup({ selectedModel: "session-alpha", selectedReasoningEffort: "ultra", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") return { ok: false, error: { message: "Model is no longer available." } };
+  } });
+  await app.start();
+  await app.selectModel("session-beta");
+  assert.equal(app.elements.researchModel.value, "session-alpha");
+  assert.equal(app.elements.researchEffort.value, "ultra");
+  assert.equal(app.elements.researchEffort.children.at(-1).disabled, false);
+});
+
+test("saving a level locks both settings and stale model refresh cannot replace the saved tuple", async () => {
+  let finishCatalog;
+  let finishSave;
+  let catalogCalls = 0;
+  const app = createPopup({ selectedModel: "session-alpha", selectedReasoningEffort: "medium", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODELS" && ++catalogCalls === 2) return new Promise(resolve => { finishCatalog = resolve; });
+    if (message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET") return new Promise(resolve => { finishSave = resolve; });
+  } });
+  await app.start();
+  await app.click("refreshResearchModels");
+  const selecting = app.selectEffort("ultra");
+  await settle();
+  assert.equal(app.elements.researchEffort.disabled, true);
+  assert.equal(app.elements.researchModel.disabled, true);
+  assert.equal(app.elements.startResearch.disabled, true);
+  assert.equal(app.elements.refreshResearchModels.disabled, true);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  await app.click("startResearch");
+  await app.selectModel("session-beta");
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_START" || message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"), false);
+  finishSave({ ok: true, result: { selectedModel: "session-alpha", selectedReasoningEffort: "ultra" } });
+  await selecting;
+  finishCatalog({ ok: true, result: { models: MODELS, defaultModel: "session-alpha", selectedModel: "session-beta", selectedReasoningEffort: "low" } });
+  await settle();
+  assert.equal(app.elements.researchModel.value, "session-alpha");
+  assert.equal(app.elements.researchEffort.value, "ultra");
+  assert.equal(app.elements.researchEffort.disabled, false);
+  assert.match(app.elements.researchModelStatus.textContent, /Reasoning level saved/);
+});
+
+test("research recovery retains both settings and blocks reasoning edits while starting", async () => {
+  let finishStart;
+  const app = createPopup({ selectedModel: "session-alpha", selectedReasoningEffort: "ultra", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_START") return new Promise(resolve => { finishStart = resolve; });
+  } });
+  await app.start();
+  await app.click("startResearch");
+  assert.equal(app.elements.researchEffort.disabled, true);
+  await app.selectEffort("medium");
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET"), false);
+  finishStart({ ok: true, result: { status: "ready", alreadyRunning: true } });
+  await settle();
+  assert.equal(app.elements.researchModel.value, "session-alpha");
+  assert.equal(app.elements.researchEffort.value, "ultra");
+  assert.equal(app.elements.researchEffort.disabled, false);
 });

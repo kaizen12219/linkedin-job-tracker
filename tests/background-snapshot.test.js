@@ -24,7 +24,7 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
   const messageListeners = [];
   let snapshotCursor = 0;
   const local = {
-    async get(key) { return { [key]: clone(stored[key]) }; },
+    async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, clone(stored[name])])); },
     async set(value) { Object.assign(stored, clone(value)); }
   };
   const client = {
@@ -129,15 +129,15 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
 }
 
-test("AI model discovery and preference changes accept only trusted popup messages", async () => {
+test("AI model and reasoning level preferences accept only trusted popup messages", async () => {
   const fetchCalls = [];
-  const catalog = { models: [{ id: "session-alpha", name: "Session Alpha" }], defaultModel: "session-alpha" };
+  const catalog = { models: [{ id: "session-alpha", name: "Session Alpha", reasoningEfforts: ["medium", "high", "xhigh"] }], defaultModel: "session-alpha" };
   const h = harness({ researchFetch: async (url, options) => {
     fetchCalls.push({ url, method: options.method });
     return { ok: true, json: async () => catalog };
   } });
   await settle();
-  for (const type of ["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET", "KAI_TRACKER_RESEARCH_START"]) {
+  for (const type of ["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET", "KAI_TRACKER_RESEARCH_EFFORT_SET", "KAI_TRACKER_RESEARCH_START"]) {
     for (const sender of ["linkedin", "foreign"]) {
       const { response } = await h.sendRaw({ type, model: "session-alpha" }, sender);
       assert.equal(response.ok, false); assert.equal(response.error.code, "TRACKER_FORBIDDEN");
@@ -152,6 +152,9 @@ test("AI model discovery and preference changes accept only trusted popup messag
   const saved = await h.send({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model: "session-alpha" }, "popup");
   assert.equal(saved.result.selectedModel, "session-alpha");
   assert.equal(h.stored.jobTrackerResearchModelV1, "session-alpha");
+  const effort = await h.send({ type: "KAI_TRACKER_RESEARCH_EFFORT_SET", reasoningEffort: "high" }, "popup");
+  assert.equal(effort.result.selectedReasoningEffort, "high");
+  assert.equal(h.stored.jobTrackerResearchEffortV1, "high");
   assert.ok(fetchCalls.every(call => call.url.endsWith("/job-research/models") && call.method === "GET"));
 });
 

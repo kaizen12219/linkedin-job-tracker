@@ -3,6 +3,11 @@ const fixtureMode = new URLSearchParams(location.search).get("mode");
 const fixtureStorage = {};
 let fixtureSaved = false;
 let fixtureResearchModel = fixtureMode === "model-unavailable" ? "retired-model" : "";
+let fixtureResearchEffort = fixtureMode === "level-unavailable" ? "retired-level" : "";
+const fixtureModels = [
+  { id: "gpt-6.1-sol", name: "GPT-6.1-Sol", reasoningEfforts: ["low", "medium", "high", "xhigh", "max", "ultra"], defaultReasoningEffort: "medium" },
+  { id: "gpt-6-luna", name: "GPT-6-Luna", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"], defaultReasoningEffort: "medium" }
+];
 let fixtureResearchOnline = !["models-offline", "offline"].includes(fixtureMode);
 const fixtureJob = { company: "Example Systems", title: "Senior Software Engineer", description: "Build reliable tools for distributed teams.\n\nResponsibilities\n" + "Work with the product team to improve the experience.\n".repeat(35), applyUrl: "https://jobs.example.test/engineer" };
 window.chrome = {
@@ -24,13 +29,18 @@ window.chrome = {
       fixtureResearchOnline = true;
       return { ok: true, result: { status: "ready", alreadyRunning } };
     }
-    if (["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET"].includes(message.type)) {
+    if (["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET", "KAI_TRACKER_RESEARCH_EFFORT_SET"].includes(message.type)) {
       if (!fixtureResearchOnline) return { ok: false, error: { code: "RESEARCH_UNAVAILABLE", message: "The research worker is unavailable. Click Start / reconnect research to load the AI models." } };
       if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") {
         fixtureResearchModel = message.model;
-        return { ok: true, result: { selectedModel: fixtureResearchModel } };
+        if (fixtureResearchEffort && !fixtureModels.find(model => model.id === (fixtureResearchModel || "gpt-6.1-sol"))?.reasoningEfforts.includes(fixtureResearchEffort)) fixtureResearchEffort = "";
+        return { ok: true, result: { selectedModel: fixtureResearchModel, selectedReasoningEffort: fixtureResearchEffort } };
       }
-      return { ok: true, result: { models: [{ id: "gpt-6.1-sol", name: "GPT-6.1-Sol" }, { id: "gpt-6-astra", name: "GPT-6-Astra" }], defaultModel: "gpt-6.1-sol", selectedModel: fixtureResearchModel } };
+      if (message.type === "KAI_TRACKER_RESEARCH_EFFORT_SET") {
+        fixtureResearchEffort = message.reasoningEffort;
+        return { ok: true, result: { selectedModel: fixtureResearchModel, selectedReasoningEffort: fixtureResearchEffort } };
+      }
+      return { ok: true, result: { models: fixtureModels, defaultModel: "gpt-6.1-sol", defaultReasoningEffort: "xhigh", selectedModel: fixtureResearchModel, selectedReasoningEffort: fixtureResearchEffort } };
     }
     if (fixtureMode === "offline" && message.type !== "KAI_TRACKER_SAVE") return { ok: false, error: { code: "TRACKER_OFFLINE", message: "Google Sheets is unavailable. Nothing is queued." } };
     if (message.type === "KAI_TRACKER_OPTIONS") return { ok: true, result: { profiles: ["sample-profile-a", "sample-profile-b"] } };

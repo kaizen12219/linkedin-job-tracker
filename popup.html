@@ -29,8 +29,14 @@
               <option value="">Session default</option>
             </select>
           </label>
+          <label>
+            <span>Reasoning level</span>
+            <select id="researchEffort" aria-describedby="researchModelStatus researchModelHelp" disabled>
+              <option value="">Automatic</option>
+            </select>
+          </label>
           <p id="researchModelStatus" role="status">Loading the signed-in session’s models…</p>
-          <p id="researchModelHelp">Applies to new job sessions. Running and queued sessions keep their model.</p>
+          <p id="researchModelHelp">Applies to new job sessions. Running and queued sessions keep their model and reasoning level.</p>
           <div class="settings-actions">
             <button id="startResearch" class="secondary" type="button">Start / reconnect research</button>
             <button id="refreshResearchModels" class="secondary" type="button">Refresh models</button>

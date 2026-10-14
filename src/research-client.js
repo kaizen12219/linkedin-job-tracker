@@ -4,6 +4,7 @@
   const STORAGE_KEY = "jobTrackerResearchV1";
   const CLIENT_KEY = "jobTrackerResearchClientV1";
   const MODEL_KEY = "jobTrackerResearchModelV1";
+  const EFFORT_KEY = "jobTrackerResearchEffortV1";
   const RECOVERY_HOST = "com.applicantally.job_research";
   const ALARM = "job-tracker-research";
   const MAX_AGE = 24 * 60 * 60 * 1000;
@@ -63,9 +64,10 @@
       if (!response.ok) throw Object.assign(new Error(value.error || "Research request failed."), { status: response.status });
       return value;
     }
-    async function selectedModel() {
-      const value = (await storage.get(MODEL_KEY))[MODEL_KEY];
-      return typeof value === "string" ? value : "";
+    async function selectedSettings() {
+      const values = await storage.get([MODEL_KEY, EFFORT_KEY]);
+      return { selectedModel: typeof values[MODEL_KEY] === "string" ? values[MODEL_KEY] : "",
+        selectedReasoningEffort: typeof values[EFFORT_KEY] === "string" ? values[EFFORT_KEY] : "" };
     }
     function startWorker() {
       if (recovery) return recovery;
@@ -106,24 +108,53 @@
         ...(typeof model.description === "string" ? { description: model.description } : {}),
         ...(Array.isArray(model.reasoningEfforts) ? { reasoningEfforts: model.reasoningEfforts.filter((effort) => typeof effort === "string") } : {}),
         ...(typeof model.defaultReasoningEffort === "string" ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}) })),
-        defaultModel: catalog.defaultModel, selectedModel: await selectedModel() };
+        defaultModel: catalog.defaultModel,
+        ...(typeof catalog.defaultReasoningEffort === "string" ? { defaultReasoningEffort: catalog.defaultReasoningEffort } : {}),
+        ...await selectedSettings() };
     }
-    async function setModel(model) {
-      if (typeof model !== "string" || model.length > 200) {
-        throw Object.assign(new Error("Choose an AI model from the signed-in session's list."), { code: "RESEARCH_MODEL_INVALID" });
-      }
-      if (model && !(await getModels()).models.some((entry) => entry.id === model)) {
-        throw Object.assign(new Error("That AI model is unavailable in the signed-in session. Refresh the model list and choose again."),
-          { code: "RESEARCH_MODEL_UNAVAILABLE" });
-      }
-      await storage.set({ [MODEL_KEY]: model });
-      return { selectedModel: model };
+    function setModel(model) {
+      return serial(async () => {
+        if (typeof model !== "string" || model.length > 200) {
+          throw Object.assign(new Error("Choose an AI model from the signed-in session's list."), { code: "RESEARCH_MODEL_INVALID" });
+        }
+        let { selectedReasoningEffort } = await selectedSettings();
+        if (model || selectedReasoningEffort) {
+          const catalog = await getModels();
+          const available = catalog.models.find(entry => entry.id === (model || catalog.defaultModel));
+          if (!available) throw Object.assign(new Error("That AI model is unavailable in the signed-in session. Refresh the model list and choose again."),
+            { code: "RESEARCH_MODEL_UNAVAILABLE" });
+          if (!available.reasoningEfforts?.includes(selectedReasoningEffort)) selectedReasoningEffort = "";
+        }
+        // Store the pair together so a capture cannot combine preferences from two saves.
+        await storage.set({ [MODEL_KEY]: model, [EFFORT_KEY]: selectedReasoningEffort });
+        return { selectedModel: model, selectedReasoningEffort };
+      });
+    }
+    function setReasoningEffort(reasoningEffort) {
+      return serial(async () => {
+        if (typeof reasoningEffort !== "string" || reasoningEffort.length > 100) {
+          throw Object.assign(new Error("Choose a reasoning level from the selected model's list."), { code: "RESEARCH_EFFORT_INVALID" });
+        }
+        const { selectedModel } = await selectedSettings();
+        if (reasoningEffort) {
+          const catalog = await getModels();
+          const available = catalog.models.find(entry => entry.id === (selectedModel || catalog.defaultModel));
+          if (!available?.reasoningEfforts?.includes(reasoningEffort)) {
+            throw Object.assign(new Error("That reasoning level is unavailable for the selected model. Refresh the models and choose a supported level."),
+              { code: "RESEARCH_EFFORT_UNAVAILABLE" });
+          }
+        }
+        await storage.set({ [MODEL_KEY]: selectedModel, [EFFORT_KEY]: reasoningEffort });
+        return { selectedModel, selectedReasoningEffort: reasoningEffort };
+      });
     }
     function submission(record) {
-      return { requestId: record.requestId, job: publicJob(record.job), ...(record.model ? { model: record.model } : {}) };
+      return { requestId: record.requestId, job: publicJob(record.job), ...(record.model ? { model: record.model } : {}),
+        ...(record.reasoningEffort ? { reasoningEffort: record.reasoningEffort } : {}) };
     }
-    function freezeAcceptedModel(record, response) {
+    function freezeAcceptedSettings(record, response) {
       if (!record.model && typeof response?.model === "string" && response.model) record.model = response.model;
+      if (!record.reasoningEffort && typeof response?.reasoningEffort === "string" && response.reasoningEffort) record.reasoningEffort = response.reasoningEffort;
     }
     function publicJob(job) {
       return Object.fromEntries(["company", "title", "description", "applyUrl", "sourceUrl", "jobId", "isEasyApply", "workplaceType", "posterName", "applicationsClosed", "selectedRegion", "selectedRegionSource", "profileRoutingVersion"]
@@ -144,7 +175,9 @@
         if (records.filter((entry) => !entry.terminal).length >= 100) throw new Error("Too many jobs are being researched. Wait for the current jobs to finish.");
         const routing = region ? JobProfileRouting.snapshot(capturedJob, await sheetClient.getOptions({ refresh: true })) : null;
         const selection = routing && region !== "us" ? JobProfileRouting.choose(capturedJob, routing) : null;
-        const record = { requestId: cryptoImpl.randomUUID(), identity, job: capturedJob, model: await selectedModel(), profile: selection?.profile ?? (routing ? "" : profile), tabId,
+        const settings = await selectedSettings();
+        const record = { requestId: cryptoImpl.randomUUID(), identity, job: capturedJob, model: settings.selectedModel, reasoningEffort: settings.selectedReasoningEffort,
+          profile: selection?.profile ?? (routing ? "" : profile), tabId,
           ...(routing ? { profileRouting: routing } : {}), ...(selection ? { profileSelection: selection } : {}),
           sheetUrl: state.sheetUrl, createdAt: Date.now(), state: "requesting" };
         const active = records.filter((entry) => !entry.terminal);
@@ -153,7 +186,7 @@
         await write(next);
         if (selection) await onProfileSelected(record, selection);
         try {
-          freezeAcceptedModel(record, await request("", submission(record)));
+          freezeAcceptedSettings(record, await request("", submission(record)));
           record.state = "researching";
           await write(next);
         } catch (error) {
@@ -182,7 +215,7 @@
           let response;
           try {
             if (record.state === "requesting") {
-              freezeAcceptedModel(record, await request("", submission(record)));
+              freezeAcceptedSettings(record, await request("", submission(record)));
               record.state = "researching";
             }
             response = await request(`/${encodeURIComponent(record.requestId)}`);
@@ -248,7 +281,7 @@
       });
     }
     function clear() { return serial(async () => { await storage.remove(STORAGE_KEY); await alarms.clear(ALARM); }); }
-    return { start, poll, clear, getModels, setModel, startWorker };
+    return { start, poll, clear, getModels, setModel, setReasoningEffort, startWorker };
   }
   root.JobResearchClient = Object.freeze({ create, ALARM });
 })(typeof globalThis === "undefined" ? this : globalThis);

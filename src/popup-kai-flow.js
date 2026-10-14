@@ -5,6 +5,7 @@ const openApplyUrlLink = document.querySelector("#openApplyUrl");
 const refreshButton = document.querySelector("#refreshConnection");
 const profileSelect = document.querySelector("#profile");
 const researchModelSelect = document.querySelector("#researchModel");
+const researchEffortSelect = document.querySelector("#researchEffort");
 const researchModelStatus = document.querySelector("#researchModelStatus");
 const refreshResearchModelsButton = document.querySelector("#refreshResearchModels");
 const startResearchButton = document.querySelector("#startResearch");
@@ -41,6 +42,8 @@ let researchModelsLoaded = false;
 let researchModelSaving = false;
 let researchWorkerStarting = false;
 let selectedResearchModel = "";
+let selectedResearchEffort = "";
+let researchModelCatalog = null;
 
 document.addEventListener("DOMContentLoaded", () => {
   void loadBannedCompanies();
@@ -53,38 +56,78 @@ refreshResearchModelsButton.addEventListener("click", () => void loadResearchMod
 startResearchButton.addEventListener("click", () => void startResearchWorker());
 researchModelSelect.addEventListener("change", async () => {
   if (researchModelSaving || researchWorkerStarting || !researchModelsLoaded) return;
-  const previous = selectedResearchModel;
   const model = researchModelSelect.value;
+  await saveResearchPreference({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model }, "AI model and reasoning level");
+});
+researchEffortSelect.addEventListener("change", async () => {
+  if (researchModelSaving || researchWorkerStarting || !researchModelsLoaded) return;
+  const reasoningEffort = researchEffortSelect.value;
+  await saveResearchPreference({ type: "KAI_TRACKER_RESEARCH_EFFORT_SET", reasoningEffort }, "Reasoning level");
+});
+
+async function saveResearchPreference(message, label) {
   researchModelSaving = true;
   ++researchModelsVersion;
-  researchModelSelect.disabled = true;
-  refreshResearchModelsButton.disabled = true;
-  startResearchButton.disabled = true;
-  researchModelStatus.textContent = "Saving the AI model…";
+  updateResearchControls();
+  researchModelStatus.textContent = `Saving ${label.toLowerCase()}…`;
   try {
-    const result = await request({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model });
+    const result = await request(message);
     selectedResearchModel = result.selectedModel;
-    researchModelSelect.value = selectedResearchModel;
-    researchModelStatus.textContent = "AI model saved for new job sessions.";
+    selectedResearchEffort = result.selectedReasoningEffort || "";
+    researchModelStatus.textContent = `${label} saved for new job sessions.`;
   } catch (error) {
-    researchModelSelect.value = previous;
     researchModelStatus.textContent = error.message;
   } finally {
+    renderResearchSelection();
     researchModelSaving = false;
-    researchModelSelect.disabled = !researchModelsLoaded;
-    refreshResearchModelsButton.disabled = false;
-    startResearchButton.disabled = false;
+    updateResearchControls();
   }
-});
+}
+
+function selectedResearchModelMetadata() {
+  return researchModelCatalog?.models.find(model => model.id === (selectedResearchModel || researchModelCatalog.defaultModel));
+}
+
+function availableResearchEfforts() {
+  return selectedResearchModelMetadata()?.reasoningEfforts?.filter(value => typeof value === "string" && value) || [];
+}
+
+function effortLabel(effort) {
+  const labels = { none: "None", minimal: "Minimal", low: "Low", medium: "Medium", high: "High", xhigh: "Extra high (xhigh)", max: "Maximum (max)", ultra: "Ultra" };
+  return Object.hasOwn(labels, effort) ? labels[effort] : effort.charAt(0).toUpperCase() + effort.slice(1);
+}
+
+function renderResearchSelection() {
+  researchModelSelect.value = selectedResearchModel;
+  const model = selectedResearchModelMetadata();
+  const efforts = availableResearchEfforts();
+  const researchDefault = researchModelCatalog?.defaultReasoningEffort;
+  const automatic = efforts.includes(researchDefault) ? researchDefault : model?.defaultReasoningEffort;
+  researchEffortSelect.replaceChildren(new Option(automatic && efforts.includes(automatic)
+    ? `Automatic · ${effortLabel(automatic)}` : "Automatic", ""));
+  for (const effort of efforts) researchEffortSelect.append(new Option(effortLabel(effort), effort));
+  if (selectedResearchEffort && !efforts.includes(selectedResearchEffort)) {
+    const option = new Option(`${effortLabel(selectedResearchEffort)} — unavailable`, selectedResearchEffort);
+    option.disabled = true;
+    researchEffortSelect.append(option);
+  }
+  researchEffortSelect.value = selectedResearchEffort;
+}
+
+function updateResearchControls() {
+  const blocked = researchModelSaving || researchWorkerStarting;
+  researchModelSelect.disabled = blocked || !researchModelsLoaded;
+  researchEffortSelect.disabled = blocked || !researchModelsLoaded || (!availableResearchEfforts().length && !selectedResearchEffort);
+  refreshResearchModelsButton.disabled = blocked;
+  startResearchButton.disabled = blocked;
+}
 
 async function startResearchWorker() {
   if (researchWorkerStarting || researchModelSaving) return;
   researchWorkerStarting = true;
   ++researchModelsVersion;
-  startResearchButton.disabled = true;
+  updateResearchControls();
   startResearchButton.textContent = "Starting…";
-  researchModelSelect.disabled = true;
-  refreshResearchModelsButton.disabled = true;
   researchModelStatus.textContent = "Starting the research worker…";
   try {
     await request({ type: "KAI_TRACKER_RESEARCH_START" });
@@ -93,10 +136,9 @@ async function startResearchWorker() {
     researchModelStatus.textContent = error.message;
   } finally {
     researchWorkerStarting = false;
-    startResearchButton.disabled = false;
     startResearchButton.textContent = "Start / reconnect research";
-    researchModelSelect.disabled = !researchModelsLoaded;
-    refreshResearchModelsButton.disabled = false;
+    renderResearchSelection();
+    updateResearchControls();
   }
 }
 
@@ -104,12 +146,15 @@ async function loadResearchModels({ duringRecovery = false } = {}) {
   if (researchModelSaving || (researchWorkerStarting && !duringRecovery)) return;
   const version = ++researchModelsVersion;
   researchModelSelect.disabled = true;
+  researchEffortSelect.disabled = true;
   refreshResearchModelsButton.disabled = true;
   researchModelStatus.textContent = "Loading the signed-in session’s models…";
   try {
     const catalog = await request({ type: "KAI_TRACKER_RESEARCH_MODELS" });
     if (version !== researchModelsVersion) return;
+    researchModelCatalog = catalog;
     selectedResearchModel = catalog.selectedModel;
+    selectedResearchEffort = catalog.selectedReasoningEffort || "";
     const defaultName = catalog.models.find((model) => model.id === catalog.defaultModel)?.name || catalog.defaultModel;
     researchModelSelect.replaceChildren(new Option(`Session default · ${defaultName}`, ""));
     for (const model of catalog.models) researchModelSelect.append(new Option(model.name, model.id));
@@ -119,10 +164,12 @@ async function loadResearchModels({ duringRecovery = false } = {}) {
       option.disabled = true;
       researchModelSelect.append(option);
     }
-    researchModelSelect.value = selectedResearchModel;
+    renderResearchSelection();
     researchModelsLoaded = true;
+    const effortUnavailable = selectedResearchEffort && !availableResearchEfforts().includes(selectedResearchEffort);
     researchModelStatus.textContent = unavailable
       ? "Your saved model is unavailable. Choose another model for new sessions."
+      : effortUnavailable ? "Your saved reasoning level is unavailable for this model. Choose another level for new sessions."
       : "Models reported by the signed-in session.";
   } catch (error) {
     if (version !== researchModelsVersion) return;
@@ -130,8 +177,7 @@ async function loadResearchModels({ duringRecovery = false } = {}) {
     researchModelStatus.textContent = error.message;
   } finally {
     if (version === researchModelsVersion) {
-      researchModelSelect.disabled = researchWorkerStarting || !researchModelsLoaded;
-      refreshResearchModelsButton.disabled = researchWorkerStarting;
+      updateResearchControls();
     }
   }
 }
