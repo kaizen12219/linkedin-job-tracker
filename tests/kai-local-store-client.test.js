@@ -9,7 +9,7 @@ const { webcrypto, randomUUID } = require('node:crypto');
 function notFound(error) { if (error.code === 'ENOENT') error.name = 'NotFoundError'; throw error; }
 function directoryHandle(directory) {
   return { kind: 'directory', name: path.basename(directory), queryPermission: async () => 'granted',
-    async getDirectoryHandle(name) { const target = path.join(directory, name); await fs.stat(target).catch(notFound); return directoryHandle(target); },
+    async getDirectoryHandle(name, { create = false } = {}) { const target = path.join(directory, name); if (create) await fs.mkdir(target, { recursive: false }).catch(error => { if (error.code !== 'EEXIST') throw error; }); await fs.stat(target).catch(notFound); return directoryHandle(target); },
     async getFileHandle(name, { create = false } = {}) {
       const target = path.join(directory, name);
       if (create) await fs.writeFile(target, '', { flag: 'wx' }).catch(error => { if (error.code !== 'EEXIST') throw error; });
@@ -38,7 +38,7 @@ async function fixture(t) {
   handle.queryPermission = async () => granted ? 'granted' : 'prompt';
   const folderAccess = { read: async () => selected, clear: async () => { selected = null; }, resolve: context.ApplicantAllyFolder.resolve, readJson: context.ApplicantAllyFolder.readJson };
   const client = context.KaiLocalStoreClient.create({ folderAccess, cryptoImpl: webcrypto, storage });
-  return { client, jobs, library, settings, deny: () => { granted = false; }, restore: () => { granted = true; },
+  return { client, jobs, runtime, library, settings, deny: () => { granted = false; }, restore: () => { granted = true; },
     async record(name, job, deleted = false) { await fs.writeFile(path.join(jobs, name), JSON.stringify({ version: 1, kind: 'job', deleted, job })); } };
 }
 const job = company => ({ company, title: 'Engineer', description: 'Build services' });
@@ -111,4 +111,30 @@ test('expired folder permission preserves destination for queued research, and m
   f.restore(); assert.equal((await f.client.getStatus()).connection, 'connected');
   await f.client.clearConfiguration(); assert.equal((await f.client.getStatus()).configured, false);
   await assert.rejects(f.client.saveJob(job('Missing')), { code: 'CONFIG_REQUIRED' });
+});
+
+test('failure reports write readable idempotent JSON beside jobs without inserting or trashing jobs', async t => {
+  const f = await fixture(t), destination = (await f.client.getStatus()).sheetUrl;
+  const report = { version: 1, reportId: randomUUID(), destination, updatedAt: '2026-10-14T00:00:00.000Z', status: 'skipped', reason: 'Above Senior scope', job: job('Unsaved Company') };
+  await f.client.saveFailureReport(report, { sheetUrl: destination });
+  await f.client.saveFailureReport(report, { sheetUrl: destination });
+  const reportDirectory = path.join(f.runtime, 'job-tracker-reports', 'not-saved');
+  assert.deepEqual(await fs.readdir(reportDirectory), [report.reportId + '.json']);
+  const raw = await fs.readFile(path.join(reportDirectory, report.reportId + '.json'), 'utf8');
+  assert.match(raw, /\n  "reason": "Above Senior scope"/u);
+  assert.deepEqual(JSON.parse(raw), report);
+  assert.deepEqual(await fs.readdir(f.jobs), []);
+  assert.equal((await f.client.lookupDuplicate('Unsaved Company')).duplicate, null);
+});
+
+test('failure report filenames reject traversal and mismatched or missing original destinations', async t => {
+  const f = await fixture(t), destination = (await f.client.getStatus()).sheetUrl;
+  for (const reportId of ['../../escape', 'a'.repeat(36), randomUUID() + '/escape', randomUUID().toUpperCase()])
+    await assert.rejects(f.client.saveFailureReport({ reportId, destination }, { sheetUrl: destination }), { code: 'INVALID_FAILURE_REPORT' });
+  await assert.rejects(f.client.saveFailureReport({ reportId: randomUUID(), destination }), { code: 'REPORT_DESTINATION_REQUIRED' });
+  const other = 'applicantally-file:' + randomUUID();
+  await assert.rejects(f.client.saveFailureReport({ reportId: randomUUID(), destination: other }, { sheetUrl: other }), { code: 'REPORT_DESTINATION_CHANGED' });
+  await assert.rejects(fs.stat(path.join(f.runtime, 'job-tracker-reports')), { code: 'ENOENT' });
+  f.deny();
+  await assert.rejects(f.client.saveFailureReport({ reportId: randomUUID(), destination }, { sheetUrl: destination }), { code: 'LOCAL_STORE_UNAVAILABLE' });
 });

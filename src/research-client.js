@@ -16,7 +16,7 @@
   function create({ storage = chrome.storage.local, fetchImpl = fetch, cryptoImpl = crypto,
     alarms = chrome.alarms, extensionId = chrome.runtime.id, sheetClient, bannedCompanies,
     nativeMessaging = chrome.runtime.sendNativeMessage?.bind(chrome.runtime),
-    onSaved = async () => {}, onOutcome = async () => {}, onProfileSelected = async () => {} } = {}) {
+    onSaved = async () => {}, onOutcome = async () => {}, onProfileSelected = async () => {}, onNotSaved = async () => {} } = {}) {
     let tail = Promise.resolve();
     let recovery = null;
     const serial = (operation) => {
@@ -160,6 +160,35 @@
       return Object.fromEntries(["company", "title", "description", "applyUrl", "sourceUrl", "jobId", "isEasyApply", "workplaceType", "posterName", "applicationsClosed", "selectedRegion", "selectedRegionSource", "profileRoutingVersion"]
         .map((name) => [name, job[name]]).filter(([, value]) => value !== undefined));
     }
+    async function notSaved(record, details) {
+      const summary = { stage: details.stage, status: details.status || record.state, reason: details.reason,
+        willRetry: details.willRetry === true,
+        ...(details.research?.retryCount ? { retryCount: details.research.retryCount, retryAt: details.research.retryAt } : {}),
+        ...(details.error ? { error: { code: details.error.code, message: details.error.message } } : {}) };
+      if (JSON.stringify(record.notSaved) === JSON.stringify(summary)) return;
+      record.notSaved = summary;
+      try { await onNotSaved(record, { ...summary, ...(details.research ? { research: details.research } : {}) }); }
+      catch { /* Reporting cannot change research or save outcomes. */ }
+    }
+    function verificationFailure(record, response, verifiedAt) {
+      if (response.state === "failed") return { stage: "research", reason: response.error || "Research failed without a verified MCP result.", code: "RESEARCH_FAILED" };
+      if (response.result?.decision === "skip") return { stage: "ai-decision", reason: response.result.reason || response.result.role?.reason || "AI decided to skip this job without providing a reason.", code: "AI_SKIP" };
+      if (!Number.isFinite(verifiedAt) || Date.now() - verifiedAt >= 60 * 60 * 1000 || verifiedAt > Date.now() + 60_000) {
+        return { stage: "verification", reason: "Research completion time is missing, invalid or older than one hour. Nothing was saved.", code: "RESEARCH_RESULT_EXPIRED" };
+      }
+      if (JobCapturePolicy.key(response.result?.company) !== JobCapturePolicy.key(record.job.company) ||
+        JobCapturePolicy.key(response.result?.title) !== JobCapturePolicy.key(record.job.title)) {
+        return { stage: "verification", reason: "Research findings do not match the captured company and role.", code: "RESEARCH_IDENTITY_MISMATCH" };
+      }
+      if (!JobCapturePolicy.verifiedRole(record.job, response.result)) return { stage: "role-verification", reason: "Skipped: software engineering role not confirmed.", code: "ROLE_EVIDENCE_INVALID" };
+      if (JobCapturePolicy.remoteSkipReason(record.job) || (JobCapturePolicy.needsRemoteCheck(record.job) &&
+        (response.result?.fullyRemote !== true || JobCapturePolicy.text(response.result?.remoteEvidence).length < 8 ||
+          !JobCapturePolicy.hasFullyRemoteOffer(response.result?.remoteEvidence) ||
+          !JobCapturePolicy.key(record.job.description).includes(JobCapturePolicy.key(response.result?.remoteEvidence))))) {
+        return { stage: "remote-verification", reason: "Skipped: fully remote work not confirmed.", code: "REMOTE_EVIDENCE_INVALID" };
+      }
+      return { stage: "application-verification", reason: "Skipped: no verified apply link or email.", code: "APPLICATION_EVIDENCE_INVALID" };
+    }
     async function start(job, { profile = "", tabId = null } = {}) {
       return serial(async () => {
         const roleSkipReason = JobCapturePolicy.roleSkipReason(job);
@@ -190,8 +219,14 @@
           record.state = "researching";
           await write(next);
         } catch (error) {
-          if (error.retryableResearch) return { status: "researching", queued: true, requestId: record.requestId, profile: record.profile, profileRouting: record.profileRouting };
+          if (error.retryableResearch) {
+            await notSaved(record, { stage: "submission", status: "pending", reason: error.message, error, willRetry: true });
+            await write(next);
+            return { status: "researching", queued: true, requestId: record.requestId, profile: record.profile, profileRouting: record.profileRouting };
+          }
           if (error.status) { record.terminal = true; record.state = "failed"; await write(next); }
+          await notSaved(record, { stage: "submission", status: record.terminal ? "failed" : "pending", reason: error.message, error, willRetry: !record.terminal });
+          error.notSavedReported = true;
           throw error;
         }
         return { status: "researching", requestId: record.requestId, profile: record.profile, profileRouting: record.profileRouting };
@@ -205,12 +240,17 @@
           const roleSkipReason = JobCapturePolicy.roleSkipReason(record.job);
           if (roleSkipReason) {
             record.terminal = true; record.state = "skipped";
+            await notSaved(record, { stage: "local-policy", reason: roleSkipReason });
             await write(records);
             await onOutcome(record, roleSkipReason);
             continue;
           }
           if (!state.configured || state.sheetUrl !== record.sheetUrl || Date.now() - record.createdAt > MAX_AGE) {
-            record.terminal = true; record.state = "cancelled"; continue;
+            record.terminal = true; record.state = "cancelled";
+            await notSaved(record, { stage: "queue", reason: !state.configured ? "ApplicantAlly folder configuration was cleared."
+              : state.sheetUrl !== record.sheetUrl ? "The ApplicantAlly destination changed after this job was captured."
+              : "The research request expired after 24 hours." });
+            continue;
           }
           let response;
           try {
@@ -222,11 +262,19 @@
           } catch (error) {
             // One outage must not hold the capture queue for 12 seconds per job.
             // The next alarm retries, retaining the original request IDs.
-            if (error.retryableResearch) break;
+            if (error.retryableResearch) {
+              await notSaved(record, { stage: "research", status: "pending", reason: error.message, error, willRetry: true });
+              break;
+            }
             if (error.status === 404 || error.status === 409) { record.terminal = true; record.state = "failed"; }
+            await notSaved(record, { stage: "research", status: record.terminal ? "failed" : "pending", reason: error.message, error, willRetry: !record.terminal });
             continue;
           }
-          if (!["completed", "failed"].includes(response.state)) continue;
+          freezeAcceptedSettings(record, response);
+          if (!["completed", "failed"].includes(response.state)) {
+            if (response.error) await notSaved(record, { stage: "research", status: "pending", reason: response.error, research: response, willRetry: true });
+            continue;
+          }
           // Captures carry a persistent request ID. A lost local-store response
           // can be retried without inserting the job twice.
           record.terminal = true;
@@ -237,12 +285,10 @@
             Date.now() - verifiedAt < 60 * 60 * 1000 && verifiedAt <= Date.now() + 60_000
             ? JobCapturePolicy.verifiedJob(record.job, response.result) : null;
           if (!job) {
-            const remoteUnconfirmed = JobCapturePolicy.remoteSkipReason(record.job) ||
-              (JobCapturePolicy.needsRemoteCheck(record.job) && response.result?.fullyRemote !== true);
-            await onOutcome(record, response.state === "failed" ? "Research failed."
-              : !JobCapturePolicy.verifiedRole(record.job, response.result) ? "Skipped: software engineering role not confirmed."
-              : remoteUnconfirmed ? "Skipped: fully remote work not confirmed."
-              : "Skipped: no verified apply link or email.");
+            const failure = verificationFailure(record, response, verifiedAt);
+            await notSaved(record, { ...failure, research: response, error: { code: failure.code, message: failure.reason } });
+            await write(records);
+            await onOutcome(record, failure.reason);
             continue;
           }
           try {
@@ -262,15 +308,17 @@
             if (await bannedCompanies.has(job.company)) throw Object.assign(new Error("Skipped: company is banned."), { code: "BANNED_COMPANY" });
             const result = await sheetClient.saveJob(job, { profile: record.profile, requestId: record.requestId });
             record.state = "saved";
-            await onSaved(job.company);
-            await onOutcome(record, "Saved to ApplicantAlly.", result);
+            try { await onSaved(job.company); } catch { /* Post-save UI updates cannot reverse a confirmed file save. */ }
+            try { await onOutcome(record, "Saved to ApplicantAlly.", result); } catch { /* Reporting and notifications remain independent of saving. */ }
           } catch (error) {
             if (error.code === "LOCAL_STORE_UNAVAILABLE") {
               record.terminal = false;
               record.state = "waiting-save";
+              await notSaved(record, { stage: "save", status: "pending", reason: error.message, error, research: response, willRetry: true });
               continue;
             }
             record.state = error.code === "TRACKER_SAVE_UNCONFIRMED" ? "save-unconfirmed" : "failed";
+            await notSaved(record, { stage: /^PROFILE_/u.test(error.code || "") ? "profile-selection" : "save", reason: error.message, error, research: response });
             await onOutcome(record, error.code === "BANNED_COMPANY" ? error.message
               : error.code === "TRACKER_SAVE_UNCONFIRMED" ? "Save not confirmed. Check ApplicantAlly."
               : /^PROFILE_ROUTING_/u.test(error.code || "") ? error.message
@@ -280,7 +328,13 @@
         await write(records);
       });
     }
-    function clear() { return serial(async () => { await storage.remove(STORAGE_KEY); await alarms.clear(ALARM); }); }
+    function clear() { return serial(async () => {
+      for (const record of (await read()).filter(entry => !entry.terminal)) {
+        record.state = "cancelled";
+        await notSaved(record, { stage: "queue", reason: "Pending research was cleared by the user." });
+      }
+      await storage.remove(STORAGE_KEY); await alarms.clear(ALARM);
+    }); }
     return { start, poll, clear, getModels, setModel, setReasoningEffort, startWorker };
   }
   root.JobResearchClient = Object.freeze({ create, ALARM });

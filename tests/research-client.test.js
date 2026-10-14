@@ -12,9 +12,9 @@ const result = { decision: "save", company: job.company, title: job.title, role,
 const modelCatalog = { models: [{ id: "session-model-alpha", name: "Research Alpha" }, { id: "session-model-beta", name: "Research Beta" }], defaultModel: "session-model-alpha" };
 function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
-  catalog = modelCatalog, catalogError = null, nativeMessaging, acceptedSettings = {},
+  catalog = modelCatalog, catalogError = null, nativeMessaging, acceptedSettings = {}, reportError = null, afterSaveError = null,
   profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
-  const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [];
+  const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [], reports = [];
   let researchWrites = 0;
   let state = { configured: true, sheetUrl: "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1" };
   let response = { state: "completed", completedAt: new Date().toISOString(), result };
@@ -46,8 +46,10 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   const context = vm.createContext({ URL, AbortSignal, Uint8Array, Date, fetch: fetchImpl, crypto, chrome: { storage: { local: storage }, alarms, runtime: { id: "stable-id" } } });
   for (const name of ["capture-policy", "profile-routing", "research-client"]) vm.runInContext(fs.readFileSync(require.resolve(`../src/${name}.js`), "utf8"), context);
   const client = context.JobResearchClient.create({ storage, fetchImpl, cryptoImpl: crypto, alarms, extensionId: "stable-id", sheetClient, nativeMessaging,
-    bannedCompanies: { async has() { return banned; } }, onSaved: async (company) => remembered.push(company), onOutcome: async (_record, message) => outcomes.push(message) });
-  return { client, stored, calls, saves, outcomes, remembered, alarmCalls, setResponse(value) { response = value; },
+    bannedCompanies: { async has() { return banned; } }, onSaved: async (company) => { remembered.push(company); if (afterSaveError) throw afterSaveError; },
+    onNotSaved: async (record, details) => { reports.push(clone({ record, details })); if (reportError) throw reportError; },
+    onOutcome: async (_record, message) => outcomes.push(message) });
+  return { client, stored, calls, saves, outcomes, remembered, alarmCalls, reports, setResponse(value) { response = value; },
     setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
 }
 
@@ -504,6 +506,77 @@ test("pending research resumes after a worker restart and removing settings canc
   const first = harness(); await first.client.start(job);
   const next = harness({ stored: first.stored }); await next.client.poll(); assert.equal(next.saves.length, 1);
   const cleared = harness(); await cleared.client.start(job); await cleared.client.clear(); await cleared.client.poll(); assert.equal(cleared.saves.length, 0);
+});
+
+test("AI skips report the exact reason, frozen choices and prompt diagnostics", async () => {
+  const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-alpha", jobTrackerResearchEffortV1: "high" } });
+  const started = await h.client.start(job);
+  const research = { state: "completed", completedAt: new Date().toISOString(), threadId: "task-1", turnId: "turn-1",
+    result: { decision: "skip", company: job.company, title: job.title, reason: "The job requires mandatory office attendance.", role },
+    diagnostics: { prompt: "Classify the exact captured description.", events: [{ type: "decision", reason: "Mandatory office attendance." }] } };
+  h.setResponse(research); await h.client.poll(); await h.client.poll();
+  assert.equal(h.saves.length, 0); assert.equal(h.reports.length, 1);
+  const report = h.reports[0];
+  assert.equal(report.record.requestId, started.requestId);
+  assert.equal(report.record.model, "session-model-alpha"); assert.equal(report.record.reasoningEffort, "high");
+  assert.equal(report.record.job.description, job.description);
+  assert.equal(report.details.stage, "ai-decision"); assert.equal(report.details.reason, research.result.reason);
+  assert.deepEqual(report.details.research, research); assert.equal(h.outcomes[0], research.result.reason);
+});
+
+test("verification reports distinguish invalid evidence, identity and stale results from an AI skip", async () => {
+  const cases = [
+    [{ ...result, role: { eligible: true, category: "software-development", evidence: "Invented engineering duties that are absent from the job." } }, "ROLE_EVIDENCE_INVALID"],
+    [{ ...result, title: "Another Role" }, "RESEARCH_IDENTITY_MISMATCH"],
+    [{ ...result, application: undefined }, "APPLICATION_EVIDENCE_INVALID"]
+  ];
+  for (const [findings, code] of cases) {
+    const h = harness(); await h.client.start(job);
+    h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: findings }); await h.client.poll();
+    assert.equal(h.reports[0].details.error.code, code); assert.equal(h.reports[0].details.research.result.decision, "save");
+  }
+  const stale = harness(); await stale.client.start(job);
+  stale.setResponse({ state: "completed", completedAt: new Date(Date.now() - 7200000).toISOString(), result }); await stale.client.poll();
+  assert.equal(stale.reports[0].details.error.code, "RESEARCH_RESULT_EXPIRED");
+});
+
+test("worker failure and request rejection reports retain the actual error", async () => {
+  const failed = harness(); await failed.client.start(job);
+  failed.setResponse({ state: "failed", error: "The model cannot access this job's application page.", diagnostics: { events: [{ type: "callback-rejected", reason: "Role quote was invented." }] } });
+  await failed.client.poll();
+  assert.equal(failed.reports[0].details.status, "failed"); assert.equal(failed.reports[0].details.reason, "The model cannot access this job's application page.");
+  assert.equal(failed.reports[0].details.research.diagnostics.events[0].reason, "Role quote was invented.");
+  const rejected = harness({ postStatus: 400 }); await assert.rejects(rejected.client.start(job));
+  assert.equal(rejected.reports[0].details.stage, "submission"); assert.match(rejected.reports[0].details.reason, /rejected/);
+});
+
+test("capacity and folder save outages are reported as pending and remain retryable", async () => {
+  const h = harness(); await h.client.start(job);
+  h.setResponse({ state: "queued", error: "The current model is at capacity.", retryCount: 1, retryAt: Date.now() + 30000 });
+  await h.client.poll(); await h.client.poll();
+  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].details.status, "pending"); assert.equal(h.reports[0].details.willRetry, true);
+  assert.equal(h.stored.jobTrackerResearchV1[0].terminal, undefined);
+  const waiting = harness({ saveError: Object.assign(new Error("Folder permission expired."), { code: "LOCAL_STORE_UNAVAILABLE" }) });
+  await waiting.client.start(job); await waiting.client.poll();
+  assert.equal(waiting.reports[0].details.stage, "save"); assert.equal(waiting.reports[0].details.status, "pending");
+  assert.equal(waiting.stored.jobTrackerResearchV1[0].terminal, false);
+});
+
+test("cancelled and expired queues report why they stopped", async () => {
+  const changed = harness(); await changed.client.start(job); changed.changeSheet(); await changed.client.poll();
+  assert.equal(changed.reports[0].details.status, "cancelled"); assert.match(changed.reports[0].details.reason, /destination changed/);
+  const expired = harness(); await expired.client.start(job); expired.stored.jobTrackerResearchV1[0].createdAt = Date.now() - 86400001;
+  await expired.client.poll(); assert.match(expired.reports[0].details.reason, /24 hours/);
+  const cleared = harness(); await cleared.client.start(job); await cleared.client.clear();
+  assert.equal(cleared.reports[0].details.status, "cancelled"); assert.match(cleared.reports[0].details.reason, /cleared by the user/);
+});
+
+test("reporting and post-save notification failures cannot turn a confirmed save into failure", async () => {
+  const skipped = harness({ reportError: new Error("Report folder inaccessible") }); await skipped.client.start(job);
+  skipped.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { ...result, decision: "skip", reason: "No verified application route." } });
+  await skipped.client.poll(); assert.equal(skipped.stored.jobTrackerResearchV1[0].state, "skipped");
+  const saved = harness({ afterSaveError: new Error("UI unavailable") }); await saved.client.start(job); await saved.client.poll();
+  assert.equal(saved.saves.length, 1); assert.equal(saved.stored.jobTrackerResearchV1[0].state, "saved"); assert.equal(saved.reports.length, 0);
 });
 
 test("Hybrid with no fully remote offer starts a session and waits for its MCP decision, including after a restart", async () => {

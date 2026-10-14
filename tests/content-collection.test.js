@@ -7,7 +7,7 @@ const root = path.resolve(__dirname, "..");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const item = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: `Engineer ${id}`, description: `Job ${id}. ` + "Build useful software for our customers. ".repeat(15), ...extra });
 function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, covered = false, restoredVisited = [], renderDelay = 0, holdCapture = false,
-  standaloneTitle = false, dismissRemovesCard = false } = {}) {
+  standaloneTitle = false, dismissRemovesCard = false, reportError = false } = {}) {
   const dom = new JSDOM("<html><body><div class='jobs-search-results-list' style='overflow-y:auto'><ul></ul><nav class='jobs-search-pagination'></nav></div><div class='jobs-details'></div></body></html>", { url: SEARCH, runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const window = dom.window, document = window.document;
@@ -109,6 +109,10 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
     onMessage: { addListener(listener) { listeners.push(listener); } },
     async sendMessage(message) {
       messages.push(structuredClone(message));
+      if (message.type === "KAI_TRACKER_NOT_SAVED") {
+        if (reportError) throw new Error("The report folder is unavailable.");
+        return { ok: true, result: { reported: true } };
+      }
       if (message.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: structuredClone(state) } };
       if (message.type === "KAI_TRACKER_RUN_WAIT") return new Promise((resolve) => {
         timers.set(++timerId, { at: time + message.milliseconds,
@@ -242,4 +246,44 @@ test("hidden LinkedIn results still select, dismiss and capture once across page
   assert.equal(stopped.captures.length, 0);
   assert.deepEqual(stopped.selections.map((entry) => entry.id), ["3"]);
   assert.equal(stopped.leases.held, false);
+});
+
+test("collection reports attempted banned and duplicate cards with card identity and no unrelated description", async (t) => {
+  const h = fixture(t, [[item(1), item(2, { company: "Company 1" }), item(3, { company: "Blocked" })]]);
+  await h.advance(300_000);
+  const reports = h.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.deepEqual(reports.map(({ job, reasonCode }) => [job.jobId, reasonCode]), [["2", "DUPLICATE_COMPANY"], ["3", "BANNED_COMPANY"]]);
+  assert.ok(reports.every((report) => report.runId === "authorized-run" && report.job.detailAvailability === "unavailable" && !report.job.description));
+  assert.equal(reports[0].job.sourceUrl, "https://www.linkedin.com/jobs/view/2/");
+  assert.equal(reports[0].job.company, "Company 1"); assert.equal(reports[0].job.title, "Engineer 2");
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["1"]);
+  assert.match(h.notices.at(-1).text, /last results page/);
+});
+test("classification alone and restored visited cards do not produce failure reports", async (t) => {
+  const h = fixture(t, [[item(1, { company: "Blocked" })]], { restoredVisited: ["1"] });
+  await h.advance(300_000);
+  assert.ok(h.messages.some((message) => message.type === "KAI_TRACKER_CLASSIFY_COMPANIES"));
+  assert.equal(h.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
+});
+test("changed details during review report the verified original description for the exact attempted job", async (t) => {
+  const current = item(1), original = current.description;
+  const h = fixture(t, [[current]]);
+  await h.advance(12_000);
+  assert.equal(h.captures.length, 0);
+  h.document.querySelector(".jobs-box__html-content").textContent = "Different description arrived while reviewing the selected job.";
+  await h.advance(300_000);
+  const reports = h.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(reports.length, 1); assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.equal(reports[0].job.jobId, "1"); assert.equal(reports[0].job.detailAvailability, "verified");
+  assert.equal(reports[0].job.description, original.trim()); assert.equal(h.captures.length, 0);
+});
+test("a covered attempted card is reported and logging failure leaves collection behavior intact", async (t) => {
+  const covered = fixture(t, [[item(1)]], { covered: true }); await covered.advance(300_000);
+  const report = covered.messages.find((message) => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report.reasonCode, "CARD_UNAVAILABLE"); assert.equal(report.job.jobId, "1");
+  assert.equal(report.job.detailAvailability, "unavailable"); assert.equal(covered.captures.length, 0);
+  assert.match(covered.notices.at(-1).text, /covered/);
+  const offline = fixture(t, [[item(2, { company: "Blocked" }), item(3)]], { reportError: true }); await offline.advance(300_000);
+  assert.deepEqual(offline.captures.map(({ job }) => job.jobId), ["3"]);
+  assert.match(offline.notices.at(-1).text, /last results page/);
 });

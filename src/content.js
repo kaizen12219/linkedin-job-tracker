@@ -230,7 +230,11 @@
   async function captureSelectedJob() {
     const selection = captureSelection;
     if (!selection || document.hidden) return;
-    if (Date.now() > selection.expiresAt) { captureSelection = null; return; }
+    if (Date.now() > selection.expiresAt) {
+      captureSelection = null;
+      void reportNotSaved(selection.record, { code: "DETAILS_NOT_CONFIRMED" });
+      return;
+    }
     let job;
     try { job = window.LinkedInJobScraper.scrape(document, window.location.href); } catch { scheduleCapture(200); return; }
     const record = selection.record;
@@ -253,6 +257,28 @@
     try {
       await chrome.runtime.sendMessage({ type: "KAI_TRACKER_CAPTURE", job });
     } catch { /* A failed capture does not interfere with native selection. */ }
+  }
+
+  async function reportNotSaved(record, { code, reason, job } = {}, runId) {
+    const jobId = String(record?.captureId || "");
+    if (!/^\d+$/u.test(jobId) || !record.company || !record.title) return;
+    const classification = sameJob(record) ? record.card.getAttribute("data-kai-flow-job-state") : null;
+    if (classification === "banned") code = "BANNED_COMPANY";
+    else if (classification === "duplicate") code = "DUPLICATE_COMPANY";
+    if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
+    const verified = job && job.jobIdSource !== "query" && String(job.jobId) === jobId &&
+      companyKey(job.company) === companyKey(record.company) && companyKey(job.title) === companyKey(record.title) && job.description?.trim();
+    const snapshot = { jobId, company: record.company, title: record.title,
+      sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}/`, detailAvailability: verified ? "verified" : "unavailable" };
+    if (verified) {
+      for (const name of ["description", "workplaceType", "isEasyApply", "applicationsAvailable", "applicationsClosed", "selectedRegion", "selectedRegionSource"]) {
+        if (job[name] !== undefined) snapshot[name] = job[name];
+      }
+    }
+    try {
+      await chrome.runtime.sendMessage({ type: "KAI_TRACKER_NOT_SAVED", job: snapshot, reasonCode: code,
+        ...(typeof reason === "string" ? { reasonDetail: reason.slice(0, 2000) } : {}), ...(runId ? { runId } : {}) });
+    } catch { /* A log write failure must not interrupt selection or collection. */ }
   }
 
   function clickDismissButton(record) {
@@ -539,6 +565,7 @@
       wait: waitForCollection,
       cards: () => readableCards().map((record) => ({ ...record, id: record.captureId })),
       activeCard: activeCollectionCard,
+      notSaved: reportNotSaved,
       async allowed(record) {
         if (!activeCollectionCard(record)) return false;
         const response = await collectionMessage({ type: "KAI_TRACKER_CLASSIFY_COMPANIES", companies: [record.company], refresh: false });

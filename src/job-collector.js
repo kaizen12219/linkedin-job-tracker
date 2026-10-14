@@ -78,15 +78,32 @@
       }
       return null;
     }
+    async function notSaved(run, record, code, reason, job) {
+      if (!active(run) || typeof adapter.notSaved !== "function") return;
+      try { await adapter.notSaved(record, { code, reason, ...(job ? { job } : {}) }, run.state.id); }
+      catch { /* Reporting must not stop collection or retry a capture. */ }
+    }
     async function collect(run, record) {
-      if (!await adapter.allowed(record) || !check(run) || !adapter.activeCard(record)) { run.state.counts.skipped++; return; }
+      if (!await adapter.allowed(record) || !check(run) || !adapter.activeCard(record)) {
+        run.state.counts.skipped++;
+        await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card is unavailable or was filtered before capture.");
+        return;
+      }
       if (!await pause(run, actionDelay())) return;
-      await adapter.reveal(record);
-      if (!await pause(run, actionDelay()) || !adapter.activeCard(record)) return;
+      try { await adapter.reveal(record); }
+      catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
+      if (!await pause(run, actionDelay())) return;
+      if (!adapter.activeCard(record)) { await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable before selection."); return; }
       const previous = adapter.scrape();
-      adapter.select(record);
+      try { adapter.select(record); }
+      catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
       let job = await details(run, record, previous);
-      if (!job) { run.state.counts.skipped++; return; }
+      if (!job) {
+        run.state.counts.skipped++;
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "Stable details matching the selected job could not be verified before the timeout.");
+        return;
+      }
+      const reviewedJob = job;
       const reviewing = fingerprint(job);
       const delay = reviewDelay(job.description, random);
       adapter.status(`Reviewing ${job.company} — about ${Math.round(delay / 1000)} seconds.`, run.state);
@@ -94,10 +111,18 @@
       // Both the card and details must still describe the reviewed job. A new
       // description needs another review; never submit the previous contents.
       job = matchingJob(run, record, previous);
-      if (!job || fingerprint(job) !== reviewing) { run.state.counts.skipped++; return; }
-      if (!await adapter.allowed(record) || !check(run)) return;
+      if (!job || fingerprint(job) !== reviewing) {
+        run.state.counts.skipped++;
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "The selected job or its details changed during review.", reviewedJob);
+        return;
+      }
+      if (!await adapter.allowed(record) || !check(run)) { await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable or was filtered during review.", reviewedJob); return; }
       job = matchingJob(run, record, previous);
-      if (!job || fingerprint(job) !== reviewing) { run.state.counts.skipped++; return; }
+      if (!job || fingerprint(job) !== reviewing) {
+        run.state.counts.skipped++;
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "The selected job or its details changed before capture.", reviewedJob);
+        return;
+      }
       adapter.status(`Saving ${job.company}…`, run.state);
       const response = await adapter.capture(job, run.state.id);
       if (!response?.ok) {

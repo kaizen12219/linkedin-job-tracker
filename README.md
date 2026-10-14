@@ -19,6 +19,10 @@ Jobs, results, and résumé links are stored in ApplicantAlly’s app-folder dat
 
 ## Capture a job
 
+Jobs that are skipped or cannot be saved produce readable JSON files in the selected ApplicantAlly workspace under `job-tracker-reports/not-saved/<request-id>.json`. In a normal app installation this is `data/workspace/job-tracker-reports/not-saved`. Reports contain the captured job description and source URLs, stage and exact reason, model and reasoning level, selected profile when resolved, AI decision/evidence, redacted research prompt and rejected callback details. Local exclusions, duplicate/banned companies, unconfirmed details, research failures, expiration, cancellations and save errors are distinguished. Card-only failures say `detailAvailability: unavailable` when the full description could not be verified.
+
+Temporary research/capacity and folder-write outages use `status: pending` and `willRetry: true`; a later confirmed save updates the same report to `status: saved` and retains its failure history. If report-file writes are unavailable, a durable Chrome outbox retries when the original folder becomes accessible. Reports stay with their original destination. Logging errors do not change a capture's outcome. The research worker also retains per-session diagnostics under its `.job-tracker-research/reports` folder, including rejected callbacks that the AI later corrects. An AI `decision: save` there means research approved the job; the extension determines whether the file was actually saved.
+
 Click a LinkedIn search-result card to select it and start capture. The tracker waits for that exact job's details to finish loading. Once that click authorizes capture, switching tabs or covering SunBrowser does not pause the handoff. The exact job identity, changed description, stable details and ten-second expiry still apply. It preserves the existing native × dismissal behavior, and skips duplicate/banned companies. Automatic dismissal, native buttons, modified clicks, and synthetic page clicks do not start capture.
 
 Every capture, including popup Save and the keyboard shortcut, uses this order:

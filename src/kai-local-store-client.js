@@ -9,6 +9,7 @@
   const blocksCompany = job => !job.trashMarked && !nonBlockingStatuses.has(companyKey(job.status));
   function create({ folderAccess = ApplicantAllyFolder, cryptoImpl = crypto, locks = navigator.locks, storage = globalThis.chrome?.storage.local } = {}) {
     let tail = Promise.resolve();
+    let reportTail = Promise.resolve();
     let targetIdentity = '';
     async function init() { /* Folder handles are read afresh after worker restarts. */ }
     async function workspace() {
@@ -113,7 +114,32 @@
       const run = () => locks?.request ? locks.request('applicantally-job-save', save) : save();
       const result = tail.then(run, run); tail = result.catch(() => {}); return result;
     }
-    return Object.freeze({ init, configure, clearConfiguration, getOptions, lookupDuplicate, getCompanies, saveJob, getStatus });
+    function saveFailureReport(report, { sheetUrl } = {}) {
+      const save = async () => {
+        // Report identities are filenames, so accept only a canonical UUID.
+        if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u.test(report?.reportId || ''))
+          throw fail('Invalid failure report identity.', 'INVALID_FAILURE_REPORT');
+        if (!sheetUrl || report.destination !== sheetUrl) throw fail('The failure report has no original destination.', 'REPORT_DESTINATION_REQUIRED');
+        const folder = await workspace();
+        if (`applicantally-file:${folder.descriptor.storeId}` !== sheetUrl)
+          throw fail('Choose the original ApplicantAlly data folder to save this failure report.', 'REPORT_DESTINATION_CHANGED');
+        const reports = await folder.directory.getDirectoryHandle('job-tracker-reports', { create: true });
+        const failures = await reports.getDirectoryHandle('not-saved', { create: true });
+        const handle = await failures.getFileHandle(`${report.reportId}.json`, { create: true });
+        const writable = await handle.createWritable({ mode: 'exclusive' });
+        try {
+          await writable.write(JSON.stringify(report, null, 2) + '\n');
+          await writable.close();
+        } catch (error) { await writable.abort().catch(() => {}); throw fail('The failure report could not be saved: ' + error.message, 'FAILURE_REPORT_WRITE_FAILED'); }
+        const confirmed = JSON.parse(await (await handle.getFile()).text());
+        if (confirmed.reportId !== report.reportId || confirmed.updatedAt !== report.updatedAt)
+          throw fail('The failure report save was not confirmed.', 'FAILURE_REPORT_WRITE_FAILED');
+        return { written: true, reportId: report.reportId };
+      };
+      const run = () => locks?.request ? locks.request('applicantally-failure-report-save', save) : save();
+      const result = reportTail.then(run, run); reportTail = result.catch(() => {}); return result;
+    }
+    return Object.freeze({ init, configure, clearConfiguration, getOptions, lookupDuplicate, getCompanies, saveJob, saveFailureReport, getStatus });
   }
   root.KaiLocalStoreClient = Object.freeze({ create });
 })(globalThis);

@@ -92,6 +92,7 @@ function harness(cards, options = {}) {
       async sendMessage(message) {
         messages.push(message);
         if (message.type === "KAI_TRACKER_CAPTURE") return { ok: true, result: { status: "researching" } };
+        if (message.type === "KAI_TRACKER_NOT_SAVED") return { ok: true, result: { reported: true } };
         if (options.respond) {
           const response = await options.respond(message, messages.length);
           if (response) return response;
@@ -136,6 +137,24 @@ test("a user card selection waits for the matching detail identity and captures 
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
   app.click(target, { isTrusted: true }); await app.advance(200);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+  await app.advance(15_000);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
+});
+
+test("an intended manual selection reports an expired details check once without including another job's description", async () => {
+  const target = card("Mews", "123");
+  const app = harness([target], { scrape: () => ({ jobId: "999", company: "Other company", title: "Other role", description: "Unrelated private job description" }) });
+  app.states.delete("Mews"); app.click(target, { isTrusted: true });
+  await app.advance(15_000);
+  const reports = app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED"); assert.equal(reports[0].runId, undefined);
+  assert.equal(reports[0].job.jobId, "123"); assert.equal(reports[0].job.company, "Mews");
+  assert.equal(reports[0].job.sourceUrl, "https://www.linkedin.com/jobs/view/123/");
+  assert.equal(reports[0].job.detailAvailability, "unavailable"); assert.equal(reports[0].job.description, undefined);
+  await app.advance(15_000);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 1);
+  assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
 });
 
 test("new job headers cannot capture the previous description or a recycled card identity", async () => {

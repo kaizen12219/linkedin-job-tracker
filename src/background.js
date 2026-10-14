@@ -1,8 +1,11 @@
-importScripts("folder-access.js", "kai-local-store-client.js", "banned-companies.js", "capture-policy.js", "profile-routing.js", "research-client.js", "job-collector.js");
+importScripts("folder-access.js", "kai-local-store-client.js", "failure-reports.js", "banned-companies.js", "capture-policy.js", "profile-routing.js", "research-client.js", "job-collector.js");
 
 const sheetClient = KaiLocalStoreClient.create();
+const failureReports = JobFailureReports.create({ sheetClient });
 const bannedCompanies = KaiFlowBannedCompanies.create();
 const researchClient = JobResearchClient.create({ sheetClient, bannedCompanies,
+  onNotSaved: async (record, details) => logNotSaved(record.job, { ...details, requestId: record.requestId,
+    sheetUrl: record.sheetUrl, model: record.model, reasoningEffort: record.reasoningEffort, profile: record.profile }),
   onProfileSelected: async (record, selection) => {
     try { await chrome.runtime.sendMessage({ type: "KAI_TRACKER_PROFILE_SELECTED", jobId: record.job.jobId, sourceUrl: record.job.sourceUrl,
       company: record.job.company, title: record.job.title, description: record.job.description, ...selection }); }
@@ -13,11 +16,15 @@ const researchClient = JobResearchClient.create({ sheetClient, bannedCompanies,
     await refreshLinkedInStyles();
     void refreshSnapshotAndStyles({ force: true });
   },
-  onOutcome: async (record, message, result) => notify(record.tabId, message,
-    result ? "success" : record.state === "failed" || record.state === "save-unconfirmed" ? "error" : "info", record.job)
+  onOutcome: async (record, message, result) => {
+    if (result) try { await failureReports.resolve(record.requestId); } catch { /* A confirmed save remains successful. */ }
+    return notify(record.tabId, message,
+      result ? "success" : record.state === "failed" || record.state === "save-unconfirmed" ? "error" : "info", record.job);
+  }
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name === JobResearchClient.ALARM) void researchClient.poll().catch(() => {});
+  if (alarm.name === JobFailureReports.ALARM) void failureReports.flush().catch(() => {});
 });
 const PROFILE_STORAGE_KEY = "kaiFlowSelectedProfile";
 const BADGE_TIMEOUT_MS = 4000;
@@ -56,6 +63,7 @@ const POPUP_MESSAGES = new Set([
 async function initialize() {
   try {
     await Promise.all([sheetClient.init(), bannedCompanies.list(), loadCompanySnapshot()]);
+    void failureReports.flush().catch(() => {});
     await withCollectionState(async (state, save) => {
       if (!state) return;
       try {
@@ -90,13 +98,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const classifyMessage = message?.type === "KAI_TRACKER_CLASSIFY_COMPANIES";
   const captureMessage = message?.type === "KAI_TRACKER_CAPTURE";
   const collectionMessage = COLLECTION_MESSAGES.has(message?.type);
-  if (!popupMessage && !classifyMessage && !captureMessage && !collectionMessage) return undefined;
+  const reportMessage = message?.type === "KAI_TRACKER_NOT_SAVED";
+  if (!popupMessage && !classifyMessage && !captureMessage && !collectionMessage && !reportMessage) return undefined;
 
   if (popupMessage && !isPopupSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open the tracker popup to change or save data." } });
     return false;
   }
-  if ((classifyMessage || captureMessage || collectionMessage) && !isLinkedInSender(sender)) {
+  if ((classifyMessage || captureMessage || collectionMessage || reportMessage) && !isLinkedInSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Job highlighting is available only on LinkedIn job pages." } });
     return false;
   }
@@ -138,6 +147,21 @@ function isLinkedInSender(sender) {
 }
 
 async function handleTrackerMessage(message, sender = {}) {
+  if (message.type === "KAI_TRACKER_NOT_SAVED") {
+    const reasons = { BANNED_COMPANY: "Skipped: company is in the banned-company list.",
+      DUPLICATE_COMPANY: "Skipped: company already has a recorded job.",
+      DETAILS_NOT_CONFIRMED: "The selected job's full details and identity could not be confirmed.",
+      CARD_UNAVAILABLE: "The attempted job card became unavailable before capture." };
+    if (!reasons[message.reasonCode] || !/^\d+$/u.test(String(message.job?.jobId || "")) ||
+      !isSupportedUrl(message.job?.sourceUrl || "")) throw new Error("The failed job snapshot is invalid.");
+    if (message.runId) await withCollectionState(state => {
+      if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped."), { code: "TRACKER_RUN_STOPPED" });
+    });
+    const reason = reasons[message.reasonCode] + (typeof message.reasonDetail === "string" && !["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode)
+      ? " " + message.reasonDetail.slice(0, 2000) : "");
+    return logNotSaved(message.job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode) ? "skipped" : "failed",
+      reason, error: { code: message.reasonCode, message: reason } });
+  }
   if (message.type === "KAI_TRACKER_RUN_WAIT") return waitForCollectionRun(message, sender);
   if (COLLECTION_MESSAGES.has(message.type)) return handleCollectionMessage(message, sender);
   if (message.type === "KAI_TRACKER_CONFIGURE") {
@@ -296,18 +320,30 @@ async function stopActiveCollection() {
 }
 
 async function captureJob(job, { profile = "", tabId = null } = {}) {
-  const roleSkipReason = JobCapturePolicy.roleSkipReason(job);
-  if (roleSkipReason) return { status: "skipped", reason: roleSkipReason };
-  if (await bannedCompanies.has(job?.company)) {
-    const failure = new Error("This company is in the tracker’s banned-company list. Nothing was added.");
-    failure.code = "BANNED_COMPANY";
-    throw failure;
+  try {
+    const reason = JobCapturePolicy.roleSkipReason(job) || (job?.applicationsClosed === true ? "Applications are closed. Nothing was added."
+      : job?.applicationsAvailable === false ? "An active Apply control could not be verified. Nothing was added." : "");
+    if (reason) {
+      await logNotSaved(job, { stage: "local-policy", status: "skipped", reason, profile });
+      return { status: "skipped", reason };
+    }
+    if (await bannedCompanies.has(job?.company)) throw Object.assign(new Error("This company is in the tracker’s banned-company list. Nothing was added."), { code: "BANNED_COMPANY" });
+    const lookup = await sheetClient.lookupDuplicate(job.company);
+    if (lookup?.duplicate) throw Object.assign(new Error("This company already has a recorded job. Nothing was added."), { code: "DUPLICATE_COMPANY", details: lookup });
+    return await researchClient.start(job, { profile, tabId });
+  } catch (error) {
+    if (!error.notSavedReported) await logNotSaved(job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(error.code) ? "skipped" : "failed",
+      reason: error.message, error, profile });
+    throw error;
   }
-  if (job?.applicationsClosed === true) return { status: "skipped", reason: "Applications are closed. Nothing was added." };
-  if (job?.applicationsAvailable === false) return { status: "skipped", reason: "An active Apply control could not be verified. Nothing was added." };
-  const lookup = await sheetClient.lookupDuplicate(job.company);
-  if (lookup?.duplicate) throw Object.assign(new Error("This company already has a recorded job. Nothing was added."), { code: "DUPLICATE_COMPANY", details: lookup });
-  return researchClient.start(job, { profile, tabId });
+}
+
+async function logNotSaved(job, details) {
+  try {
+    const settings = await chrome.storage.local.get(["jobTrackerResearchModelV1", "jobTrackerResearchEffortV1"]);
+    return await failureReports.record(job, { model: settings.jobTrackerResearchModelV1 || "",
+      reasoningEffort: settings.jobTrackerResearchEffortV1 || "", ...details });
+  } catch { return { queued: true }; /* Reporting cannot prevent collection or a confirmed save. */ }
 }
 
 async function classifyCompanies(values, { refresh = false } = {}) {
@@ -550,12 +586,6 @@ async function runScrapeAndSaveShortcut(commandTab) {
     const scrapeResponse = await requestScrape(tab.id);
     if (!scrapeResponse?.ok) throw new Error(scrapeResponse?.error || "The scraper did not return data.");
     job = scrapeResponse.data;
-    if (await bannedCompanies.has(scrapeResponse.data.company)) {
-      const failure = new Error("This company is in the tracker’s banned-company list. Nothing was added.");
-      failure.code = "BANNED_COMPANY";
-      throw failure;
-    }
-
     const savedSettings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
     const profile = savedSettings[PROFILE_STORAGE_KEY] ?? "";
     const result = await captureJob(scrapeResponse.data, { profile, tabId: tab.id });

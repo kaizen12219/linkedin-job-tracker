@@ -29,7 +29,7 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
   };
   const client = {
     async init() {},
-    async getStatus() { calls.push({ action: "status" }); return { configured: true }; },
+    async getStatus() { calls.push({ action: "status" }); return { configured: true, sheetUrl: "applicantally-file:00000000-0000-0000-0000-000000000001" }; },
     async configure() { calls.push({ action: "configure" }); return { configured: true }; },
     async clearConfiguration() { calls.push({ action: "clear" }); return { configured: false }; },
     async getOptions() { return { profiles }; },
@@ -43,7 +43,8 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
       calls.push({ action: "save", company: job.company, options: clone(options) });
       if (saveError) throw saveError;
       return { status: "inserted", job: { company: job.company, rowNumber: 10 } };
-    }
+    },
+    async saveFailureReport(report, options) { calls.push({ action: "failure-report", report: clone(report), options: clone(options) }); return { written: true }; }
   };
   const chrome = {
     alarms: { onAlarm: { addListener() {} }, async create() {}, async clear() {} },
@@ -87,6 +88,7 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/capture-policy.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/profile-routing.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/research-client.js"), "utf8"), context);
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "src/failure-reports.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/job-collector.js"), "utf8"), context);
   vm.runInContext(BANNED, context);
   context.KaiFlowBannedCompanies = {
@@ -156,6 +158,33 @@ test("AI model and reasoning level preferences accept only trusted popup message
   assert.equal(effort.result.selectedReasoningEffort, "high");
   assert.equal(h.stored.jobTrackerResearchEffortV1, "high");
   assert.ok(fetchCalls.every(call => call.url.endsWith("/job-research/models") && call.method === "GET"));
+});
+
+test("local skips produce readable reports without researching or inserting jobs", async () => {
+  const h = harness(); await settle();
+  const skipped = { ...engineeringJob, title: "Business Analyst", description: "Produce business requirements and reports." };
+  const response = await h.send({ type: "KAI_TRACKER_SAVE", job: skipped }, "popup");
+  assert.equal(response.result.status, "skipped");
+  const report = h.calls.find(call => call.action === "failure-report").report;
+  assert.equal(report.job.description, skipped.description); assert.equal(report.status, "skipped");
+  assert.equal(report.stage, "local-policy"); assert.match(report.reason, /outside software engineering/);
+  assert.equal(h.calls.some(call => call.action === "save" || call.action === "duplicate"), false);
+});
+
+test("pre-capture report messages enforce LinkedIn sender and active run identity", async () => {
+  const h = harness(); await settle();
+  const message = { type: "KAI_TRACKER_NOT_SAVED", job: { jobId: "123", company: "Acme", title: "Engineer",
+    sourceUrl: "https://www.linkedin.com/jobs/view/123/", detailAvailability: "unavailable" }, reasonCode: "DETAILS_NOT_CONFIRMED" };
+  for (const sender of ["popup", "foreign"]) assert.equal((await h.sendRaw(message, sender)).response.error.code, "TRACKER_FORBIDDEN");
+  const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
+  await h.context.toggleJobCollection(tab); const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  const denied = await h.sendRaw({ ...message, runId }, "linkedin", { tab: { id: 7 } });
+  assert.equal(denied.response.error.code, "TRACKER_RUN_STOPPED");
+  assert.equal(h.calls.some(call => call.action === "failure-report"), false);
+  assert.equal((await h.sendRaw({ ...message, runId }, "linkedin", { tab })).response.ok, true);
+  const report = h.calls.find(call => call.action === "failure-report").report;
+  assert.equal(report.job.detailAvailability, "unavailable"); assert.equal(report.error.code, "DETAILS_NOT_CONFIRMED");
+  assert.equal(report.job.description, undefined); assert.equal(h.calls.some(call => call.action === "save"), false);
 });
 
 test("closed or unverified application controls cannot reach a Sheet save", async () => {

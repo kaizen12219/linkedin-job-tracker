@@ -4,9 +4,9 @@ const collector = require("../src/job-collector.js");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const row = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: "Engineer", active: true,
   description: `Vacancy ${id}. ` + "Useful job description ".repeat(30), ...extra });
-function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle = false, workerLag = null } = {}) {
+function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle = false, workerLag = null, reportFailures = false, reportError = false } = {}) {
   let time = 0, timerId = 0, page = 0, selected = { jobId: "999", description: "Previous job", title: "Other", company: "Other" }, hidden = false;
-  const timers = new Map(), actions = [], captures = [], checkpoints = [], statuses = [], finishes = [];
+  const timers = new Map(), actions = [], captures = [], checkpoints = [], statuses = [], finishes = [], reports = [];
   let search = collector.searchKey(SEARCH);
   const adapter = {
     searchKey: () => search, hidden: () => hidden, cards: () => pages[page], activeCard: (record) => record.active,
@@ -32,6 +32,10 @@ function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle 
     async checkpoint(value) { checkpoints.push(structuredClone(value)); },
     async finished(id, message, value) { finishes.push({ id, message, state: structuredClone(value) }); }
   };
+  if (reportFailures) adapter.notSaved = async (record, outcome, runId) => {
+    reports.push({ id: record.id, ...structuredClone(outcome), runId });
+    if (reportError) throw new Error("The report folder is unavailable.");
+  };
   const workerWaits = [];
   if (workerLag !== null) adapter.wait = (delay) => {
     workerWaits.push(delay);
@@ -41,7 +45,7 @@ function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle 
     schedule(callback, delay) { timers.set(++timerId, { callback, at: time + delay }); return timerId; },
     unschedule(id) { timers.delete(id); } });
   app.start({ id: "run-1", searchKey: search, visited: [], pages: [], ...state });
-  return { app, adapter, actions, captures, checkpoints, statuses, finishes, timers, workerWaits,
+  return { app, adapter, actions, captures, checkpoints, statuses, finishes, reports, timers, workerWaits,
     hide(value) { hidden = value; }, changeSearch() { search += "&keywords=changed"; },
     async advance(amount) {
       const until = time + amount;
@@ -156,4 +160,32 @@ test("search identity ignores job selection, tracking and pagination but retains
   assert.notEqual(collector.searchKey(`${SEARCH}&f_WT=2`), collector.searchKey(SEARCH));
   assert.equal(collector.searchKey("https://www.linkedin.com/jobs/view/123"), "");
   assert.equal(collector.searchKey("https://example.com/jobs/search/"), "");
+});
+test("attempted filtered cards and unverified details are reported once without changing collection", async () => {
+  const h = harness([[row(1, { filtered: true }), row(2, { active: false }), row(3, { queryOnly: true }), row(4)]], { reportFailures: true });
+  await h.advance(500_000);
+  assert.deepEqual(h.reports.map(({ id, code, runId }) => ({ id, code, runId })), [
+    { id: "1", code: "CARD_UNAVAILABLE", runId: "run-1" },
+    { id: "2", code: "CARD_UNAVAILABLE", runId: "run-1" },
+    { id: "3", code: "DETAILS_NOT_CONFIRMED", runId: "run-1" }
+  ]);
+  assert.ok(h.reports.every((report) => !report.job), "unmatched details are never included in a report");
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["4"]);
+  assert.match(h.finishes[0].message, /last results page/);
+});
+test("a report of changed review details retains only the earlier verified job snapshot", async () => {
+  const current = row(1), original = current.description;
+  const h = harness([[current]], { reportFailures: true });
+  await h.advance(12_000); current.description = "Changed details while this job was being reviewed.";
+  await h.advance(300_000);
+  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].code, "DETAILS_NOT_CONFIRMED");
+  assert.equal(h.reports[0].job.description, original);
+  assert.equal(h.captures.length, 0);
+});
+test("reporting failures cannot stop collection or retry a capture", async () => {
+  const h = harness([[row(1, { filtered: true }), row(2)]], { reportFailures: true, reportError: true });
+  await h.advance(300_000);
+  assert.equal(h.reports.length, 1);
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["2"]);
+  assert.match(h.finishes[0].message, /last results page/);
 });
