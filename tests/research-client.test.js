@@ -410,6 +410,34 @@ test("above-Senior title exclusions never submit and existing queued captures ca
   }
 });
 
+test("Associate and entry-level captures are excluded, and previously queued ones are logged without polling or saving", async () => {
+  for (const title of ["Associate Software Engineer", "Junior Software Engineer", "Entry-Level Developer", "Graduate Software Engineer", "Software Engineering Intern"]) {
+    const h = harness();
+    assert.equal((await h.client.start({ ...job, title })).status, "skipped", title);
+    assert.equal(h.calls.length, 0, title); assert.equal(h.saves.length, 0, title);
+  }
+  for (const pendingState of ["requesting", "researching", "waiting-save"]) {
+    const first = harness(); await first.client.start(job);
+    first.stored.jobTrackerResearchV1[0].job.title = "Associate Software Engineer";
+    first.stored.jobTrackerResearchV1[0].state = pendingState;
+    const resumed = harness({ stored: first.stored }); await resumed.client.poll(); await resumed.client.poll();
+    assert.equal(resumed.calls.length, 0); assert.equal(resumed.saves.length, 0);
+    assert.equal(resumed.reports.length, 1); assert.equal(resumed.reports[0].details.stage, "local-policy");
+    assert.match(resumed.reports[0].details.reason, /Associate or entry-level/);
+  }
+});
+
+test("AI-detected entry-level scope in a generic title preserves the exact skip reason and evidence in reports", async () => {
+  const h = harness(); await h.client.start(job);
+  const findings = { decision: "skip", company: job.company, title: job.title,
+    role: { eligible: false, category: "software-development", evidence: duties, reason: "Entry-level engineering scope." },
+    reason: "The position is a graduate training placement with supervised starter tasks." };
+  h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: findings }); await h.client.poll();
+  assert.equal(h.saves.length, 0); assert.equal(h.reports[0].details.stage, "ai-decision");
+  assert.equal(h.reports[0].details.reason, findings.reason);
+  assert.deepEqual(h.reports[0].details.research.result, findings);
+});
+
 test("old queued descriptions assigning this role Staff equivalence are discarded before worker calls", async () => {
   for (const pendingState of ["requesting", "researching", "waiting-save"]) {
     const first = harness();

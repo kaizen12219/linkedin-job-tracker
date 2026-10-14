@@ -57,7 +57,7 @@ test("a job explicitly assigning this position an above-Senior level is excluded
 
 test("Senior and ambiguous engineering titles remain eligible without confusing unrelated words for a level", () => {
   for (const [title, description] of [
-    ["Junior Software Engineer", duties], ["Software Engineer", duties], ["Mid-level Software Engineer", duties],
+    ["Software Engineer", duties], ["Mid-level Software Engineer", duties],
     ["Senior Software Engineer", duties], ["Lead Software Engineer", duties], ["Tech Lead", duties],
     ["Technical Architect", duties], ["Software Engineer IV", duties], ["Software Engineer L6", duties],
     ["Software Engineer – Staffing Agency", duties], ["Software Engineer – principal product", duties], ["Senior Software Engineer - CTO Office", duties],
@@ -71,6 +71,35 @@ test("Senior and ambiguous engineering titles remain eligible without confusing 
     assert.equal(policy.needsResearch(target), true, title);
     assert.ok(policy.verifiedJob(target, { ...result, title, application: undefined }), title);
   }
+});
+
+test("Associate and entry-level engineering roles are excluded without treating incidental references as this role's level", () => {
+  for (const title of ["Associate Software Engineer", "Senior Associate Software Engineer", "Software Engineer (Associate)",
+    "Entry-Level Software Engineer", "Software Engineer – Entry Level", "Entry level .NET Developer", "Junior Software Engineer",
+    "Jr. Backend Developer", "Graduate Software Engineer", "New Grad Software Engineer", "Software Engineering Intern", "Software Developer - Internship",
+    "Trainee Data Engineer", "Apprentice Developer", "SRE (Junior)"]) {
+    const target = { ...job, title };
+    assert.match(policy.roleSkipReason(target), /Associate or entry-level/, title);
+    assert.equal(policy.needsResearch(target), false, title);
+    assert.equal(policy.verifiedJob(target, { ...result, title, application: { ...application, title } }), null, title);
+  }
+  for (const description of ["This is an entry-level position.", "This role is an Associate Software Engineer.",
+    "This position maps to junior level.", "You will join as a graduate software engineer.", "This Software Engineer role is entry level."]) {
+    assert.match(policy.roleSkipReason({ ...job, title: "Software Engineer", description: `${duties} ${description}` }), /entry-level/, description);
+  }
+  for (const [title, description] of [
+    ["Senior Software Engineer - Smith & Associates", duties],
+    ["Software Engineer", `${duties} An associate degree or equivalent experience is accepted.`],
+    ["Senior Software Engineer", `${duties} Mentor junior and associate engineers and welcome our graduate interns.`],
+    ["Software Engineer", `${duties} No minimum years of experience. Own complex migrations end to end.`],
+    ["Software Engineer I", `${duties} Own service design and production delivery.`],
+    ["Mid-level Engineer", `${duties} Build tools used by entry-level employees and business associates.`],
+    ["Software Engineer - graduate admissions tools", duties],
+    ["Software Engineer - junior engineer mentoring tools", duties],
+    ["Software Engineer - Junior/Mid/Senior", duties],
+    ["Associate or Senior Developer", duties],
+    ["Software Engineer", `${duties} This is not an entry-level role.`]
+  ]) assert.equal(policy.roleSkipReason({ ...job, title, description }), "", title + description);
 });
 
 test("AI classification of above-Senior duties cannot save a generic or Lead engineering title", () => {

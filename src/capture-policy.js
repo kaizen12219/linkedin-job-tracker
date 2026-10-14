@@ -14,6 +14,11 @@
   const HIGHER_MANAGEMENT = /\b(?:engineering|software\s+(?:engineering|development))\s+(?:manager|director|head)\b|\b(?:head|director|vp|vice\s+president)[\s,:]+(?:of\s+)?(?:(?:software|platform|data|cloud|ai)\s+){0,3}(?:engineering|technology)\b|\bchief\s+(?:technology|technical|engineering)\s+officer\b|\bcto\s*(?:$|[(/,|])|\b(?:technical|engineering|software\s+engineering)\s+fellow\b|\b(?:distinguished|principal)\s+member\s+of\s+(?:the\s+)?technical\s+staff\b/iu;
   const OWN_ROLE = "(?:(?:this|the|our)\\s+(?:(?:software|backend|frontend|platform|data|engineer|engineering|iv|v|vi|l\\d+)\\s+){0,6}(?:role|position|job)|this)";
   const HIGHER_ASSIGNMENT = new RegExp(`\\b(?:${OWN_ROLE}\\s+(?:is|will\\s+be|sits|operates|functions|maps|corresponds)\\s+(?:(?:a|an|at|as|the|to|equivalent|aligned|with|graded|levelled|leveled)\\s+){0,6}|you\\s+(?:will\\s+)?(?:join|operate|work|be\\s+hired|be\\s+appointed)\\s+(?:(?:as|at|a|an|the)\\s+){0,4})${HIGHER_LEVEL}(?:\\s*\\+)?(?:\\s+level\\b|[\\s,:/]+${ROLE_MODIFIERS}${ENGINEERING_ROLE}\\b)`, "iu");
+  const ENTRY_LEVEL = "(?:associate|entry\\s*level|junior|jr\\.?|new\\s+(?:grad(?:uate)?|college\\s+graduate)|graduate|intern(?:ship)?|trainee|apprentice(?:ship)?)";
+  const ENTRY_PREFIX = new RegExp(`(?:^|[,:/()|]\\s*)(?:senior\\s+)?${ENTRY_LEVEL}[\\s,:/]+(?:[\\p{L}\\d.+#]+\\s+){0,6}${ENGINEERING_ROLE}\\b`, "iu");
+  const ENTRY_SUFFIX = new RegExp(`\\b${ENGINEERING_ROLE}\\b[\\s,/:()|]+${ENTRY_LEVEL}(?:\\s+(?:level|program(?:me)?))?(?=\\s*(?:$|[(),/:|]))`, "iu");
+  const ENTRY_ASSIGNMENT = new RegExp(`\\b(?:${OWN_ROLE}\\s+(?:is|will\\s+be|sits|operates|functions|maps|corresponds)\\s+(?:(?:a|an|at|as|the|to|equivalent|aligned|graded|levelled|leveled)\\s+){0,6}|you\\s+(?:will\\s+)?(?:join|operate|work|be\\s+hired|be\\s+appointed)\\s+(?:(?:as|at|a|an|the)\\s+){0,4})${ENTRY_LEVEL}(?:\\s+level\\b|[\\s,:/]+${ROLE_MODIFIERS}${ENGINEERING_ROLE}\\b|\\s+(?:role|position|job|program(?:me)?)\\b|(?=\\s*[.,;:]|$))`, "iu");
+  const MIXED_ENTRY_TITLE = new RegExp(`\\b${ENTRY_LEVEL}\\s*(?:/|or)\\s*(?:mid(?:\\s+level)?|senior)\\b|\\b(?:mid(?:\\s+level)?|senior)\\s*(?:/|or)\\s*${ENTRY_LEVEL}\\b`, "iu");
   function aboveSenior(job) {
     const title = text(job?.title ?? job?.jobTitle).replace(/[-–—]/gu, " ");
     const description = text(job?.description ?? job?.jobDescription).replace(/[-–—]/gu, " ");
@@ -23,7 +28,13 @@
   }
   function roleSkipReason(job) {
     if (EXCLUDED_TITLE.test(text(job?.title ?? job?.jobTitle))) return "Skipped: role is outside software engineering.";
-    return aboveSenior(job) ? "Skipped: role is above Senior level." : "";
+    if (aboveSenior(job)) return "Skipped: role is above Senior level.";
+    const title = text(job?.title ?? job?.jobTitle).replace(/[-–—]/gu, " ");
+    const description = text(job?.description ?? job?.jobDescription).replace(/[-–—]/gu, " ");
+    // Only explicit assignments reject locally; ambiguous scope is assessed by AI.
+    if ((!MIXED_ENTRY_TITLE.test(title) && (ENTRY_PREFIX.test(title) || ENTRY_SUFFIX.test(title))) || ENTRY_ASSIGNMENT.test(description))
+      return "Skipped: Associate or entry-level role.";
+    return "";
   }
   function verifiedRole(job, result) {
     const role = result?.role;
