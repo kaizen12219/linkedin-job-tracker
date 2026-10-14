@@ -4,6 +4,7 @@
   const STORAGE_KEY = "jobTrackerResearchV1";
   const CLIENT_KEY = "jobTrackerResearchClientV1";
   const MODEL_KEY = "jobTrackerResearchModelV1";
+  const RECOVERY_HOST = "com.applicantally.job_research";
   const ALARM = "job-tracker-research";
   const MAX_AGE = 24 * 60 * 60 * 1000;
   const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504]);
@@ -13,8 +14,10 @@
   }
   function create({ storage = chrome.storage.local, fetchImpl = fetch, cryptoImpl = crypto,
     alarms = chrome.alarms, extensionId = chrome.runtime.id, sheetClient, bannedCompanies,
+    nativeMessaging = chrome.runtime.sendNativeMessage?.bind(chrome.runtime),
     onSaved = async () => {}, onOutcome = async () => {}, onProfileSelected = async () => {} } = {}) {
     let tail = Promise.resolve();
+    let recovery = null;
     const serial = (operation) => {
       const result = tail.then(operation, operation);
       tail = result.catch(() => {});
@@ -64,11 +67,34 @@
       const value = (await storage.get(MODEL_KEY))[MODEL_KEY];
       return typeof value === "string" ? value : "";
     }
+    function startWorker() {
+      if (recovery) return recovery;
+      recovery = (async () => {
+        const missing = () => Object.assign(new Error("The recovery helper is not installed. Run scripts/install-research-helper.cmd once from your extension folder, then reconnect."), { code: "RESEARCH_HELPER_MISSING" });
+        if (typeof nativeMessaging !== "function") throw missing();
+        let result;
+        try {
+          const timeout = AbortSignal.timeout(25000);
+          const expired = new Promise((_, reject) => timeout.addEventListener("abort", () => reject(
+            Object.assign(new Error("Research has not finished starting. Wait a moment, then reconnect again."), { code: "RESEARCH_START_TIMEOUT" })), { once: true }));
+          result = await Promise.race([nativeMessaging(RECOVERY_HOST, { action: "start" }), expired]);
+        } catch (error) {
+          if (error.code === "RESEARCH_START_TIMEOUT") throw error;
+          if (/not found|not installed|specified native messaging host/u.test(String(error.message).toLowerCase())) throw missing();
+          throw Object.assign(new Error("Research recovery could not connect. Reload the extension and try again."), { code: "RESEARCH_HELPER_FAILED" });
+        }
+        if (result?.ok !== true || result.status !== "ready") throw Object.assign(new Error(result?.error?.message || "Research could not start. Try reconnecting again."),
+          { code: result?.error?.code || "RESEARCH_START_FAILED" });
+        void poll().catch(() => {});
+        return { status: "ready", alreadyRunning: result.alreadyRunning === true };
+      })().finally(() => { recovery = null; });
+      return recovery;
+    }
     async function getModels() {
       let catalog;
       try { catalog = await request("/models"); }
       catch (error) {
-        if (error.retryableResearch) error.message = "The research worker is unavailable. Start it and refresh the AI models.";
+        if (error.retryableResearch) error.message = "Research is offline. Click Start / reconnect research to start it and load the AI models.";
         throw error;
       }
       if (!catalog || !Array.isArray(catalog.models) || typeof catalog.defaultModel !== "string" ||
@@ -222,7 +248,7 @@
       });
     }
     function clear() { return serial(async () => { await storage.remove(STORAGE_KEY); await alarms.clear(ALARM); }); }
-    return { start, poll, clear, getModels, setModel };
+    return { start, poll, clear, getModels, setModel, startWorker };
   }
   root.JobResearchClient = Object.freeze({ create, ALARM });
 })(typeof globalThis === "undefined" ? this : globalThis);

@@ -8,6 +8,8 @@ Profiles come from `data/workspace/profile-library/settings.json`, with `registr
 
 The existing AI research worker on port 8787 is still needed to qualify jobs and verify application routes. The extension writes its results to the selected folder. Pending research retains its capture ID if folder access expires and resumes after access is restored.
 
+Install `scripts/install-research-helper.cmd` once on Windows, then use **Start / reconnect research** in the popup to restore research after a reboot or stopped worker. Startup reloads the model list and resumes queued captures without changing their IDs or selected profiles.
+
 Run `npm ci`, then `npm test` for extension tests. The parent repository's `workspace/test/file-store.test.mjs` covers disk writes, migration, concurrent tailoring, deletion and recovery. `workspace/test/chrome-file-store.mjs` probes Chrome file handles, IndexedDB, the extension worker and popup using a disposable browser profile.
 
 `scripts/package-extension.ps1` writes one current archive from a runtime asset allowlist. It includes no credentials, job data, tests or legacy Google Sheets client.

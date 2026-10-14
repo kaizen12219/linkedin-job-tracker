@@ -3,6 +3,7 @@ const fixtureMode = new URLSearchParams(location.search).get("mode");
 const fixtureStorage = {};
 let fixtureSaved = false;
 let fixtureResearchModel = fixtureMode === "model-unavailable" ? "retired-model" : "";
+let fixtureResearchOnline = !["models-offline", "offline"].includes(fixtureMode);
 const fixtureJob = { company: "Example Systems", title: "Senior Software Engineer", description: "Build reliable tools for distributed teams.\n\nResponsibilities\n" + "Work with the product team to improve the experience.\n".repeat(35), applyUrl: "https://jobs.example.test/engineer" };
 window.chrome = {
   runtime: { sendMessage: async (message) => {
@@ -18,8 +19,13 @@ window.chrome = {
     if (message.type === "KAI_TRACKER_CLEAR_CONFIG") return { ok: true, result: { configured: false, connection: "unconfigured" } };
     if (message.type === "KAI_TRACKER_BANNED_GET") return { ok: true, result: { companies: [] } };
     if (message.type === "KAI_TRACKER_BANNED_SET") return { ok: true, result: { companies: message.companies || [] } };
+    if (message.type === "KAI_TRACKER_RESEARCH_START") {
+      const alreadyRunning = fixtureResearchOnline;
+      fixtureResearchOnline = true;
+      return { ok: true, result: { status: "ready", alreadyRunning } };
+    }
     if (["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET"].includes(message.type)) {
-      if (["models-offline", "offline"].includes(fixtureMode)) return { ok: false, error: { code: "RESEARCH_UNAVAILABLE", message: "The research worker is unavailable. Start it and refresh the AI models." } };
+      if (!fixtureResearchOnline) return { ok: false, error: { code: "RESEARCH_UNAVAILABLE", message: "The research worker is unavailable. Click Start / reconnect research to load the AI models." } };
       if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") {
         fixtureResearchModel = message.model;
         return { ok: true, result: { selectedModel: fixtureResearchModel } };

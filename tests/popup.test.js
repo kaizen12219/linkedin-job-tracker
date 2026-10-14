@@ -67,7 +67,7 @@ function createPopup({
     "connectionStatus", "status", "duplicate", "json", "title", "company", "applyUrl", "description",
     "sheetSettings", "credentialsFile", "credentialsStatus", "sheetUrl", "sheetGid",
     "saveSheetSettings", "removeSheetSettings", "bannedSettings", "bannedCompanies", "bannedStatus",
-    "saveBanned", "exportBanned", "importBanned", "researchModel", "researchModelStatus", "refreshResearchModels"
+    "saveBanned", "exportBanned", "importBanned", "researchModel", "researchModelStatus", "refreshResearchModels", "startResearch"
   ];
   const elements = Object.fromEntries(ids.map((id) => [id, new Element(id === "profile" ? "select" : "div")]));
   elements.profile.append(Object.assign(new Element("option", ""), { textContent: "No profile" }));
@@ -118,6 +118,7 @@ function createPopup({
           selectedModel = message.model;
           return { ok: true, result: { selectedModel } };
         }
+        if (message.type === "KAI_TRACKER_RESEARCH_START") return { ok: true, result: { status: "ready", alreadyRunning: false } };
         if (message.type === "KAI_TRACKER_CONFIGURE") {
           configured = true;
           return { ok: true, result: { configured: true, connection: "connected", sheetUrl: SHEET_URL, sheetGid: 123, sheetTitle: "Jobs" } };
@@ -324,4 +325,124 @@ test("model discovery outages do not disable folder captures and refresh recover
   assert.equal(app.elements.researchModel.disabled, false);
   assert.equal(app.elements.researchModel.children.length, 3);
   assert.equal(app.elements.connectionStatus.textContent, "Connected · Jobs");
+});
+
+test("starting research recovers an offline catalog without altering the saved model or folder capture", async () => {
+  let online = false;
+  const app = createPopup({ selectedModel: "session-beta", selectedProfile: "Alex", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODELS" && !online) {
+      return { ok: false, error: { code: "RESEARCH_UNAVAILABLE", message: "The research worker is unavailable." } };
+    }
+    if (message.type === "KAI_TRACKER_RESEARCH_START") online = true;
+  } });
+  await app.start();
+  assert.match(HTML, /id="startResearch"[^>]*>Start \/ reconnect research/);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_START"), false);
+  assert.equal(app.elements.startResearch.disabled, false);
+  await app.click("startResearch");
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_RESEARCH_START").length, 1);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_RESEARCH_MODELS").length, 2);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"), false);
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.profile.value, "Alex");
+  assert.equal(app.elements.saveSheet.disabled, false);
+  assert.deepEqual(app.storageWrites, []);
+  assert.match(app.elements.researchModelStatus.textContent, /Models reported/);
+});
+
+test("research recovery serializes duplicate clicks and blocks model changes until the catalog is refreshed", async () => {
+  let finishStart;
+  const app = createPopup({ selectedModel: "session-beta", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_START") return new Promise(resolve => { finishStart = resolve; });
+  } });
+  await app.start();
+  await app.click("startResearch");
+  assert.equal(app.elements.startResearch.disabled, true);
+  assert.equal(app.elements.startResearch.textContent, "Starting…");
+  assert.equal(app.elements.researchModel.disabled, true);
+  assert.equal(app.elements.refreshResearchModels.disabled, true);
+  assert.match(app.elements.researchModelStatus.textContent, /Starting the research worker/);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  await app.click("startResearch");
+  await app.click("refreshResearchModels");
+  await app.selectModel("session-alpha");
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_RESEARCH_START").length, 1);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_RESEARCH_MODELS").length, 1);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"), false);
+  finishStart({ ok: true, result: { status: "ready", alreadyRunning: true } });
+  await settle();
+  assert.equal(app.elements.startResearch.disabled, false);
+  assert.equal(app.elements.startResearch.textContent, "Start / reconnect research");
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.refreshResearchModels.disabled, false);
+});
+
+test("a failed research start displays actionable errors and keeps model, profile, and save usable", async () => {
+  const failure = "Research launcher is not installed. Run scripts/install-research-launcher.ps1 once, then reconnect.";
+  const app = createPopup({ selectedModel: "session-beta", selectedProfile: "Alex", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_START") return { ok: false, error: { code: "RESEARCH_LAUNCHER_NOT_INSTALLED", message: failure } };
+  } });
+  await app.start();
+  await app.click("startResearch");
+  assert.equal(app.elements.researchModelStatus.textContent, failure);
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.profile.value, "Alex");
+  assert.equal(app.elements.profile.disabled, false);
+  assert.equal(app.elements.saveSheet.disabled, false);
+  assert.equal(app.elements.startResearch.disabled, false);
+  assert.equal(app.elements.refreshResearchModels.disabled, false);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_RESEARCH_MODELS").length, 1);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_MODEL_SET"), false);
+  assert.deepEqual(app.storageWrites, []);
+});
+
+test("research recovery is available before configuring the ApplicantAlly folder", async () => {
+  const app = createPopup({ configured: false });
+  await app.start();
+  await app.click("startResearch");
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_RESEARCH_START"), true);
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.equal(app.elements.saveSheet.disabled, true);
+  assert.match(app.elements.connectionStatus.textContent, /Choose ApplicantAlly folder/);
+});
+
+test("an older model request cannot overwrite recovery progress or a recovery failure", async () => {
+  let finishCatalog;
+  let finishStart;
+  const app = createPopup({ respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODELS") return new Promise(resolve => { finishCatalog = resolve; });
+    if (message.type === "KAI_TRACKER_RESEARCH_START") return new Promise(resolve => { finishStart = resolve; });
+  } });
+  await app.start();
+  await app.click("startResearch");
+  finishCatalog({ ok: true, result: { models: [{ id: "stale", name: "Stale" }], defaultModel: "stale", selectedModel: "stale" } });
+  await settle();
+  assert.match(app.elements.researchModelStatus.textContent, /Starting the research worker/);
+  assert.equal(app.elements.researchModel.value, "");
+  assert.equal(app.elements.refreshResearchModels.disabled, true);
+  finishStart({ ok: false, error: { message: "Port 8787 belongs to another app. Stop that app and reconnect." } });
+  await settle();
+  assert.match(app.elements.researchModelStatus.textContent, /Port 8787 belongs to another app/);
+  assert.equal(app.elements.researchModel.value, "");
+  assert.equal(app.elements.researchModel.disabled, true);
+  assert.equal(app.elements.startResearch.disabled, false);
+});
+
+test("an older model request cannot replace the recovered model catalog", async () => {
+  let finishCatalog;
+  let calls = 0;
+  const app = createPopup({ selectedModel: "session-beta", respond(message) {
+    if (message.type === "KAI_TRACKER_RESEARCH_MODELS" && ++calls === 1) return new Promise(resolve => { finishCatalog = resolve; });
+  } });
+  await app.start();
+  await app.click("startResearch");
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  finishCatalog({ ok: false, error: { message: "Stale worker failure." } });
+  await settle();
+  assert.equal(app.elements.researchModel.value, "session-beta");
+  assert.equal(app.elements.researchModel.disabled, false);
+  assert.match(app.elements.researchModelStatus.textContent, /Models reported/);
 });

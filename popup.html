@@ -31,7 +31,10 @@
           </label>
           <p id="researchModelStatus" role="status">Loading the signed-in session’s models…</p>
           <p id="researchModelHelp">Applies to new job sessions. Running and queued sessions keep their model.</p>
-          <button id="refreshResearchModels" class="secondary" type="button">Refresh models</button>
+          <div class="settings-actions">
+            <button id="startResearch" class="secondary" type="button">Start / reconnect research</button>
+            <button id="refreshResearchModels" class="secondary" type="button">Refresh models</button>
+          </div>
         </section>
         <p>Jobs are saved directly in your ApplicantAlly data folder. Use the app’s publish button to copy them to Google Sheets.</p>
         <details id="bannedSettings">

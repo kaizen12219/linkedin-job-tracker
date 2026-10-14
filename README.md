@@ -8,10 +8,12 @@ This extension captures qualifying LinkedIn jobs into ApplicantAlly. Research us
 2. Extract the extension ZIP into a permanent folder.
 3. Open `chrome://extensions`, enable **Developer mode**, and choose **Load unpacked**. Use **Reload** after updating an existing installation. The bundled public manifest key keeps the extension ID stable.
 4. Open the popup’s **Folder settings** and choose the extracted ApplicantAlly app folder or its `data/workspace` directory.
-5. Start the research worker with `scripts/start-research.ps1` and keep Codex signed in.
+5. On Windows, run `scripts/install-research-helper.cmd` once, reload the extension, and click **Start / reconnect research** in its popup. Keep Codex signed in. The helper can start the worker again after a PC reboot without editing source files. `scripts/start-research.ps1` remains available for manual startup.
 6. Capture a job. Profiles, duplicate checks and saves use the selected folder directly.
 
 The popup’s **AI research model** selector loads model names from the signed-in session’s catalog. Choose a model or **Session default**, and use **Refresh models** after changing accounts or when choices change. The setting applies to new job sessions. A queued capture freezes its chosen model, and retries and recovered sessions retain it. Discovery uses the existing local research worker; profile reads and saves continue to use ApplicantAlly’s folder directly.
+
+**Start / reconnect research** starts the existing worker in the background and reloads the model list. Closing the popup does not stop the worker. The installed helper accepts only start/status requests from this extension, and leaves an already-running worker alone. If another service occupies port 8787, it reports the conflict without stopping that service. It has no job-store or profile-data API. Installation registers the helper for the current Windows user and pins the local Node runtime and research folder; if those files move, rerun the installer with the current paths. The default worker folder is `D:\rezi-builder-mcp\rezi-builder-mcp`; an alternate folder can be supplied to `scripts/install-research-helper.ps1 -BuilderRoot <folder>`.
 
 Jobs, results, and résumé links are stored in ApplicantAlly’s app-folder data. In the extension popup, open **Folder settings → Choose folder** and select your extracted ApplicantAlly folder or its `data/workspace` directory. Chrome remembers the folder handle. The tracker reads profiles and duplicate records and writes new job files directly, including while ApplicantAlly is closed. ApplicantAlly watches these files when open and loads them on startup. Google Sheets receives a snapshot only when you use ApplicantAlly’s publish button.
 
@@ -89,6 +91,7 @@ Runtime network access is limited to:
 - LinkedIn job pages for scraping and native card dismissal.
 - `http://127.0.0.1:8787/job-research` for public captured job details and scoped research results. Google credentials and candidate profiles are not sent to this endpoint.
 - Chrome’s granted folder handle for local profile choices, duplicate checks, company snapshots and saves. These operations perform no HTTP requests.
+- Chrome Native Messaging for the popup’s start/status-only research helper. The helper starts the fixed local research worker; it receives no profiles or job-store data.
 
 The extension has no Google API or arbitrary research-site permissions. The isolated local Codex session performs web research. The research worker accepts its scoped research route only from the fixed tracker extension with a private per-browser client key; browser access to its general MCP route remains blocked. The data connection uses the selected local folder and requires no ApplicantAlly API, tracker token or running ApplicantAlly process.
 

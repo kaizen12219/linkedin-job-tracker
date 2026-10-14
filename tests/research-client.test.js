@@ -12,7 +12,7 @@ const result = { decision: "save", company: job.company, title: job.title, role,
 const modelCatalog = { models: [{ id: "session-model-alpha", name: "Research Alpha" }, { id: "session-model-beta", name: "Research Beta" }], defaultModel: "session-model-alpha" };
 function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
-  catalog = modelCatalog, catalogError = null,
+  catalog = modelCatalog, catalogError = null, nativeMessaging,
   profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
   const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [];
   let researchWrites = 0;
@@ -45,7 +45,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   const sheetClient = { async getStatus() { return clone(state); }, async getOptions() { return { profiles: clone(profiles) }; }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return { status: "inserted" }; } };
   const context = vm.createContext({ URL, AbortSignal, Uint8Array, Date, fetch: fetchImpl, crypto, chrome: { storage: { local: storage }, alarms, runtime: { id: "stable-id" } } });
   for (const name of ["capture-policy", "profile-routing", "research-client"]) vm.runInContext(fs.readFileSync(require.resolve(`../src/${name}.js`), "utf8"), context);
-  const client = context.JobResearchClient.create({ storage, fetchImpl, cryptoImpl: crypto, alarms, extensionId: "stable-id", sheetClient,
+  const client = context.JobResearchClient.create({ storage, fetchImpl, cryptoImpl: crypto, alarms, extensionId: "stable-id", sheetClient, nativeMessaging,
     bannedCompanies: { async has() { return banned; } }, onSaved: async (company) => remembered.push(company), onOutcome: async (_record, message) => outcomes.push(message) });
   return { client, stored, calls, saves, outcomes, remembered, alarmCalls, setResponse(value) { response = value; },
     setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
@@ -62,6 +62,28 @@ test("model options use the signed-in session catalog and labels with the saved 
   assert.equal(h.calls[0].options.method, "GET");
   assert.equal(h.calls[0].options.headers["X-Job-Tracker-Extension"], "stable-id");
   assert.match(h.calls[0].options.headers["X-Job-Tracker-Client"], /^[a-f0-9]{64}$/u);
+});
+
+test("UI recovery sends only the fixed start action and shares concurrent startup requests", async () => {
+  const nativeCalls = []; let ready;
+  const pending = new Promise(resolve => { ready = resolve; });
+  const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-beta" }, nativeMessaging: async (...args) => { nativeCalls.push(args); return pending; } });
+  const first = h.client.startWorker(), second = h.client.startWorker();
+  assert.equal(first, second);
+  assert.deepEqual(clone(nativeCalls), [["com.applicantally.job_research", { action: "start" }]]);
+  ready({ ok: true, status: "ready", alreadyRunning: false });
+  assert.deepEqual(clone(await first), { status: "ready", alreadyRunning: false });
+  assert.equal(h.stored.jobTrackerResearchModelV1, "session-model-beta");
+});
+
+test("missing or failed recovery reports setup/conflict errors without changing queued captures", async () => {
+  const missing = harness();
+  await assert.rejects(missing.client.startWorker(), error => error.code === "RESEARCH_HELPER_MISSING");
+  const h = harness({ networkError: new Error("offline"), nativeMessaging: async () => ({ ok: false, error: { code: "RESEARCH_PORT_CONFLICT", message: "Another service occupies port 8787." } }) });
+  await h.client.start(job);
+  const queued = clone(h.stored.jobTrackerResearchV1);
+  await assert.rejects(h.client.startWorker(), error => error.code === "RESEARCH_PORT_CONFLICT");
+  assert.deepEqual(h.stored.jobTrackerResearchV1, queued);
 });
 
 test("choosing a model validates against the current catalog and preserves the preference on rejection", async () => {

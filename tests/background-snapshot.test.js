@@ -137,7 +137,7 @@ test("AI model discovery and preference changes accept only trusted popup messag
     return { ok: true, json: async () => catalog };
   } });
   await settle();
-  for (const type of ["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET"]) {
+  for (const type of ["KAI_TRACKER_RESEARCH_MODELS", "KAI_TRACKER_RESEARCH_MODEL_SET", "KAI_TRACKER_RESEARCH_START"]) {
     for (const sender of ["linkedin", "foreign"]) {
       const { response } = await h.sendRaw({ type, model: "session-alpha" }, sender);
       assert.equal(response.ok, false); assert.equal(response.error.code, "TRACKER_FORBIDDEN");

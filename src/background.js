@@ -47,6 +47,7 @@ const POPUP_MESSAGES = new Set([
   "KAI_TRACKER_STATUS",
   "KAI_TRACKER_RESEARCH_MODELS",
   "KAI_TRACKER_RESEARCH_MODEL_SET",
+  "KAI_TRACKER_RESEARCH_START",
   "KAI_TRACKER_BANNED_GET",
   "KAI_TRACKER_BANNED_SET"
 ]);
@@ -161,6 +162,7 @@ async function handleTrackerMessage(message, sender = {}) {
   if (message.type === "KAI_TRACKER_STATUS") return sheetClient.getStatus();
   if (message.type === "KAI_TRACKER_RESEARCH_MODELS") return researchClient.getModels();
   if (message.type === "KAI_TRACKER_RESEARCH_MODEL_SET") return researchClient.setModel(message.model);
+  if (message.type === "KAI_TRACKER_RESEARCH_START") return researchClient.startWorker();
   if (message.type === "KAI_TRACKER_OPTIONS") return sheetClient.getOptions({ refresh: message.refresh === true });
   if (message.type === "KAI_TRACKER_DUPLICATE") return sheetClient.lookupDuplicate(message.company);
   if (message.type === "KAI_TRACKER_BANNED_GET") return { companies: await bannedCompanies.list() };

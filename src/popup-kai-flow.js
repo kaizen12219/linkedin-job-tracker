@@ -7,6 +7,7 @@ const profileSelect = document.querySelector("#profile");
 const researchModelSelect = document.querySelector("#researchModel");
 const researchModelStatus = document.querySelector("#researchModelStatus");
 const refreshResearchModelsButton = document.querySelector("#refreshResearchModels");
+const startResearchButton = document.querySelector("#startResearch");
 const connectionEl = document.querySelector("#connectionStatus");
 const statusEl = document.querySelector("#status");
 const duplicateEl = document.querySelector("#duplicate");
@@ -38,6 +39,7 @@ let duplicateTimer;
 let researchModelsVersion = 0;
 let researchModelsLoaded = false;
 let researchModelSaving = false;
+let researchWorkerStarting = false;
 let selectedResearchModel = "";
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -48,14 +50,16 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 refreshResearchModelsButton.addEventListener("click", () => void loadResearchModels());
+startResearchButton.addEventListener("click", () => void startResearchWorker());
 researchModelSelect.addEventListener("change", async () => {
-  if (researchModelSaving || !researchModelsLoaded) return;
+  if (researchModelSaving || researchWorkerStarting || !researchModelsLoaded) return;
   const previous = selectedResearchModel;
   const model = researchModelSelect.value;
   researchModelSaving = true;
   ++researchModelsVersion;
   researchModelSelect.disabled = true;
   refreshResearchModelsButton.disabled = true;
+  startResearchButton.disabled = true;
   researchModelStatus.textContent = "Saving the AI model…";
   try {
     const result = await request({ type: "KAI_TRACKER_RESEARCH_MODEL_SET", model });
@@ -69,11 +73,35 @@ researchModelSelect.addEventListener("change", async () => {
     researchModelSaving = false;
     researchModelSelect.disabled = !researchModelsLoaded;
     refreshResearchModelsButton.disabled = false;
+    startResearchButton.disabled = false;
   }
 });
 
-async function loadResearchModels() {
-  if (researchModelSaving) return;
+async function startResearchWorker() {
+  if (researchWorkerStarting || researchModelSaving) return;
+  researchWorkerStarting = true;
+  ++researchModelsVersion;
+  startResearchButton.disabled = true;
+  startResearchButton.textContent = "Starting…";
+  researchModelSelect.disabled = true;
+  refreshResearchModelsButton.disabled = true;
+  researchModelStatus.textContent = "Starting the research worker…";
+  try {
+    await request({ type: "KAI_TRACKER_RESEARCH_START" });
+    await loadResearchModels({ duringRecovery: true });
+  } catch (error) {
+    researchModelStatus.textContent = error.message;
+  } finally {
+    researchWorkerStarting = false;
+    startResearchButton.disabled = false;
+    startResearchButton.textContent = "Start / reconnect research";
+    researchModelSelect.disabled = !researchModelsLoaded;
+    refreshResearchModelsButton.disabled = false;
+  }
+}
+
+async function loadResearchModels({ duringRecovery = false } = {}) {
+  if (researchModelSaving || (researchWorkerStarting && !duringRecovery)) return;
   const version = ++researchModelsVersion;
   researchModelSelect.disabled = true;
   refreshResearchModelsButton.disabled = true;
@@ -102,8 +130,8 @@ async function loadResearchModels() {
     researchModelStatus.textContent = error.message;
   } finally {
     if (version === researchModelsVersion) {
-      researchModelSelect.disabled = !researchModelsLoaded;
-      refreshResearchModelsButton.disabled = false;
+      researchModelSelect.disabled = researchWorkerStarting || !researchModelsLoaded;
+      refreshResearchModelsButton.disabled = researchWorkerStarting;
     }
   }
 }
