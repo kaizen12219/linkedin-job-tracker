@@ -65,7 +65,7 @@ test("the visible search-country dropdown wins over stale URL state and never re
 });
 
 test("only absent required years enables the seniority fallback", () => {
-  for (const [title, scope, profile] of [["Senior Software Engineer", "ordinary", "kevin"], ["Senior Software Engineer", "senior", "kevin"], ["Software Engineer", "senior", "kevin"], ["Software Engineer", "ordinary", "jagjeet"]]) {
+  for (const [title, scope, profile] of [["Senior Software Engineer", "ordinary", "kevin"], ["Senior Software Engineer", "senior", "kevin"], ["Software Engineer", "senior", "kevin"], ["Software Engineer", "ordinary", "jagjeet"], ["Software Engineer - Lead Generation", "ordinary", "jagjeet"]]) {
     const target = { ...job, title };
     assert.equal(Routing.choose(target, Routing.snapshot(target, options), { minimumYears: null, scope, evidence: duties }).profile, profile);
   }

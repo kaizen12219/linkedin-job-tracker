@@ -19,10 +19,15 @@
   const ENTRY_SUFFIX = new RegExp(`\\b${ENGINEERING_ROLE}\\b[\\s,/:()|]+${ENTRY_LEVEL}(?:\\s+(?:level|program(?:me)?))?(?=\\s*(?:$|[(),/:|]))`, "iu");
   const ENTRY_ASSIGNMENT = new RegExp(`\\b(?:${OWN_ROLE}\\s+(?:is|will\\s+be|sits|operates|functions|maps|corresponds)\\s+(?:(?:a|an|at|as|the|to|equivalent|aligned|graded|levelled|leveled)\\s+){0,6}|you\\s+(?:will\\s+)?(?:join|operate|work|be\\s+hired|be\\s+appointed)\\s+(?:(?:as|at|a|an|the)\\s+){0,4})${ENTRY_LEVEL}(?:\\s+level\\b|[\\s,:/]+${ROLE_MODIFIERS}${ENGINEERING_ROLE}\\b|\\s+(?:role|position|job|program(?:me)?)\\b|(?=\\s*[.,;:]|$))`, "iu");
   const MIXED_ENTRY_TITLE = new RegExp(`\\b${ENTRY_LEVEL}\\s*(?:/|or)\\s*(?:mid(?:\\s+level)?|senior)\\b|\\b(?:mid(?:\\s+level)?|senior)\\s*(?:/|or)\\s*${ENTRY_LEVEL}\\b`, "iu");
+  const LEAD_AREA = "(?:technical|tech|team|engineering|development|software|backend|frontend|platform|cloud|data|ai|ml|mobile|qa|test|automation|sre|devops|delivery)";
+  const LEAD_PREFIX = new RegExp(`^(?:senior\\s+)?(?:lead\\s+${ROLE_MODIFIERS}${ENGINEERING_ROLE}|${LEAD_AREA}\\s+(?:team\\s+)?lead(?:er)?(?:\\s+${ROLE_MODIFIERS}${ENGINEERING_ROLE})?)$`, "iu");
+  const LEAD_SUFFIX = new RegExp(`\\b(?:${ENGINEERING_ROLE}|${LEAD_AREA})\\s+(?:team\\s+)?lead(?:er)?$`, "iu");
+  const LEAD_ROLE = `(?:${LEAD_AREA}\\s+(?:team\\s+)?lead(?:er)?\\b|lead\\s+${ROLE_MODIFIERS}${ENGINEERING_ROLE}\\b|lead(?=\\s+(?:role|position|job|for|of|on)\\b|\\s*[.,;:]|$))`;
+  const LEAD_ASSIGNMENT = new RegExp(`\\b(?:${OWN_ROLE}\\s+(?:is|will\\s+be|acts|serves|functions|operates|maps|corresponds)\\s+(?:(?:a|an|the|our|as|at|to|equivalent|aligned)\\s+){0,5}|you\\s+(?:will\\s+)?(?:serve|act|work|join|be|function|operate|be\\s+hired)\\s+(?:(?:as|a|an|the|our)\\s+){0,5}|as\\s+(?:our|the|a)\\s+)${LEAD_ROLE}`, "iu");
   function aboveSenior(job) {
     const title = text(job?.title ?? job?.jobTitle).replace(/[-–—]/gu, " ");
     const description = text(job?.description ?? job?.jobDescription).replace(/[-–—]/gu, " ");
-    // Company ladders differ: numbered ranks and Lead/Architect alone cannot
+    // Company ladders differ: numbered ranks and Architect alone cannot
     // establish Staff+ level. References to senior colleagues are not this role.
     return HIGHER_PREFIX.test(title) || HIGHER_SUFFIX.test(title) || HIGHER_MANAGEMENT.test(title) || HIGHER_ASSIGNMENT.test(description);
   }
@@ -31,6 +36,10 @@
     if (aboveSenior(job)) return "Skipped: role is above Senior level.";
     const title = text(job?.title ?? job?.jobTitle).replace(/[-–—]/gu, " ");
     const description = text(job?.description ?? job?.jobDescription).replace(/[-–—]/gu, " ");
+    const titleParts = text(job?.title ?? job?.jobTitle).split(/\s+[-–—]\s+|[,|/():]/u)
+      .map(part => part.trim().replace(/[-–—]/gu, " "));
+    if (titleParts.some(part => /^lead$/iu.test(part) || LEAD_PREFIX.test(part) || LEAD_SUFFIX.test(part)) || LEAD_ASSIGNMENT.test(description))
+      return "Skipped: Lead role.";
     // Only explicit assignments reject locally; ambiguous scope is assessed by AI.
     if ((!MIXED_ENTRY_TITLE.test(title) && (ENTRY_PREFIX.test(title) || ENTRY_SUFFIX.test(title))) || ENTRY_ASSIGNMENT.test(description))
       return "Skipped: Associate or entry-level role.";

@@ -438,6 +438,22 @@ test("AI-detected entry-level scope in a generic title preserves the exact skip 
   assert.deepEqual(h.reports[0].details.research.result, findings);
 });
 
+test("Lead roles are excluded before research and previously queued Lead captures produce skip reports", async () => {
+  for (const title of ["Technical Lead", "Tech Lead", "Team Lead", "Lead Software Engineer", "Engineering Lead", "Software Engineer (Lead)"]) {
+    const h = harness(); assert.equal((await h.client.start({ ...job, title })).status, "skipped");
+    assert.equal(h.calls.length, 0); assert.equal(h.saves.length, 0);
+  }
+  for (const state of ["requesting", "researching", "waiting-save"]) {
+    const first = harness(); await first.client.start(job);
+    first.stored.jobTrackerResearchV1[0].job.title = "Technical Lead";
+    first.stored.jobTrackerResearchV1[0].state = state;
+    const resumed = harness({ stored: first.stored }); await resumed.client.poll(); await resumed.client.poll();
+    assert.equal(resumed.calls.length, 0); assert.equal(resumed.saves.length, 0);
+    assert.equal(resumed.reports.length, 1); assert.match(resumed.reports[0].details.reason, /Lead role/);
+    assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "skipped");
+  }
+});
+
 test("old queued descriptions assigning this role Staff equivalence are discarded before worker calls", async () => {
   for (const pendingState of ["requesting", "researching", "waiting-save"]) {
     const first = harness();
@@ -457,7 +473,7 @@ test("old queued descriptions assigning this role Staff equivalence are discarde
 
 test("AI rejects above-Senior scope in ordinary titles before choosing a profile or saving", async () => {
   const evidence = "Set the company-wide engineering strategy and technical standards across multiple engineering teams.";
-  for (const title of ["Software Engineer", "Lead Software Engineer", "Technical Architect"]) {
+  for (const title of ["Software Engineer", "Technical Architect"]) {
     const h = harness();
     await h.client.start({ ...job, title, description: evidence, selectedRegion: "us", isEasyApply: false });
     assert.equal(h.calls.length, 1, title);

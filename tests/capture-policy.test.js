@@ -58,7 +58,7 @@ test("a job explicitly assigning this position an above-Senior level is excluded
 test("Senior and ambiguous engineering titles remain eligible without confusing unrelated words for a level", () => {
   for (const [title, description] of [
     ["Software Engineer", duties], ["Mid-level Software Engineer", duties],
-    ["Senior Software Engineer", duties], ["Lead Software Engineer", duties], ["Tech Lead", duties],
+    ["Senior Software Engineer", duties],
     ["Technical Architect", duties], ["Software Engineer IV", duties], ["Software Engineer L6", duties],
     ["Software Engineer – Staffing Agency", duties], ["Software Engineer – principal product", duties], ["Senior Software Engineer - CTO Office", duties],
     ["Software Engineer", `${duties} Collaborate with Staff and Principal Engineers on implementation decisions.`],
@@ -102,9 +102,9 @@ test("Associate and entry-level engineering roles are excluded without treating 
   ]) assert.equal(policy.roleSkipReason({ ...job, title, description }), "", title + description);
 });
 
-test("AI classification of above-Senior duties cannot save a generic or Lead engineering title", () => {
+test("AI classification of above-Senior duties cannot save a generic or Architect engineering title", () => {
   const evidence = "Set the company-wide engineering strategy and technical standards across multiple engineering teams.";
-  for (const title of ["Software Engineer", "Lead Software Engineer", "Technical Architect"]) {
+  for (const title of ["Software Engineer", "Technical Architect"]) {
     const target = { ...job, title, description: evidence, isEasyApply: false };
     assert.equal(policy.roleSkipReason(target), "", title);
     assert.equal(policy.needsResearch(target), true, title);
@@ -112,6 +112,29 @@ test("AI classification of above-Senior duties cannot save a generic or Lead eng
       role: { eligible: false, category: "software-development", evidence,
         reason: "Above-Senior scope: company-wide technical strategy across multiple teams." } }), null, title);
   }
+});
+
+test("formal Lead titles and own-role assignments are excluded while ordinary IC leadership stays eligible", () => {
+  for (const title of ["Technical Lead", "Tech Lead", "Team Lead", "Engineering Lead", "Development Team Leader", "Java Technical Lead",
+    "Lead Software Engineer", "Lead Engineer", "Lead Backend Developer", "QA Lead", "SRE Lead", "Platform Lead",
+    "Software Engineer (Lead)", "Senior Software Engineer / Team Lead", "Technical Lead (Java)", "Lead"]) {
+    const target = { ...job, title };
+    assert.match(policy.roleSkipReason(target), /Lead role/, title);
+    assert.equal(policy.needsResearch(target), false, title);
+    assert.equal(policy.verifiedJob(target, { ...result, title, application: { ...application, title } }), null, title);
+  }
+  for (const description of ["You will be the technical lead for our engineering team.", "You will serve as the team lead.",
+    "This role acts as our team lead.", "This position is a Lead Software Engineer.", "As our technical lead, you own team delivery."]) {
+    assert.match(policy.roleSkipReason({ ...job, title: "Software Engineer", description: `${duties} ${description}` }), /Lead role/, description);
+  }
+  for (const [title, description] of [
+    ["Senior Software Engineer", `${duties} Mentor engineers and lead a migration or incident response.`],
+    ["Software Engineer", `${duties} Work with our technical lead and report to the team lead.`],
+    ["Software Engineer - Lead Generation", `${duties} Build software for lead-generation workflows.`],
+    ["Software Engineer - lead engineer mentoring tools", duties],
+    ["Senior Software Engineer", `${duties} This is not a team lead role. Use leading technologies.`],
+    ["Software Engineer", `${duties} This is a lead generation software role.`]
+  ]) assert.equal(policy.roleSkipReason({ ...job, title, description }), "", title + description);
 });
 
 test("Senior JavaScript Engineer and .NET Developer require GPT duties evidence on both Apply paths", () => {
