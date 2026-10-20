@@ -205,6 +205,19 @@ test("Jobright collection stops when the committed search changes before a revie
   assert.equal(h.captures.length, 0);
   assert.match(h.finishes[0].message, /search changed/);
 });
+test("Jobright collection continues when opening cards removes homepage tracking parameters", async () => {
+  const ids = ["68f01234567890abcdef1234", "68f01234567890abcdef1235"];
+  const h = harness([[row(ids[0]), row(ids[1])]], {
+    sourceUrl: "https://jobright.ai/jobs/recommend?from=homepage&id=",
+    changeSelectionUrl: true,
+    jobUrl: record => `https://jobright.ai/jobs/info/${record.id}`
+  });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ids);
+  assert.equal(h.finishes[0].state.counts.saved, 2);
+  assert.match(h.finishes[0].message, /last results page/);
+  assert.equal(h.app.running(), false);
+});
 test("attempted filtered cards and unverified details are reported once without changing collection", async () => {
   const h = harness([[row(1, { filtered: true }), row(2, { active: false }), row(3, { queryOnly: true }), row(4)]], { reportFailures: true });
   await h.advance(500_000);

@@ -48,6 +48,25 @@ test("Jobright detail transitions retain the committed search key and LinkedIn k
   assert.equal(policy.sourceSearchKey("https://linkedin.com/jobs/view/123"), "");
 });
 
+test("Jobright homepage attribution and selected-job parameters do not change search identity", () => {
+  const canonical = "https://jobright.ai/jobs/recommend?location=US&work=remote";
+  for (const url of [
+    "https://jobright.ai/jobs/recommend?from=homepage&id=",
+    `https://jobright.ai/jobs/recommend?from=homepage&id=${id}&from=recommend&id=${otherId}`,
+    `${detail}?from=recommend&id=${id}`
+  ]) assert.equal(policy.sourceSearchKey(url), "https://jobright.ai/jobs/recommend", url);
+  for (const url of [
+    `https://www.jobright.ai/jobs/recommend/?from=homepage&id=${id}&work=remote&location=US`,
+    `${detail}?id=${otherId}&location=US&from=recommend&work=remote`
+  ]) assert.equal(policy.sourceSearchKey(url), canonical, url);
+  assert.notEqual(policy.sourceSearchKey(`${detail}?location=UK&work=remote`), canonical);
+  assert.notEqual(policy.sourceSearchKey(`${detail}?location=US&work=hybrid`), canonical);
+  assert.equal(policy.sourceSearchKey(`${detail}?customFilter=kept&from=homepage&id=`),
+    "https://jobright.ai/jobs/recommend?customFilter=kept");
+  assert.equal(policy.sourceSearchKey("https://www.linkedin.com/jobs/search/?from=homepage&id=123"),
+    "https://www.linkedin.com/jobs/search/?from=homepage&id=123");
+});
+
 test("public application routes exclude both portals and three levels of encoded or nested redirect wrappers", () => {
   for (const portal of [detail, "https://jobright.ai/profile", "https://app.jobright.ai/agent", "https://www.linkedin.com/jobs/view/123",
     "https://jobright.ai./jobs/recommend", "https://www.linkedin.com./jobs/view/123"])

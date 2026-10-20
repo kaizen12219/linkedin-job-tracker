@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.1 — 2026-10-21
+
+- Recognize Jobright's committed United States filter even when it uses the default topbar state. Ignore draft controls, setting icons and hidden measurement copies; reject conflicting visible countries.
+- Keep Jobright collection running when job-card navigation drops homepage tracking parameters, while still detecting changes to search filters.
+
 ## 0.8.0 — 2026-10-21
 
 - Add Jobright recommendations and job-detail capture with the same US eligibility checks, Kevin Lee/Jagjeet Wani profile selection, ApplicantAlly folder saves and failure reports as LinkedIn.

@@ -35,6 +35,74 @@ test("only committed visible country controls determine region and frozen search
   document.querySelector("[data-preference-key='country']").remove();
   assert.equal(api.searchContext().filterKey, ""); assert.equal(api.searchContext().selectedRegion, "");
 });
+test("default country and other committed topbar filters do not require active state", (t) => {
+  const { api, document } = setup(t);
+  const active = api.searchContext();
+  for (const control of document.querySelectorAll("[data-preference-key]")) control.setAttribute("data-topbar-state", "default");
+  assert.equal(api.searchContext().selectedRegion, "us");
+  assert.equal(api.searchContext().selectedRegionSource, "search-control");
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+  assert.equal(api.scrape().selectedRegion, "us");
+  document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid");
+  assert.notEqual(api.searchContext().filterKey, active.filterKey);
+});
+test("stateless country controls are accepted only with committed topbar markers", (t) => {
+  const { api, document } = setup(t);
+  const country = document.querySelector("[data-preference-key='country']");
+  const active = api.searchContext();
+  country.removeAttribute("data-topbar-state");
+  assert.equal(api.searchContext().selectedRegion, "");
+  country.setAttribute("data-preference-measure", "item");
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+  country.removeAttribute("data-preference-measure");
+  country.querySelector("button").setAttribute("data-topbar-kind", "selector");
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+  country.querySelector("button").removeAttribute("data-topbar-kind");
+  country.querySelector("span").className = "TopbarButton_topbar-button-value__wVW9O";
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+});
+test("country value ignores setting icons and duplicate nested label titles", (t) => {
+  const { api, document } = setup(t);
+  const active = api.searchContext();
+  const button = document.querySelector("[data-preference-key='country'] button");
+  button.innerHTML = '<span class="TopbarButton_topbar-button-value__value" title="United States"><span title="United States">United States</span></span><span title="setting"><svg aria-label="setting"><title>setting</title></svg></span>';
+  assert.equal(api.searchContext().selectedRegion, "us");
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+  button.innerHTML = 'United States <svg aria-label="setting"><title>setting</title></svg>';
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+});
+test("draft country controls cannot override the committed non-US country", (t) => {
+  const { api, document } = setup(t);
+  const country = document.querySelector("[data-preference-key='country'] span");
+  country.setAttribute("title", "United Kingdom");
+  country.textContent = "United Kingdom";
+  const committed = api.searchContext().filterKey;
+  for (const role of ["dialog", "listbox", "menu"]) {
+    document.body.insertAdjacentHTML("beforeend", `<div role="${role}"><div data-preference-key="country" data-topbar-state="active"><button data-topbar-kind="selector"><span title="United States">United States</span></button></div></div>`);
+  }
+  document.body.insertAdjacentHTML("beforeend", '<div class="ant-popover"><div data-preference-key="country" data-topbar-state="default"><button><span title="United States">United States</span></button></div></div><input value="United States">');
+  assert.equal(api.searchContext().filterKey, committed);
+  assert.equal(api.searchContext().selectedRegion, "");
+  assert.throws(() => api.scrape(), /Select United States/u);
+});
+test("hidden or measurement country clones cannot override a visible committed filter", (t) => {
+  const { api, document } = setup(t);
+  const active = api.searchContext();
+  for (const attributes of ['hidden', 'aria-hidden="true"', 'style="display:none"', 'style="visibility:hidden"', 'style="opacity:0"', 'data-preference-measure="measurement"']) {
+    document.body.insertAdjacentHTML("beforeend", `<div data-preference-key="country" data-topbar-state="default" ${attributes}><button data-topbar-kind="selector"><span title="United Kingdom">United Kingdom</span></button></div>`);
+  }
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+});
+test("duplicate committed country values are stable but conflicting visible countries fail closed", (t) => {
+  const { api, document } = setup(t);
+  const active = api.searchContext();
+  document.body.insertAdjacentHTML("beforeend", '<div data-preference-key="country" data-topbar-state="default"><button><span title="United States">United States</span></button></div>');
+  assert.equal(api.searchContext().filterKey, active.filterKey);
+  document.body.insertAdjacentHTML("afterbegin", '<div data-preference-key="country" data-topbar-state="active"><button><span title="United Kingdom">United Kingdom</span></button></div>');
+  assert.equal(api.searchContext().filterKey, "");
+  assert.equal(api.searchContext().selectedRegion, "");
+  assert.throws(() => api.scrape(), /Select United States/u);
+});
 test("cards require matching 24 hex IDs and the actual title link", (t) => {
   const { api, document } = setup(t, { html: fixture.page([fixture.job(), fixture.job(fixture.B)]) });
   document.querySelector("main").insertAdjacentHTML("beforeend", `<div class="job-card-flag-classname" id="123"><a href="/jobs/info/${fixture.B}"><h2 class="index_job-title__x">Other</h2></a></div>`);

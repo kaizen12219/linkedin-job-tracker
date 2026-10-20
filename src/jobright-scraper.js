@@ -25,17 +25,43 @@
     try { const url = new URL(sourceUrl); valid = url.protocol === "https:" && /^(?:www\.)?jobright\.ai$/u.test(url.hostname) && /^\/jobs\/(?:recommend|info\/[a-f0-9]{24})\/?$/u.test(url.pathname); } catch { /* Unsupported page. */ }
     if (!valid) return { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
     const preferences = new Map();
-    for (const control of doc.querySelectorAll("[data-preference-key][data-topbar-state='active']")) {
-      if (!visible(control)) continue;
-      const button = [...control.querySelectorAll("button")].find((item) => visible(item) && !item.closest("[role='dialog'], [role='listbox']"));
+    const draft = "[role='dialog'], [role='listbox'], [role='menu'], [aria-modal='true'], [popover], [inert], .ant-popover, .ant-dropdown, .ant-modal, [data-slot='popover-content'], [data-radix-popper-content-wrapper]";
+    for (const control of doc.querySelectorAll("[data-preference-key]")) {
+      if (!visible(control) || control.closest(draft)) continue;
+      const measure = control.getAttribute("data-preference-measure");
+      if (measure && measure !== "item") continue;
+      const button = [...control.querySelectorAll("button")].find((item) => visible(item) && !item.closest(draft) && item.closest("[data-preference-key]") === control);
       if (!button) continue;
-      const label = [...new Set([...button.querySelectorAll("span[title]")].filter(visible).map((item) => clean(item.getAttribute("title"))).filter(Boolean))].join(", ") || text(button);
+      const valueNodes = [...button.querySelectorAll("[class*='TopbarButton_topbar-button-value']")].filter(visible);
+      // Default filters need not have the active state. Require the observed
+      // topbar markers so a preference editor cannot masquerade as a filter.
+      if (!control.hasAttribute("data-topbar-state") && measure !== "item" && !button.hasAttribute("data-topbar-kind") && !valueNodes.length) continue;
+      const labelNodes = valueNodes.length ? valueNodes : [...button.querySelectorAll("span[title]")].filter((item) => visible(item) && !item.closest("svg, [role='img']"));
+      const labels = [...new Set(labelNodes.map((item) => clean(item.getAttribute("title")) || text(item)).filter(Boolean))];
+      if (!labels.length) {
+        // Ignore icon labels such as "setting" when the button has plain text.
+        const walker = doc.createTreeWalker(button, 4);
+        const parts = [];
+        while (walker.nextNode()) {
+          const node = walker.currentNode;
+          if (visible(node.parentElement) && !node.parentElement.closest("svg, [role='img']")) parts.push(node.textContent);
+        }
+        const label = clean(parts.join(" "));
+        if (label) labels.push(label);
+      }
       const key = clean(control.getAttribute("data-preference-key"));
-      if (key && label) preferences.set(key, label);
+      if (key && labels.length) {
+        const values = preferences.get(key) || new Set();
+        labels.forEach((label) => values.add(label));
+        preferences.set(key, values);
+      }
     }
-    const country = preferences.get("country") || "";
+    const countries = [...(preferences.get("country") || [])];
+    if (countries.length !== 1) return { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
+    const country = countries[0];
     const selectedRegion = /^(?:United States(?: of America)?|U\.?S\.?A?\.?)$/iu.test(country) ? "us" : "";
-    return { filterKey: country ? `jobright:${JSON.stringify([...preferences].sort(([a], [b]) => a.localeCompare(b)))}` : "",
+    const pairs = [...preferences].map(([key, values]) => [key, [...values].sort().join(", ")]).sort(([a], [b]) => a.localeCompare(b));
+    return { filterKey: country ? `jobright:${JSON.stringify(pairs)}` : "",
       selectedRegion, selectedRegionSource: selectedRegion ? "search-control" : "" };
   }
   function cards(doc = document) {

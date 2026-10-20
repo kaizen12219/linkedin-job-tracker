@@ -106,6 +106,9 @@
       } else if (site === "jobright") {
         url.hostname = "jobright.ai";
         url.pathname = "/jobs/recommend";
+        // Entry attribution and selected-job IDs disappear on card navigation;
+        // actual search filters still distinguish the committed search.
+        for (const name of ["from", "id"]) url.searchParams.delete(name);
       } else return "";
       url.hash = "";
       url.searchParams.sort();
