@@ -310,6 +310,116 @@ test("Jobright live-route verification retains foreign-source rejection and Link
   assert.equal(h.calls.some(call => call.target?.frameIds), false);
 });
 
+test("LinkedIn accepts the same document's current selected job when its sender URL retains the previous job ID", async () => {
+  const currentUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=123&keywords=developer";
+  const job = { ...engineeringJob, sourceUrl: currentUrl };
+  for (const previousUrl of [
+    "https://www.linkedin.com/jobs/search-results/?currentJobId=122&keywords=developer",
+    "https://www.linkedin.com/jobs/view/122/"
+  ]) {
+    const h = harness({ tabStates: { 9: { url: currentUrl, documentId: "same-linkedin-document" } } });
+    await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job }, "linkedin", {
+      url: previousUrl, tab: { id: 9, url: previousUrl }, frameId: 0,
+      documentId: "same-linkedin-document", documentLifecycle: "active"
+    });
+    assert.equal(result.response.ok, true, previousUrl);
+    assert.equal(result.response.result.status, "researching");
+    assert.equal(h.stored.jobTrackerResearchV1.length, 1);
+    assert.equal(h.stored.jobTrackerResearchV1[0].job.jobId, "123");
+    assert.equal(h.stored.jobTrackerResearchV1[0].job.sourceUrl, currentUrl);
+    const probes = h.calls.filter(call => call.action === "execute-script" && call.target.frameIds);
+    assert.equal(probes.length, 1);
+    assert.deepEqual(probes[0].target, { tabId: 9, frameIds: [0] });
+    assert.equal(h.calls.some(call => call.action === "save"), false);
+  }
+});
+
+test("LinkedIn collection retains its search binding while a stale sender ID is verified against the live selected job", async () => {
+  const previousUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=122&keywords=developer";
+  const currentUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=123&keywords=developer";
+  const tab = { id: 9, url: previousUrl };
+  const h = harness({ tabStates: { 9: { url: currentUrl, documentId: "same-linkedin-document" } } });
+  await settle(); await h.context.toggleJobCollection(tab);
+  const run = collection(h);
+  assert.ok(run);
+  const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, sourceUrl: currentUrl }, runId: run.id }, "linkedin", {
+    url: previousUrl, tab, frameId: 0, documentId: "same-linkedin-document", documentLifecycle: "active"
+  });
+  assert.equal(result.response.ok, true);
+  assert.equal(result.response.result.status, "researching");
+  assert.deepEqual(collection(h).visited, ["123"]);
+  assert.equal(h.stored.jobTrackerResearchV1.length, 1);
+});
+
+test("LinkedIn stale-sender recovery rejects a live route without the exact captured job identity", async () => {
+  const previousUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=122";
+  const job = { ...engineeringJob, sourceUrl: "https://www.linkedin.com/jobs/search-results/?currentJobId=123" };
+  for (const currentUrl of [
+    "https://www.linkedin.com/jobs/search-results/?currentJobId=124",
+    "https://www.linkedin.com/jobs/view/124/",
+    "https://www.linkedin.com/jobs/search-results/",
+    "https://www.linkedin.com/jobs/search-results/?currentJobId=not-an-id",
+    "https://www.linkedin.com/jobs/search-results/?currentJobId=123&currentJobId=124",
+    "https://www.linkedin.com/jobs/view/123/?currentJobId=124",
+    "https://www.linkedin.com/jobs/view/not-an-id",
+    "https://www.linkedin.com/feed/",
+    jobrightUrl,
+    "https://www.linkedin.com.evil.test/jobs/view/123/"
+  ]) {
+    const h = harness({ tabStates: { 9: { url: currentUrl, documentId: "same-linkedin-document" } } }); await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job }, "linkedin", {
+      url: previousUrl, tab: { id: 9 }, frameId: 0, documentId: "same-linkedin-document", documentLifecycle: "active"
+    });
+    assert.equal(result.response.error?.code, "TRACKER_IDENTITY_MISMATCH", currentUrl);
+    assert.equal(h.calls.find(call => call.action === "failure-report")?.report.error.code, "TRACKER_IDENTITY_MISMATCH", currentUrl);
+    assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim"].includes(call.action)), false, currentUrl);
+    assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0, currentUrl);
+  }
+});
+
+test("LinkedIn stale-sender recovery requires an active top-frame document and a single matching live probe", async () => {
+  const previousUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=122";
+  const currentUrl = "https://www.linkedin.com/jobs/search-results/?currentJobId=123";
+  const job = { ...engineeringJob, sourceUrl: currentUrl };
+  const frame = { frameId: 0, documentId: "same-linkedin-document", result: currentUrl };
+  const cases = [
+    { sender: { frameId: 1 } }, { sender: { frameId: undefined } },
+    { sender: { documentId: "" } }, { sender: { documentId: undefined } }, { sender: { documentId: 42 } },
+    { sender: { documentLifecycle: "cached" } }, { sender: { tab: undefined } }, { sender: { tab: { id: "9" } } },
+    { frames: [] }, { frames: null }, { frames: [frame, frame] },
+    { frames: [{ ...frame, frameId: 1 }] }, { frames: [{ ...frame, documentId: "replaced-document" }] },
+    { frames: [{ frameId: 0, result: currentUrl }] }, { frames: [{ frameId: 0, documentId: "same-linkedin-document" }] },
+    { frames: { 0: frame, length: 1 } }, { tabStates: { 9: null } },
+    { injectionError: new Error("The live tab could not be inspected") }
+  ];
+  for (const options of cases) {
+    const h = harness({ tabStates: options.tabStates || { 9: { url: currentUrl, documentId: "same-linkedin-document" } },
+      injectionResults: Object.hasOwn(options, "frames") ? { 9: options.frames } : {}, injectionError: options.injectionError });
+    await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job }, "linkedin", {
+      url: previousUrl, tab: { id: 9 }, frameId: 0, documentId: "same-linkedin-document", documentLifecycle: "active", ...options.sender
+    });
+    assert.equal(result.response.error?.code, "TRACKER_IDENTITY_MISMATCH", JSON.stringify(options));
+    assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim"].includes(call.action)), false, JSON.stringify(options));
+    assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0, JSON.stringify(options));
+  }
+});
+
+test("LinkedIn live-route recovery cannot authorize a captured source URL naming another job", async () => {
+  const h = harness({ tabStates: { 9: { url: "https://www.linkedin.com/jobs/search-results/?currentJobId=123", documentId: "same-linkedin-document" } } });
+  await settle();
+  const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: {
+    ...engineeringJob, sourceUrl: "https://www.linkedin.com/jobs/search-results/?currentJobId=124"
+  } }, "linkedin", {
+    url: "https://www.linkedin.com/jobs/search-results/?currentJobId=122", tab: { id: 9 }, frameId: 0,
+    documentId: "same-linkedin-document", documentLifecycle: "active"
+  });
+  assert.equal(result.response.error?.code, "TRACKER_IDENTITY_MISMATCH");
+  assert.equal(h.calls.some(call => call.target?.frameIds || ["duplicate", "save", "save-claim"].includes(call.action)), false);
+  assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0);
+});
+
 test("content captures and failure reports cannot cross LinkedIn and Jobright sender boundaries", async () => {
   const h = harness(); await settle();
   for (const [sourceUrl, job, allowed] of [

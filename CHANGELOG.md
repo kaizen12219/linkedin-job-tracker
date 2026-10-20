@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.7 — 2026-10-21
+
+- Recheck LinkedIn's live top-frame URL when its browser message retains a previous job ID after in-page navigation. Accept only the captured job in the same active document; mismatched jobs, sources, documents and frames remain blocked.
+
 ## 0.8.6 — 2026-10-21
 
 - Keep collecting when Jobright unmounts the selected card after opening its details. Require the exact previously selected ID, company, title and committed search to match the rendered detail metadata; changed or ambiguous cards remain blocked.
