@@ -65,6 +65,8 @@ function createPopup({
   selectedReasoningEffort = "",
   models = MODELS,
   configured = true,
+  tabUrl = "https://www.linkedin.com/jobs/view/123",
+  reconnectContent = false,
   respond,
   banned = []
 } = {}) {
@@ -95,6 +97,7 @@ function createPopup({
   const clipboard = [];
   const injected = [];
   const confirmations = [];
+  const scrapeMessages = [];
   const extensionId = "lomiekljcjnlhfpklnjmmhomknfigofn";
   const chrome = {
     runtime: {
@@ -153,10 +156,12 @@ function createPopup({
     } },
     tabs: {
       async create(options) { injected.push(structuredClone(options)); },
-      async query() { return [{ id: 1, url: "https://www.linkedin.com/jobs/view/123" }]; },
+      async query() { return [{ id: 1, url: tabUrl }]; },
       async sendMessage(tabId, message) {
         assert.equal(tabId, 1);
         assert.equal(message.type, "SCRAPE_LINKEDIN_JOB");
+        scrapeMessages.push(structuredClone(message));
+        if (reconnectContent && scrapeMessages.length === 1) throw new Error("Receiving end does not exist.");
         return { ok: true, data: structuredClone(job) };
       }
     },
@@ -175,10 +180,11 @@ function createPopup({
     Blob,
     structuredClone
   });
+  vm.runInContext(fs.readFileSync(path.join(ROOT, "src/capture-policy.js"), "utf8"), context);
   vm.runInContext(fs.readFileSync(path.join(ROOT, "src/profile-routing.js"), "utf8"), context);
   vm.runInContext(SOURCE, context, { filename: "popup-kai-flow.js" });
   return {
-    elements, messages, storageWrites, clipboard, injected, confirmations,
+    elements, messages, storageWrites, clipboard, injected, confirmations, scrapeMessages,
     async start() { await document.dispatch("DOMContentLoaded"); await settle(); },
     async click(id) { await elements[id].dispatch("click"); await settle(); },
     async input(id, value) { elements[id].value = value; await elements[id].dispatch("input"); await settle(); },
@@ -197,7 +203,7 @@ test("popup contains direct Google Sheet settings and no pairing or server contr
   assert.doesNotMatch(HTML, /credentialsFile|sheetSettings|Destination tab gid/);
   assert.match(HTML, /Jobs are saved directly in your ApplicantAlly data folder/);
   assert.doesNotMatch(HTML + SOURCE, /pairing|connectServer|Server connection|permissions\.request|\/api\/tracker/iu);
-  assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/profile-routing.js", "src/popup-kai-flow.js"]);
+  assert.deepEqual([...HTML.matchAll(/<script\b[^>]*src="([^"]+)"/gu)].map((match) => match[1]), ["src/capture-policy.js", "src/profile-routing.js", "src/popup-kai-flow.js"]);
   assert.doesNotMatch(SOURCE, /fetch\s*\(/u);
 });
 
@@ -214,6 +220,67 @@ test("configured popup loads Sheet profiles and saves the captured job directly"
   assert.deepEqual(save.job, JOB);
   assert.equal(save.profile, "");
   assert.match(app.elements.status.textContent, /Saved to ApplicantAlly · Pending/);
+});
+
+test("Jobright recommendation and job detail pages use the same capture and save pipeline", async () => {
+  for (const tabUrl of ["https://jobright.ai/jobs/recommend", "https://www.jobright.ai/jobs/recommend?filter=remote", "https://jobright.ai/jobs/info/68f01234567890abcdef1234"]) {
+    const job = { ...JOB, sourceSite: "jobright", sourceUrl: "https://jobright.ai/jobs/info/68f01234567890abcdef1234", jobId: "68f01234567890abcdef1234" };
+    const app = createPopup({ tabUrl, job });
+    await app.start();
+    assert.equal(app.scrapeMessages.length, 1);
+    assert.equal(app.elements.saveSheet.disabled, false);
+    await app.click("saveSheet");
+    assert.deepEqual(app.messages.find(message => message.type === "KAI_TRACKER_SAVE").job, job);
+  }
+});
+
+test("Jobright US search leaves Kevin/Jagjeet selection to the same research workflow", async () => {
+  const app = createPopup({ tabUrl: "https://jobright.ai/jobs/recommend", profiles: ["kevin", "jagjeet"],
+    job: { ...JOB, sourceSite: "jobright", sourceUrl: "https://jobright.ai/jobs/info/68f01234567890abcdef1234", jobId: "68f01234567890abcdef1234", selectedRegion: "us", selectedRegionSource: "search-control" } });
+  await app.start();
+  assert.match(app.elements.profile.value, /automatic/iu);
+  assert.equal(app.elements.profile.disabled, true);
+  assert.match(app.elements.status.textContent, /Kevin Lee or Jagjeet Wani/);
+  await app.click("saveSheet");
+  const capture = app.messages.find(message => message.type === "KAI_TRACKER_SAVE");
+  assert.equal(capture.profile, "");
+  assert.equal(capture.job.selectedRegion, "us");
+});
+
+test("popup injects only the supported site's adapter when the content script needs reconnecting", async () => {
+  for (const [tabUrl, files] of [
+    ["https://jobright.ai/jobs/recommend", ["src/capture-policy.js", "src/profile-routing.js", "src/jobright-scraper.js", "src/job-collector.js", "src/jobright-content.js"]],
+    ["https://www.linkedin.com/jobs/view/123", ["src/capture-policy.js", "src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"]]
+  ]) {
+    const app = createPopup({ tabUrl, reconnectContent: true });
+    await app.start();
+    assert.deepEqual(app.injected, [{ target: { tabId: 1 }, files }]);
+    assert.equal(app.scrapeMessages.length, 2);
+    assert.equal(app.elements.saveSheet.disabled, false);
+  }
+});
+
+test("unsupported Jobright pages and lookalike domains cannot trigger popup scraping", async () => {
+  for (const tabUrl of ["https://jobright.ai/", "https://jobright.ai/login", "https://jobright.ai/jobs", "https://jobright.ai/jobs/info/", "http://jobright.ai/jobs/recommend", "https://jobright.ai.evil.test/jobs/recommend", "https://other.jobright.ai/jobs/recommend"]) {
+    const app = createPopup({ tabUrl });
+    await app.start();
+    assert.equal(app.scrapeMessages.length, 0, tabUrl);
+    assert.deepEqual(app.injected, [], tabUrl);
+    assert.equal(app.elements.saveSheet.disabled, true, tabUrl);
+    assert.match(app.elements.status.textContent, /Open a LinkedIn or Jobright job page/);
+  }
+});
+
+test("manifest grants exact Jobright hosts and injects its supported job adapters in dependency order", () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"));
+  assert.equal(manifest.name, "Job Tracker");
+  assert.equal(manifest.version, "0.7.7");
+  assert.equal(manifest.host_permissions.includes("https://jobright.ai/*"), true);
+  assert.equal(manifest.host_permissions.includes("https://www.jobright.ai/*"), true);
+  assert.equal(manifest.host_permissions.some(value => value.includes("*.jobright.ai")), false);
+  const adapter = manifest.content_scripts.find(script => script.matches.some(value => value.includes("jobright.ai")));
+  assert.deepEqual(adapter.matches, ["https://jobright.ai/jobs/recommend*", "https://www.jobright.ai/jobs/recommend*", "https://jobright.ai/jobs/info/*", "https://www.jobright.ai/jobs/info/*"]);
+  assert.deepEqual(adapter.js, ["src/capture-policy.js", "src/profile-routing.js", "src/jobright-scraper.js", "src/job-collector.js", "src/jobright-content.js"]);
 });
 
 test("UK search selects Michal, Colombia/LATAM select Jose, and US waits for Kevin/Jagjeet analysis", async () => {

@@ -57,21 +57,89 @@
       return url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com");
     } catch { return false; }
   }
+  function portalUrl(value) {
+    try {
+      const url = new URL(value);
+      const host = url.hostname.replace(/\.$/u, "");
+      return host === "linkedin.com" || host.endsWith(".linkedin.com") || host === "jobright.ai" || host.endsWith(".jobright.ai");
+    } catch { return false; }
+  }
+  function sourceSite(value) {
+    try {
+      const url = new URL(value);
+      if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443")) return "";
+      if (linkedInUrl(url.href) && /^\/jobs\//u.test(url.pathname)) return "linkedin";
+      if (["jobright.ai", "www.jobright.ai"].includes(url.hostname) &&
+        /^\/jobs\/(?:recommend|info\/[a-f0-9]{24})\/?$/u.test(url.pathname)) return "jobright";
+    } catch {}
+    return "";
+  }
+  function supportedJobPage(value) { return !!sourceSite(value); }
+  function jobIdFromUrl(value) {
+    try {
+      const url = new URL(value);
+      const site = sourceSite(url.href);
+      if (site === "jobright") return /^\/jobs\/info\/([a-f0-9]{24})\/?$/u.exec(url.pathname)?.[1] || "";
+      if (site === "linkedin") return /^\/jobs\/view\/(\d+)\/?$/u.exec(url.pathname)?.[1] || url.searchParams.get("currentJobId")?.match(/^\d+$/u)?.[0] || "";
+    } catch {}
+    return "";
+  }
+  function validJobId(id, value) {
+    if (typeof id !== "string") return false;
+    const site = sourceSite(value);
+    if (!site || !(site === "linkedin" ? /^\d+$/u : /^[a-f0-9]{24}$/u).test(id)) return false;
+    if (site === "linkedin") {
+      const url = new URL(value);
+      if (url.pathname.startsWith("/jobs/view/") && !/^\/jobs\/view\/\d+\/?$/u.test(url.pathname)) return false;
+      if (url.searchParams.getAll("currentJobId").some(value => !/^\d+$/u.test(value) || value !== id)) return false;
+    }
+    const pageId = jobIdFromUrl(value);
+    return !pageId || pageId === id;
+  }
+  function sourceSearchKey(value) {
+    try {
+      const url = new URL(value);
+      const site = sourceSite(url.href);
+      if (site === "linkedin") {
+        if (!/^\/jobs\/search(?:-results)?\/?$/u.test(url.pathname)) return "";
+        for (const name of ["currentJobId", "start", "eBP", "refId", "trackingId", "origin", "lipi"]) url.searchParams.delete(name);
+      } else if (site === "jobright") {
+        url.hostname = "jobright.ai";
+        url.pathname = "/jobs/recommend";
+      } else return "";
+      url.hash = "";
+      url.searchParams.sort();
+      return url.href;
+    } catch { return ""; }
+  }
+  function containsPortalDestination(value) {
+    const queue = [{ value, depth: 0 }];
+    const seen = new Set();
+    for (let index = 0; index < queue.length && index < 100; index++) {
+      const item = queue[index];
+      if (seen.has(item.value)) continue;
+      seen.add(item.value);
+      if (portalUrl(item.value)) return true;
+      if (item.depth >= 3) continue;
+      try {
+        const decoded = decodeURIComponent(item.value);
+        if (decoded !== item.value) queue.push({ value: decoded, depth: item.depth + 1 });
+      } catch {}
+      try {
+        for (const nested of new URL(item.value).searchParams.values()) queue.push({ value: nested, depth: item.depth + 1 });
+      } catch {}
+    }
+    return queue.length > 100; // An oversized redirect wrapper cannot bypass verification.
+  }
   function publicUrl(value) {
     try {
       const url = new URL(value);
       if (url.protocol !== "https:" || url.username || url.password ||
-        (url.port && url.port !== "443") || linkedInUrl(url.href) ||
+        (url.port && url.port !== "443") || portalUrl(url.href) ||
         !url.hostname.includes(".") || /(?:^|\.)(?:localhost|local|internal|test|invalid|example)$/iu.test(url.hostname) ||
         /^[\d.]+$/u.test(url.hostname) || url.hostname.includes(":")) return "";
-      // Reject wrappers carrying a LinkedIn destination, including encoded ones.
-      for (const value of url.searchParams.values()) {
-        let decoded = value;
-        for (let depth = 0; depth < 3; depth++) {
-          if (linkedInUrl(decoded)) return "";
-          try { decoded = decodeURIComponent(decoded); } catch { break; }
-        }
-      }
+      // Portal links remain provenance, including nested/encoded redirects.
+      if (containsPortalDestination(url.href)) return "";
       return url.href;
     } catch { return ""; }
   }
@@ -166,8 +234,8 @@
     }
     if (externalUrl) {
       output.applyUrl = externalUrl;
-      const linkedInSource = [job.sourceUrl, job.applyUrl].find((value) => linkedInUrl(value));
-      if (linkedInSource && !text(job.info).includes(linkedInSource)) findings.push(`LinkedIn job: ${linkedInSource}`);
+      const source = [job.sourceUrl, job.applyUrl].find((value) => supportedJobPage(value));
+      if (source && !text(job.info).includes(source)) findings.push(`${sourceSite(source) === "jobright" ? "Jobright" : "LinkedIn"} job: ${source}`);
     }
     for (const item of emails) {
       const source = item.source === "description" ? "job description" :
@@ -181,7 +249,7 @@
     if (!output.applyUrl && job.isEasyApply === true) output.applyUrl = job.sourceUrl || "";
     return output;
   }
-  const api = Object.freeze({ text, key, ROLE_CATEGORIES, roleSkipReason, verifiedRole, linkedInUrl, publicUrl, needsRemoteCheck, hasFullyRemoteOffer, remoteSkipReason, needsResearch, validEmail, verifiedJob });
+  const api = Object.freeze({ text, key, ROLE_CATEGORIES, roleSkipReason, verifiedRole, linkedInUrl, portalUrl, sourceSite, supportedJobPage, jobIdFromUrl, validJobId, sourceSearchKey, publicUrl, needsRemoteCheck, hasFullyRemoteOffer, remoteSkipReason, needsResearch, validEmail, verifiedJob });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.JobCapturePolicy = api;
 })(typeof globalThis === "undefined" ? this : globalThis);

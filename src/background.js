@@ -105,8 +105,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open the tracker popup to change or save data." } });
     return false;
   }
-  if ((classifyMessage || captureMessage || collectionMessage || reportMessage) && !isLinkedInSender(sender)) {
-    sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Job highlighting is available only on LinkedIn job pages." } });
+  if ((classifyMessage || captureMessage || collectionMessage || reportMessage) && !isJobPageSender(sender)) {
+    sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open a supported LinkedIn or Jobright job page." } });
     return false;
   }
 
@@ -134,16 +134,12 @@ function isPopupSender(sender) {
   return sender?.id === chrome.runtime.id && ["popup.html", "folder.html"].some(file => sender?.url === chrome.runtime.getURL(file));
 }
 
-function isLinkedInSender(sender) {
-  if (sender?.id !== chrome.runtime.id) return false;
-  try {
-    const url = new URL(sender.url || "");
-    return url.protocol === "https:" &&
-      (url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com")) &&
-      url.pathname.startsWith("/jobs");
-  } catch {
-    return false;
-  }
+function isJobPageSender(sender) {
+  return sender?.id === chrome.runtime.id && isSupportedUrl(sender.url);
+}
+function matchesJobSource(job, sender) {
+  return JobCapturePolicy.validJobId(String(job?.jobId || ""), job?.sourceUrl) &&
+    JobCapturePolicy.sourceSite(job.sourceUrl) === JobCapturePolicy.sourceSite(sender.url);
 }
 
 async function handleTrackerMessage(message, sender = {}) {
@@ -152,8 +148,7 @@ async function handleTrackerMessage(message, sender = {}) {
       DUPLICATE_COMPANY: "Skipped: company already has a recorded job.",
       DETAILS_NOT_CONFIRMED: "The selected job's full details and identity could not be confirmed.",
       CARD_UNAVAILABLE: "The attempted job card became unavailable before capture." };
-    if (!reasons[message.reasonCode] || !/^\d+$/u.test(String(message.job?.jobId || "")) ||
-      !isSupportedUrl(message.job?.sourceUrl || "")) throw new Error("The failed job snapshot is invalid.");
+    if (!reasons[message.reasonCode] || !matchesJobSource(message.job, sender)) throw new Error("The failed job snapshot is invalid.");
     if (message.runId) await withCollectionState(state => {
       if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped."), { code: "TRACKER_RUN_STOPPED" });
     });
@@ -203,6 +198,8 @@ async function handleTrackerMessage(message, sender = {}) {
 
   let profile = message.profile ?? "";
   if (message.type === "KAI_TRACKER_CAPTURE") {
+    if (!matchesJobSource(message.job, sender) || !JobCapturePolicy.validJobId(String(message.job.jobId), sender.url))
+      throw new Error("The selected job source and identity could not be verified.");
     const settings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
     profile = settings[PROFILE_STORAGE_KEY] ?? "";
   }
@@ -210,8 +207,10 @@ async function handleTrackerMessage(message, sender = {}) {
     const claimed = await withCollectionState(async (state, save) => {
       if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped. Nothing was added."), { code: "TRACKER_RUN_STOPPED" });
       const jobId = String(message.job?.jobId || "");
-      if (!/^\d+$/u.test(jobId) || message.job.jobIdSource === "query" ||
-        LinkedInJobCollector.searchKey(message.job.sourceUrl) !== state.searchKey) throw new Error("The selected job could not be verified for this search.");
+      if (!JobCapturePolicy.validJobId(jobId, message.job.sourceUrl) || message.job.jobIdSource === "query" ||
+        (state.filterKey && message.job.searchContextKey !== state.filterKey) ||
+        (JobCapturePolicy.sourceSite(message.job.sourceUrl) !== "jobright" &&
+          LinkedInJobCollector.searchKey(message.job.sourceUrl) !== state.searchKey)) throw new Error("The selected job could not be verified for this search.");
       if (state.visited.includes(jobId)) return false;
       // Persist before the Sheet/research request, so a reload or lost response
       // cannot replay an uncertain save from this run.
@@ -257,8 +256,8 @@ function collectionMatches(state, sender, id = state?.id) {
 }
 function publicCollection(state) {
   if (!state) return null;
-  const { id, searchKey, visited, pages, counts } = state;
-  return { id, searchKey, visited, pages, counts };
+  const { id, searchKey, visited, pages, counts, filterKey } = state;
+  return { id, searchKey, visited, pages, counts, ...(filterKey ? { filterKey } : {}) };
 }
 async function waitForCollectionRun(message, sender) {
   const delay = message.milliseconds;
@@ -300,7 +299,7 @@ async function handleCollectionMessage(message, sender) {
     if (!collectionMatches(state, sender, message.runId)) return { stopped: true };
     const visited = message.state?.visited;
     const pages = message.state?.pages;
-    if (!Array.isArray(visited) || visited.length > 10_000 || !visited.every((id) => /^\d+$/u.test(id)) ||
+    if (!Array.isArray(visited) || visited.length > 10_000 || !visited.every((id) => JobCapturePolicy.validJobId(id, state.searchKey)) ||
       !Array.isArray(pages) || pages.length > 1000 || !pages.every((value) => typeof value === "string" && value.length < 50_000)) throw new Error("The results history could not be recorded.");
     state.visited = [...new Set([...state.visited, ...visited])];
     state.pages = [...new Set([...state.pages, ...pages])];
@@ -517,7 +516,7 @@ async function refreshSnapshotAndStyles(options = {}) {
 async function refreshLinkedInStyles() {
   let tabs = [];
   try {
-    tabs = await chrome.tabs.query({ url: ["https://linkedin.com/jobs/*", "https://*.linkedin.com/jobs/*"] });
+    tabs = await chrome.tabs.query({ url: ["https://linkedin.com/jobs/*", "https://*.linkedin.com/jobs/*", "https://jobright.ai/jobs/*", "https://www.jobright.ai/jobs/*"] });
   } catch {
     return;
   }
@@ -542,7 +541,15 @@ async function toggleJobCollection(commandTab) {
     if (running) { await stopActiveCollection(); return; }
     tab = tab?.id ? tab : await getActiveTab();
     const searchKey = LinkedInJobCollector.searchKey(tab?.url);
-    if (!tab?.id || !searchKey) throw new Error("Open LinkedIn job search results before starting job collection.");
+    if (!tab?.id || !searchKey) throw new Error("Open LinkedIn or Jobright job search results before starting job collection.");
+    let filterKey = "";
+    if (JobCapturePolicy.sourceSite(tab.url) === "jobright") {
+      const response = await requestContent(tab.id, tab.url, { type: "KAI_TRACKER_SEARCH_CONTEXT" });
+      filterKey = response?.ok && response.result?.filterKey;
+      if (typeof filterKey !== "string" || !filterKey.startsWith("jobright:") || filterKey.length > 20_000 ||
+        response.result.selectedRegion !== "us" || response.result.selectedRegionSource !== "search-control")
+        throw new Error("Select United States in Jobright's search country filter, then refresh the page before collecting.");
+    }
     const toggle = await withCollectionState(async (state, save) => {
       if (state) { await save(null); return { stop: state }; }
       const status = await sheetClient.getStatus();
@@ -550,7 +557,7 @@ async function toggleJobCollection(commandTab) {
       await classifyCompanies([], { refresh: false });
       const currentTab = await chrome.tabs.get(tab.id);
       const next = { id: crypto.randomUUID(), tabId: tab.id, searchKey, originalAutoDiscardable: currentTab.autoDiscardable,
-        visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
+        visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 }, ...(filterKey ? { filterKey } : {}) };
       startedId = next.id;
       await save(next);
       await chrome.tabs.update(tab.id, { autoDiscardable: false });
@@ -560,13 +567,8 @@ async function toggleJobCollection(commandTab) {
     if (!toggle.state) { await withCollectionState(async (state) => { if (!state) await setBadge("", "#56687a"); }); return; }
     startedId = toggle.state.id;
     const message = { type: "KAI_TRACKER_RUN_START", state: publicCollection(toggle.state) };
-    let response;
-    try { response = await chrome.tabs.sendMessage(tab.id, message); }
-    catch {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"] });
-      response = await chrome.tabs.sendMessage(tab.id, message);
-    }
-    if (!response?.ok) throw new Error(response?.error || "The collection controls could not be started. Reload the LinkedIn tab.");
+    const response = await requestContent(tab.id, tab.url, message);
+    if (!response?.ok) throw new Error(response?.error || "The collection controls could not be started. Reload the job search tab.");
     await withCollectionState(async (state) => { if (state?.id === startedId) await setBadge("RUN", "#1f7a3f"); });
   } catch (error) {
     if (startedId) await withCollectionState(async (state, save) => { if (state?.id === startedId) await save(null); });
@@ -581,9 +583,9 @@ async function runScrapeAndSaveShortcut(commandTab) {
     await setBadge("...", "#56687a");
     tab = tab?.id ? tab : await getActiveTab();
     if (!tab?.id) throw new Error("No active tab found.");
-    if (!isSupportedUrl(tab.url || "")) throw new Error("Open a LinkedIn job page before using the shortcut.");
+    if (!isSupportedUrl(tab.url || "")) throw new Error("Open a LinkedIn or Jobright job page before using the shortcut.");
 
-    const scrapeResponse = await requestScrape(tab.id);
+    const scrapeResponse = await requestContent(tab.id, tab.url, { type: "SCRAPE_LINKEDIN_JOB" });
     if (!scrapeResponse?.ok) throw new Error(scrapeResponse?.error || "The scraper did not return data.");
     job = scrapeResponse.data;
     const savedSettings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
@@ -616,27 +618,25 @@ async function getActiveTab() {
   return currentTabs[0] || null;
 }
 
-async function requestScrape(tabId) {
+function contentScripts(url) {
+  return JobCapturePolicy.sourceSite(url) === "jobright"
+    ? ["src/capture-policy.js", "src/profile-routing.js", "src/jobright-scraper.js", "src/job-collector.js", "src/jobright-content.js"]
+    : ["src/capture-policy.js", "src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"];
+}
+async function requestContent(tabId, url, message) {
   try {
-    return await chrome.tabs.sendMessage(tabId, { type: "SCRAPE_LINKEDIN_JOB" });
+    return await chrome.tabs.sendMessage(tabId, message);
   } catch {
     await chrome.scripting.executeScript({
       target: { tabId },
-        files: ["src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"]
+      files: contentScripts(url)
     });
-    return chrome.tabs.sendMessage(tabId, { type: "SCRAPE_LINKEDIN_JOB" });
+    return chrome.tabs.sendMessage(tabId, message);
   }
 }
 
 function isSupportedUrl(url) {
-  try {
-    const parsed = new URL(url);
-    return parsed.protocol === "https:" &&
-      (parsed.hostname === "linkedin.com" || parsed.hostname.endsWith(".linkedin.com")) &&
-      parsed.pathname.startsWith("/jobs");
-  } catch {
-    return false;
-  }
+  return JobCapturePolicy.supportedJobPage(url);
 }
 
 async function notify(tabId, message, tone = "info", job = null) {

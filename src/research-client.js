@@ -196,9 +196,14 @@
         const state = await sheetClient.getStatus();
         if (!state.configured) throw new Error("Choose your ApplicantAlly data folder before researching jobs.");
         const region = JobProfileRouting.jobRegion(job);
-        const capturedJob = region ? { ...job, selectedRegion: region, profileRoutingVersion: JobProfileRouting.VERSION } : job;
+        if (JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" &&
+          (region !== "us" || job.selectedRegionSource !== "search-control"))
+          throw new Error("Select United States in Jobright's search country filter, then reopen the job before saving.");
+        const capturedJob = { ...job, ...(region ? { selectedRegion: region, profileRoutingVersion: JobProfileRouting.VERSION } : {}),
+          ...(JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" ? { isEasyApply: true } : {}) };
         const records = await read();
-        const identity = JSON.stringify([job.jobId || job.sourceUrl || "", job.company, job.title, job.description, state.sheetUrl, region ? "automatic" : profile, ...(region ? [region] : [])]);
+        const sourceIdentity = JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" ? `jobright:${job.jobId || job.sourceUrl}` : job.jobId || job.sourceUrl || "";
+        const identity = JSON.stringify([sourceIdentity, job.company, job.title, job.description, state.sheetUrl, region ? "automatic" : profile, ...(region ? [region] : [])]);
         const existing = records.find((entry) => entry.identity === identity && !entry.terminal);
         if (existing) return { status: "researching", ...(existing.state === "requesting" ? { queued: true } : {}), requestId: existing.requestId, replayed: true, profile: existing.profile, profileRouting: existing.profileRouting };
         if (records.filter((entry) => !entry.terminal).length >= 100) throw new Error("Too many jobs are being researched. Wait for the current jobs to finish.");

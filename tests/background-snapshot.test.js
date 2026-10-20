@@ -17,7 +17,8 @@ const successfulResearch = async (_url, options) => ({ ok: true, json: async () 
 
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
-function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [] } = {}) {
+function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [],
+  tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null } = {}) {
   const calls = [];
   const timers = new Map();
   let timerId = 0;
@@ -65,10 +66,11 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
       async setTitle() {}
     },
     tabs: {
-      async get(id) { return { id, url: "https://www.linkedin.com/jobs/search-results/", autoDiscardable }; },
+      async get(id) { return { id, url: tabUrl, autoDiscardable }; },
       async update(id, properties) { calls.push({ action: "tab-update", tabId: id, properties: clone(properties) }); return { id, ...properties }; },
       async query() { return []; },
-      async sendMessage(tabId, message) { calls.push({ action: "tab-message", tabId, message: clone(message) }); return { ok: true }; }
+      async sendMessage(tabId, message) { calls.push({ action: "tab-message", tabId, message: clone(message) });
+        return message.type === "KAI_TRACKER_SEARCH_CONTEXT" ? { ok: true, result: searchContext } : { ok: true }; }
     },
     commands: { onCommand: { addListener() {} } },
     scripting: { async executeScript() {} }
@@ -130,6 +132,73 @@ async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 }
+
+const jobrightId = "6ad79ccb52aa6152bb69d5cd";
+const jobrightUrl = `https://jobright.ai/jobs/info/${jobrightId}`;
+const jobrightFilters = 'jobright:[["country","United States"],["workModel","Remote"]]';
+const jobrightJob = { ...engineeringJob, jobId: jobrightId, sourceUrl: jobrightUrl, searchContextKey: jobrightFilters,
+  selectedRegion: "us", selectedRegionSource: "search-control" };
+
+test("Jobright collector freezes committed search filters and validates source IDs before claiming jobs", async () => {
+  const h = harness({ tabUrl: jobrightUrl, searchContext: { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" },
+    researchFetch: async () => { throw new Error("offline"); }, profiles: ["kevin", "jagjeet"] });
+  await settle();
+  const tab = { id: 9, url: jobrightUrl };
+  await h.context.toggleJobCollection(tab);
+  const state = h.sessionStored.jobTrackerCollectionV1;
+  assert.equal(state.filterKey, jobrightFilters);
+  assert.equal(state.searchKey, "https://jobright.ai/jobs/recommend");
+  assert.equal(h.calls.find(c => c.message?.type === "KAI_TRACKER_RUN_START").message.state.filterKey, jobrightFilters);
+  const send = job => h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId: state.id }, "foreign", { url: jobrightUrl, tab });
+  assert.equal((await send({ ...jobrightJob, searchContextKey: "changed-filter" })).response.ok, false);
+  assert.equal((await send({ ...jobrightJob, jobId: "123" })).response.ok, false);
+  assert.equal((await send({ ...jobrightJob, jobId: "6ad79ccb52aa6152bb69d5ce" })).response.ok, false);
+  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, []);
+  const accepted = await send(jobrightJob);
+  assert.equal(accepted.response.ok, true); assert.equal(accepted.response.result.queued, true);
+  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, [jobrightId]);
+  assert.equal(h.stored.jobTrackerResearchV1[0].job.isEasyApply, true);
+  assert.equal(h.stored.jobTrackerResearchV1[0].job.selectedRegion, "us");
+  const checkpoint = await h.sendRaw({ type: "KAI_TRACKER_RUN_CHECKPOINT", runId: state.id,
+    state: { visited: [jobrightId], pages: [jobrightId], counts: { saved: 0, researching: 1, skipped: 0 } } }, "foreign", { url: jobrightUrl, tab });
+  assert.equal(checkpoint.response.ok, true);
+  const badCheckpoint = await h.sendRaw({ type: "KAI_TRACKER_RUN_CHECKPOINT", runId: state.id,
+    state: { visited: ["123"], pages: [], counts: { saved: 0, researching: 1, skipped: 0 } } }, "foreign", { url: jobrightUrl, tab });
+  assert.equal(badCheckpoint.response.ok, false);
+});
+
+test("Jobright collector cannot start until a committed country filter is readable", async () => {
+  const h = harness({ tabUrl: jobrightUrl }); await settle();
+  await h.context.toggleJobCollection({ id: 9, url: jobrightUrl });
+  assert.equal(h.sessionStored.jobTrackerCollectionV1, undefined);
+  assert.equal(h.calls.some(c => c.message?.type === "KAI_TRACKER_RUN_START"), false);
+});
+
+test("Jobright query-bearing searches collect with the frozen filters and canonical job provenance", async () => {
+  const tab = { id: 9, url: "https://jobright.ai/jobs/recommend?sort=recent" };
+  const h = harness({ tabUrl: tab.url, searchContext: { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" }, profiles: ["kevin", "jagjeet"] });
+  await settle(); await h.context.toggleJobCollection(tab);
+  const state = h.sessionStored.jobTrackerCollectionV1;
+  const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob, runId: state.id }, "foreign", { url: "https://jobright.ai/jobs/info/" + jobrightId + "?sort=recent", tab });
+  assert.equal(result.response.ok, true); assert.equal(result.response.result.queued, true);
+  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, [jobrightId]);
+});
+
+test("content captures and failure reports cannot cross LinkedIn and Jobright sender boundaries", async () => {
+  const h = harness(); await settle();
+  for (const [sourceUrl, job, allowed] of [
+    [jobrightUrl, engineeringJob, false], [engineeringJob.sourceUrl, jobrightJob, false],
+    ["https://jobright.ai/profile", jobrightJob, false], ["https://jobright.ai.evil.test/jobs/recommend", jobrightJob, false],
+    [jobrightUrl, jobrightJob, true]
+  ]) {
+    const report = await h.sendRaw({ type: "KAI_TRACKER_NOT_SAVED", reasonCode: "DETAILS_NOT_CONFIRMED", job }, "foreign", { url: sourceUrl });
+    assert.equal(report.response.ok, allowed, sourceUrl);
+    if (!allowed) assert.equal((await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job }, "foreign", { url: sourceUrl })).response.ok, false);
+  }
+  assert.equal(h.calls.filter(c => c.action === "failure-report").length, 1);
+  const mismatch = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob }, "foreign", { url: "https://jobright.ai/jobs/info/6ad79ccb52aa6152bb69d5ce" });
+  assert.equal(mismatch.response.ok, false);
+});
 
 test("AI model and reasoning level preferences accept only trusted popup messages", async () => {
   const fetchCalls = [];
@@ -260,7 +329,7 @@ test("Hybrid without fully remote wording still starts its own research request 
   for (const [type, sender] of [["KAI_TRACKER_CAPTURE", "linkedin"], ["KAI_TRACKER_SAVE", "popup"]]) {
     for (const workplaceType of ["hybrid", "on-site", "unknown"]) {
       for (const isEasyApply of [true, false]) {
-        const response = await h.send({ type, job: { jobId: String(++jobId), company: "New Company", title: "Engineer", workplaceType, isEasyApply,
+        const response = await h.send({ type, job: { jobId: String(++jobId), sourceUrl: engineeringJob.sourceUrl, company: "New Company", title: "Engineer", workplaceType, isEasyApply,
           description: "Hybrid with two home-working days per week. Apply to jobs@company.com.", applicationsAvailable: true } }, sender);
         assert.equal(response.ok, true);
         assert.equal(response.result.status, "researching");

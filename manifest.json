@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "LinkedIn Job Scraper",
-  "description": "Capture LinkedIn jobs directly in ApplicantAlly’s data folder, with automatic profile selection.",
+  "name": "Job Tracker",
+  "description": "Capture LinkedIn and Jobright jobs directly in ApplicantAlly’s data folder, with automatic profile selection.",
   "version": "0.7.7",
   "minimum_chrome_version": "120",
   "incognito": "not_allowed",
@@ -10,7 +10,7 @@
     "extension_pages": "script-src 'self'; object-src 'self'; connect-src http://127.0.0.1:8787"
   },
   "action": {
-    "default_title": "Save LinkedIn Job to ApplicantAlly",
+    "default_title": "Save Job to ApplicantAlly",
     "default_popup": "popup.html"
   },
   "background": {
@@ -28,7 +28,9 @@
     "http://127.0.0.1:8787/*",
     "https://linkedin.com/*",
     "https://*.linkedin.com/*",
-    "https://www.linkedin.com/*"
+    "https://www.linkedin.com/*",
+    "https://jobright.ai/*",
+    "https://www.jobright.ai/*"
   ],
   "commands": {
     "scrape-and-save-job": {
@@ -36,14 +38,14 @@
         "default": "Ctrl+Shift+Y",
         "mac": "MacCtrl+Shift+Y"
       },
-      "description": "Scrape the active LinkedIn job and save it to ApplicantAlly"
+      "description": "Save the active LinkedIn or Jobright job to ApplicantAlly"
     },
     "toggle-job-collection": {
       "suggested_key": {
         "default": "Ctrl+Shift+U",
         "mac": "MacCtrl+Shift+U"
       },
-      "description": "Start or stop collecting active LinkedIn search results"
+      "description": "Start or stop collecting LinkedIn or Jobright job results"
     }
   },
   "content_scripts": [
@@ -56,11 +58,28 @@
         "https://www.linkedin.com/jobs/search-results/*"
       ],
       "js": [
+        "src/capture-policy.js",
         "src/profile-routing.js",
         "src/scraper.js",
         "src/detail-copy.js",
         "src/job-collector.js",
         "src/content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://jobright.ai/jobs/recommend*",
+        "https://www.jobright.ai/jobs/recommend*",
+        "https://jobright.ai/jobs/info/*",
+        "https://www.jobright.ai/jobs/info/*"
+      ],
+      "js": [
+        "src/capture-policy.js",
+        "src/profile-routing.js",
+        "src/jobright-scraper.js",
+        "src/job-collector.js",
+        "src/jobright-content.js"
       ],
       "run_at": "document_idle"
     }

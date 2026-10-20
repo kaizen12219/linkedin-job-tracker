@@ -4,21 +4,25 @@ const collector = require("../src/job-collector.js");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const row = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: "Engineer", active: true,
   description: `Vacancy ${id}. ` + "Useful job description ".repeat(30), ...extra });
-function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle = false, workerLag = null, reportFailures = false, reportError = false } = {}) {
+function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle = false, workerLag = null, reportFailures = false, reportError = false,
+  sourceUrl = SEARCH, jobUrl = null, changeSelectionUrl = false } = {}) {
   let time = 0, timerId = 0, page = 0, selected = { jobId: "999", description: "Previous job", title: "Other", company: "Other" }, hidden = false;
   const timers = new Map(), actions = [], captures = [], checkpoints = [], statuses = [], finishes = [], reports = [];
-  let search = collector.searchKey(SEARCH);
+  let search = collector.searchKey(sourceUrl);
   const adapter = {
     searchKey: () => search, hidden: () => hidden, cards: () => pages[page], activeCard: (record) => record.active,
     async allowed(record) { return record.active && !record.filtered; },
     async top() { actions.push({ type: "top", time }); },
     async reveal(record) { actions.push({ type: "reveal", id: record.id, time }); },
-    select(record) { actions.push({ type: "select", id: record.id, time }); selected = record; },
+    select(record) {
+      actions.push({ type: "select", id: record.id, time }); selected = record;
+      if (changeSelectionUrl) search = collector.searchKey(jobUrl(record, page));
+    },
     scrape() {
       if (!selected.id) return selected;
       return { jobId: selected.id, jobIdSource: selected.queryOnly ? "query" : "details", company: selected.company, title: selected.title,
         description: selected.description, workplaceType: selected.workplaceType || "remote", isEasyApply: selected.easy || false,
-        applicationsAvailable: true, sourceUrl: `${SEARCH}&start=${page * 25}&currentJobId=${selected.id}` };
+        applicationsAvailable: true, sourceUrl: jobUrl ? jobUrl(selected, page) : `${SEARCH}&start=${page * 25}&currentJobId=${selected.id}` };
     },
     async capture(job, runId) {
       captures.push({ job: structuredClone(job), time, runId });
@@ -160,6 +164,46 @@ test("search identity ignores job selection, tracking and pagination but retains
   assert.notEqual(collector.searchKey(`${SEARCH}&f_WT=2`), collector.searchKey(SEARCH));
   assert.equal(collector.searchKey("https://www.linkedin.com/jobs/view/123"), "");
   assert.equal(collector.searchKey("https://example.com/jobs/search/"), "");
+});
+
+test("Jobright search identity canonicalizes recommendation/detail paths and keeps committed filters", () => {
+  const canonical = "https://jobright.ai/jobs/recommend?location=United+States&remote=true";
+  assert.equal(collector.searchKey("https://www.jobright.ai/jobs/recommend/?remote=true&location=United+States#results"), canonical);
+  assert.equal(collector.searchKey("https://jobright.ai/jobs/info/68f01234567890abcdef1234?remote=true&location=United+States#details"), canonical);
+  assert.notEqual(collector.searchKey("https://jobright.ai/jobs/recommend?location=United+Kingdom&remote=true"), canonical);
+  for (const url of ["https://jobright.ai/jobs/info/123", "https://jobright.ai/jobs/info/", "https://jobright.ai/jobs/search", "https://subdomain.jobright.ai/jobs/recommend", "https://jobright.ai.evil.test/jobs/recommend"]) {
+    assert.equal(collector.searchKey(url), "", url);
+  }
+});
+
+test("Jobright hexadecimal job identities progress once through the full feed while selection changes the detail URL", async () => {
+  const ids = ["68f01234567890abcdef1234", "68f01234567890abcdef1235", "68f01234567890abcdef1236"];
+  const sourceUrl = "https://www.jobright.ai/jobs/recommend?location=United+States&remote=true";
+  const h = harness([[row(ids[0]), row(ids[1], { filtered: true })], [row(ids[0]), row(ids[2])]], {
+    sourceUrl, changeSelectionUrl: true,
+    jobUrl: record => `https://jobright.ai/jobs/info/${record.id}?remote=true&location=United+States`
+  });
+  await h.advance(500_000);
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), [ids[0], ids[2]]);
+  assert.ok(h.captures.every(({ job }) => job.jobIdSource === "details" && job.sourceUrl.includes(`/jobs/info/${job.jobId}`)));
+  assert.deepEqual(h.actions.filter(action => action.type === "select").map(action => action.id), [ids[0], ids[2]]);
+  assert.equal(h.actions.filter(action => action.type === "next").length, 1);
+  assert.equal(h.finishes[0].state.counts.saved, 2);
+  assert.match(h.finishes[0].message, /last results page/);
+  assert.equal(h.app.running(), false);
+  assert.equal(h.timers.size, 0);
+});
+
+test("Jobright collection stops when the committed search changes before a reviewed job saves", async () => {
+  const h = harness([[row("68f01234567890abcdef1234"), row("68f01234567890abcdef1235")]], {
+    sourceUrl: "https://jobright.ai/jobs/recommend?location=United+States",
+    jobUrl: record => `https://jobright.ai/jobs/info/${record.id}?location=United+States`
+  });
+  await h.advance(12_000);
+  h.changeSearch();
+  await h.advance(300_000);
+  assert.equal(h.captures.length, 0);
+  assert.match(h.finishes[0].message, /search changed/);
 });
 test("attempted filtered cards and unverified details are reported once without changing collection", async () => {
   const h = harness([[row(1, { filtered: true }), row(2, { active: false }), row(3, { queryOnly: true }), row(4)]], { reportFailures: true });

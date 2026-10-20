@@ -442,7 +442,7 @@ async function saveBannedCompanies(companies) {
     const result = await request({ type: "KAI_TRACKER_BANNED_SET", companies });
     bannedCompanies = normalizeCompanyList(result.companies || []);
     bannedInput.value = bannedCompanies.join("\n");
-    setBannedStatus(`Saved ${bannedCompanies.length} ${bannedCompanies.length === 1 ? "company" : "companies"}. LinkedIn cards are updating.`);
+    setBannedStatus(`Saved ${bannedCompanies.length} ${bannedCompanies.length === 1 ? "company" : "companies"}. Job cards are updating.`);
     renderDuplicate(duplicate);
     void checkDuplicate();
   } catch (error) {
@@ -459,15 +459,18 @@ async function scrapeCurrentTab() {
   captureProfile = null;
   renderDuplicate(null);
   ++lookupVersion;
-  setStatus("Reading the LinkedIn job…");
+  setStatus("Reading the job…");
   updateControls();
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab?.id || !isSupportedUrl(tab.url || "")) throw new Error("Open a LinkedIn job page before scraping.");
+    if (!tab?.id || !isSupportedUrl(tab.url || "")) throw new Error("Open a LinkedIn or Jobright job page before scraping.");
     let response;
     try { response = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_LINKEDIN_JOB" }); }
     catch {
-      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["src/profile-routing.js", "src/scraper.js", "src/content.js"] });
+      const files = JobCapturePolicy.sourceSite(tab.url) === "jobright"
+        ? ["src/capture-policy.js", "src/profile-routing.js", "src/jobright-scraper.js", "src/job-collector.js", "src/jobright-content.js"]
+        : ["src/capture-policy.js", "src/profile-routing.js", "src/scraper.js", "src/detail-copy.js", "src/job-collector.js", "src/content.js"];
+      await chrome.scripting.executeScript({ target: { tabId: tab.id }, files });
       response = await chrome.tabs.sendMessage(tab.id, { type: "SCRAPE_LINKEDIN_JOB" });
     }
     if (!response?.ok) throw new Error(response?.error || "The scraper did not return a job.");
@@ -480,7 +483,7 @@ async function scrapeCurrentTab() {
     renderJson();
     const missing = ["company", "title", "description"].filter((key) => !String(latestPayload[key] || "").trim());
     setStatus(missing.length
-      ? `Missing ${missing.join(", ")}. Expand the full job on LinkedIn and scrape again.`
+      ? `Missing ${missing.join(", ")}. Expand the full job and scrape again.`
       : connected && !validProfile()
         ? automaticProfileError || "Your saved profile is unavailable. Select a valid profile or No profile before saving."
         : capturedStatus());
@@ -592,7 +595,7 @@ function selectedProfileValue() { return profileSelect.value === JobProfileRouti
 function capturedStatus() {
   const region = JobProfileRouting.jobRegion(latestPayload);
   return region === "us" ? "Job captured. Research will select Kevin Lee or Jagjeet Wani from the experience requirements."
-    : region ? "Job captured. Profile selected from the LinkedIn search location." : "Job captured. Profile is optional.";
+    : region ? "Job captured. Profile selected from the job-search location." : "Job captured. Profile is optional.";
 }
 
 function canSave() {
@@ -626,12 +629,5 @@ function safeWebUrl(value) {
 }
 
 function isSupportedUrl(value) {
-  try {
-    const url = new URL(value);
-    return url.protocol === "https:" &&
-      (url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com")) &&
-      url.pathname.startsWith("/jobs");
-  } catch {
-    return false;
-  }
+  return JobCapturePolicy.supportedJobPage(value);
 }

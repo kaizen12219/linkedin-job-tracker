@@ -1,0 +1,117 @@
+(function exposeJobrightScraper(root) {
+  "use strict";
+  const ID = /^[a-f0-9]{24}$/u;
+  const CARD = ".job-card-flag-classname[id]";
+  const clean = (value) => String(value || "").replace(/\u00a0/gu, " ").replace(/\s+/gu, " ").trim();
+  const text = (node) => clean(node?.innerText || node?.textContent);
+  function jobId(value) {
+    try {
+      const url = new URL(value, "https://jobright.ai");
+      return url.protocol === "https:" && /^(?:www\.)?jobright\.ai$/u.test(url.hostname)
+        ? url.pathname.match(/^\/jobs\/info\/([a-f0-9]{24})\/?$/u)?.[1] || "" : "";
+    } catch { return ""; }
+  }
+  function visible(node) {
+    if (!node || node.closest("[hidden], [aria-hidden='true'], template")) return false;
+    const view = node.ownerDocument?.defaultView;
+    for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+      const style = view?.getComputedStyle(current);
+      if (style?.display === "none" || style?.visibility === "hidden" || style?.opacity === "0") return false;
+    }
+    return true;
+  }
+  function searchContext(doc = document, sourceUrl = root.location?.href) {
+    let valid = false;
+    try { const url = new URL(sourceUrl); valid = url.protocol === "https:" && /^(?:www\.)?jobright\.ai$/u.test(url.hostname) && /^\/jobs\/(?:recommend|info\/[a-f0-9]{24})\/?$/u.test(url.pathname); } catch { /* Unsupported page. */ }
+    if (!valid) return { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
+    const preferences = new Map();
+    for (const control of doc.querySelectorAll("[data-preference-key][data-topbar-state='active']")) {
+      if (!visible(control)) continue;
+      const button = [...control.querySelectorAll("button")].find((item) => visible(item) && !item.closest("[role='dialog'], [role='listbox']"));
+      if (!button) continue;
+      const label = [...new Set([...button.querySelectorAll("span[title]")].filter(visible).map((item) => clean(item.getAttribute("title"))).filter(Boolean))].join(", ") || text(button);
+      const key = clean(control.getAttribute("data-preference-key"));
+      if (key && label) preferences.set(key, label);
+    }
+    const country = preferences.get("country") || "";
+    const selectedRegion = /^(?:United States(?: of America)?|U\.?S\.?A?\.?)$/iu.test(country) ? "us" : "";
+    return { filterKey: country ? `jobright:${JSON.stringify([...preferences].sort(([a], [b]) => a.localeCompare(b)))}` : "",
+      selectedRegion, selectedRegionSource: selectedRegion ? "search-control" : "" };
+  }
+  function cards(doc = document) {
+    return [...doc.querySelectorAll(CARD)].filter(visible).map((card) => {
+      const id = card.getAttribute("id") || "";
+      if (!ID.test(id)) return null;
+      const heading = card.querySelector("h2[class*='index_job-title__']");
+      const link = heading?.closest("a[href]");
+      if (!link || !card.contains(link) || jobId(link.getAttribute("href")) !== id) return null;
+      const title = text(heading), company = text(card.querySelector("[class*='index_company-name__']"));
+      if (!title || !company) return null;
+      return { card, link, id, captureId: id, title, company, identity: JSON.stringify([id, company.toLocaleLowerCase("en-US"), title]) };
+    }).filter(Boolean);
+  }
+  function sectionText(overview) {
+    if (!overview) return "";
+    const headings = [...overview.querySelectorAll("h1,h2,h3,h4,h5,h6")].filter(visible);
+    const pieces = [];
+    for (let index = 0; index < headings.length; index++) {
+      const heading = headings[index];
+      const name = text(heading).replace(/:$/u, "");
+      if (!/^(?:Responsibilities|Key Responsibilities|Required|Required Qualifications|Requirements|Preferred|Preferred Qualifications|Benefits)$/iu.test(name)) continue;
+      const knownSection = /^(?:Required|Preferred)(?: Qualifications)?$/iu.test(name) ? heading.parentElement
+        : heading.closest("section[class*='index_sectionContent__']");
+      const range = overview.ownerDocument.createRange();
+      range.setStartAfter(heading);
+      if (headings[index + 1]) range.setEndBefore(headings[index + 1]); else range.setEnd(overview, overview.childNodes.length);
+      const fragment = knownSection || range.cloneContents();
+      const explicit = [...fragment.querySelectorAll("span[class*='index_listText__']")];
+      const candidates = explicit.length ? explicit : [...fragment.querySelectorAll("li,p")];
+      const rows = [...new Set(candidates.filter((node) => !node.closest("[hidden], [aria-hidden='true'], [class*='insider'], [class*='connection']") && visible(node)).map(text).filter(Boolean))];
+      if (rows.length) pieces.push(`${name}\n${rows.map((row) => `- ${row}`).join("\n")}`);
+    }
+    return pieces.join("\n\n");
+  }
+  function scrape(doc = document, sourceUrl = root.location?.href) {
+    const id = jobId(sourceUrl);
+    if (!id) throw new Error("Open a Jobright job's details before saving it.");
+    const context = searchContext(doc, sourceUrl);
+    if (context.selectedRegion !== "us" || context.selectedRegionSource !== "search-control") throw new Error("Select United States in Jobright's country filter before saving or collecting jobs.");
+    const heading = [...doc.querySelectorAll("h1[class*='index_job-title__']")].find(visible);
+    const companyJob = heading?.closest("[class*='index_company-job__']");
+    const title = text(heading);
+    const company = text(companyJob?.querySelector("h2")).replace(/\s*[·•]\s*.*$/u, "").trim();
+    const detail = heading?.closest("[class*='index_jobDetailContent__']");
+    const overview = [...(detail?.querySelectorAll("#overview-1") || [])].find(visible);
+    if (!title || !company || !overview) throw new Error("Jobright's selected job details are not ready.");
+    const description = sectionText(overview);
+    if (!description) throw new Error("The selected job's responsibilities or qualifications are not readable yet.");
+    const panel = heading.closest("[class*='index_jobMainContentInfo']") || heading.closest("[class*='index_jobSimpleIntroduction']")?.parentElement || companyJob.parentElement;
+    const detailIds = [...new Set([...panel.querySelectorAll("[data-time-filter-job]")].map((node) => node.getAttribute("data-time-filter-job")).filter((value) => ID.test(value || "")))];
+    // The SPA updates its URL before the detail fetch finishes. The observed
+    // metadata carries the rendered detail's ID, unlike the navigation URL.
+    if (detailIds.length !== 1 || detailIds[0] !== id) throw new Error("Jobright's selected job details are still changing.");
+    const closed = /(?:no longer accepting applications|this job (?:has )?expired|applications (?:are )?closed|job (?:is )?no longer available)/iu.test(text(detail));
+    const applyButton = detail.querySelector("#apply-now-button-id");
+    const applicationsAvailable = !closed && !!applyButton && !applyButton.disabled && applyButton.getAttribute("aria-disabled") !== "true";
+    const original = [...detail.querySelectorAll("a[href]")].find((anchor) => /^Original Job Post$/iu.test(text(anchor)));
+    let applyUrl = `https://jobright.ai/jobs/info/${id}`;
+    if (original) {
+      try { const url = new URL(original.getAttribute("href"), sourceUrl); if (/^https?:$/u.test(url.protocol) && !/(^|\.)jobright\.ai$/u.test(url.hostname)) applyUrl = url.href; } catch { /* Retain the portal reference. */ }
+    }
+    const selectedCard = cards(doc).find((record) => record.id === id);
+    if (selectedCard && (selectedCard.title !== title || selectedCard.company !== company)) throw new Error("Jobright's selected job details are still changing.");
+    const remote = panel.querySelector(`[data-time-filter-job='${id}'][data-time-filter-field='workModel']`) ||
+      selectedCard?.card.querySelector("[class*='index_job-metadata-item__'] svg[aria-label='remote']")?.closest("[class*='index_job-metadata-item__']");
+    const remoteLabel = text(remote);
+    const workplaceType = /\bhybrid\b/iu.test(remoteLabel) ? "hybrid" : /\bremote\b/iu.test(remoteLabel) ? "remote" : /\bon[ -]?site\b/iu.test(remoteLabel) ? "on-site" : "unknown";
+    return { jobId: id, jobIdSource: "details", title, company, description, applyUrl,
+      sourceUrl: `https://jobright.ai/jobs/info/${id}`, selectedRegion: context.selectedRegion, selectedRegionSource: context.selectedRegionSource,
+      searchContextKey: context.filterKey, workplaceType, isEasyApply: true, applicationsAvailable, applicationsClosed: closed,
+      descriptionEmails: [...new Set(description.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) || [])],
+      scrapedAt: new Date().toISOString(), confidence: { title: "high", company: "high", description: "high", applyUrl: original ? "high" : "low" },
+      selectorsUsed: { title: "jobright-detail-heading", company: "jobright-detail-company", description: "jobright-overview-sections", applyUrl: original ? "jobright-original-post" : "jobright-reference" }, warnings: [] };
+  }
+  const api = Object.freeze({ scrape, cards, searchContext, jobId });
+  if (typeof module !== "undefined" && module.exports) module.exports = api;
+  else root.JobrightJobScraper = api;
+})(typeof globalThis === "undefined" ? this : globalThis);

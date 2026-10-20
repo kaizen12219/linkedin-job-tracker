@@ -53,6 +53,31 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
     setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
 }
 
+test("Jobright research uses a distinct provider identity, preserves US routing and requires an external route", async () => {
+  const h = harness();
+  const id = "123456789012345678901234";
+  const linkedin = { ...job, jobId: id, sourceUrl: `https://www.linkedin.com/jobs/view/${id}`, selectedRegion: "us", selectedRegionSource: "search-control", isEasyApply: false };
+  const jobright = { ...linkedin, sourceUrl: `https://jobright.ai/jobs/info/${id}`, applyUrl: `https://jobright.ai/jobs/info/${id}` };
+  const first = await h.client.start(linkedin);
+  const second = await h.client.start(jobright);
+  assert.notEqual(first.requestId, second.requestId);
+  assert.equal((await h.client.start(jobright)).requestId, second.requestId);
+  assert.equal(h.stored.jobTrackerResearchV1.length, 2);
+  assert.equal(JSON.parse(h.stored.jobTrackerResearchV1[0].identity)[0], id, "LinkedIn's existing queue identity is preserved");
+  assert.equal(JSON.parse(h.stored.jobTrackerResearchV1[1].identity)[0], `jobright:${id}`);
+  assert.equal(h.stored.jobTrackerResearchV1[1].job.isEasyApply, true);
+  assert.equal(h.stored.jobTrackerResearchV1[1].profileRouting.region, "us");
+  assert.equal(JSON.parse(h.calls[1].options.body).job.isEasyApply, true);
+});
+
+test("Jobright cannot fall back to a manual profile when its committed US search country is missing", async () => {
+  for (const country of [{}, { selectedRegion: "us" }, { selectedRegion: "uk", selectedRegionSource: "search-control" }]) {
+    const h = harness();
+    await assert.rejects(h.client.start({ ...job, jobId: "123456789012345678901234", sourceUrl: "https://jobright.ai/jobs/info/123456789012345678901234", ...country }, { profile: "kevin" }), /Select United States/);
+    assert.equal(h.calls.length, 0); assert.equal(h.stored.jobTrackerResearchV1, undefined);
+  }
+});
+
 test("model options use the signed-in session catalog and labels with the saved selection", async () => {
   const h = harness({ stored: { jobTrackerResearchModelV1: "session-model-beta" } });
   const options = await h.client.getModels();

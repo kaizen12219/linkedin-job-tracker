@@ -1,6 +1,8 @@
 (function exposeJobCollector(root) {
   "use strict";
   function searchKey(value) {
+    const policy = root.JobCapturePolicy || (typeof require === "function" ? require("./capture-policy.js") : null);
+    if (policy) return policy.sourceSearchKey(value);
     try {
       const url = new URL(value);
       if (url.protocol !== "https:" || !(url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com")) ||
