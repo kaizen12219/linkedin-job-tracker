@@ -4,11 +4,11 @@ const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 const collectionLocks = require("./fixtures/collection-locks.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, hidden = false, blocked = new Set(), changedFilterAt = 0, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, closeFadeDelay = 0, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
-  const timers = new Map(), captures = [], selections = [], messages = [], actions = [];
+  const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [];
   window.Date.now = () => time; window.Math.random = () => .5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
   window.clearTimeout = (id) => timers.delete(id); window.setInterval = () => 0; window.MutationObserver = class { observe() {} };
@@ -18,24 +18,66 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   document.addEventListener = (name, listener, options) => { if (name === "click") clickHandler = listener; addEventListener(name, listener, options); };
   Object.defineProperty(window.navigator, "locks", { value: locks });
   const scroller = document.querySelector("main");
+  let list;
+  if (listLeaveOnSelect) {
+    // Jobright keeps the committed filters and cards mounted under its list
+    // transition wrapper when the selected job's detail view covers them.
+    const left = document.createElement("div"); left.className = "index_jobs-page-main-left__left";
+    list = document.createElement("div"); list.className = "index_jobs-list__CM7kJ";
+    list.append(document.querySelector("header"), ...scroller.childNodes);
+    left.append(list); scroller.append(left);
+  }
   Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => 700 } });
   scroller.scrollTo = ({ top }) => {
+    if (listLeaveOnSelect && window.location.pathname.startsWith("/jobs/info/")) actions.push("scroll-detail");
     scrollTop = top;
-    if (lazy && top >= 400) { const next = lazy; lazy = null; window.setTimeout(() => { jobs.push(next); scroller.insertAdjacentHTML("beforeend", fixture.card(next)); wire(); }, 1200); }
+    if (lazy && top >= 400) {
+      const next = lazy; lazy = null;
+      const loader = resultsLoader ? document.createElement("div") : null;
+      if (loader) {
+        if (resultsLoader === "busy") loader.setAttribute("aria-busy", "true");
+        else loader.setAttribute("role", "progressbar");
+        (list || scroller).append(loader);
+      }
+      if (loaderDelay !== Infinity) window.setTimeout(() => {
+        loader?.remove(); jobs.push(next); (list || scroller).insertAdjacentHTML("beforeend", fixture.card(next)); wire();
+      }, loader ? loaderDelay : 1200);
+    }
   };
-  window.HTMLElement.prototype.scrollIntoView = function () { if (revealError) throw new Error(revealError); scrollTop = 0; };
+  window.HTMLElement.prototype.scrollIntoView = function () {
+    if (revealError) throw new Error(revealError);
+    if (listLeaveOnSelect && window.location.pathname.startsWith("/jobs/info/")) actions.push("reveal-detail");
+    scrollTop = 0;
+  };
   const wired = new WeakSet();
   function wire() {
     for (const card of document.querySelectorAll(".job-card-flag-classname")) {
       if (wired.has(card)) continue; wired.add(card);
+      if (matchScores) card.insertAdjacentHTML("beforeend", '<div class="ant-progress" role="progressbar" aria-valuenow="95" aria-valuemin="0" aria-valuemax="100"><span>95%</span></div>');
       for (const button of card.querySelectorAll("button")) button.addEventListener("click", () => actions.push(button.dataset.action));
       card.querySelector("a").addEventListener("click", (event) => {
         event.preventDefault(); const value = jobs.find((item) => item.id === card.id); selections.push(value.id);
         window.history.replaceState({}, "", `/jobs/info/${value.id}`);
+        if (list) { list.classList.add("index_jobs-list-leave___nSi4"); list.style.opacity = "0"; }
         if (!stale) window.setTimeout(() => { document.querySelector("#details").innerHTML = fixture.details(value); }, 450);
+        if (changedCountryInDetail && selections.length === 1) window.setTimeout(() => {
+          const country = document.querySelector("[data-preference-key='country'] span");
+          country.setAttribute("title", "United Kingdom"); country.textContent = "United Kingdom";
+        }, 1500);
       });
     }
   }
+  document.querySelector("#details").addEventListener("click", (event) => {
+    if (event.target.id !== "job-detail-close-button") return;
+    detailCloses.push(window.location.pathname.split("/").at(-1));
+    window.history.replaceState({}, "", "/jobs/recommend");
+    document.querySelector("#details").replaceChildren();
+    if (list) {
+      list.classList.remove("index_jobs-list-leave___nSi4");
+      if (!closeFadeDelay) list.style.removeProperty("opacity");
+      else if (closeFadeDelay !== Infinity) window.setTimeout(() => list.style.removeProperty("opacity"), closeFadeDelay);
+    }
+  });
   wire();
   window.chrome = { runtime: { onMessage: { addListener(listener) { listeners.push(listener); } }, async sendMessage(value) {
     messages.push(structuredClone(value));
@@ -53,7 +95,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   if (autoStart) state = newState();
   window.eval(fs.readFileSync(require.resolve("../src/jobright-content.js"), "utf8"));
   if (changedFilterAt) window.setTimeout(() => document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid"), changedFilterAt);
-  return { document, window, messages, captures, selections, actions,
+  return { document, window, messages, captures, selections, actions, detailCloses,
     get state() { return state; },
     click(target) { clickHandler({ target, isTrusted: true, button: 0, defaultPrevented: false }); },
     async request(value) { return new Promise((resolve) => listeners[0](value, {}, resolve)); },
@@ -75,6 +117,104 @@ test("Jobright infinite collection captures exact loaded jobs in background and 
   assert.deepEqual(h.selections, [fixture.A, fixture.B, "68c123456789abcdef012303"]);
   assert.ok(h.captures.every((capture) => capture.runId === "jobright-run" && capture.job.selectedRegion === "us"));
   assert.deepEqual(h.actions, []); assert.equal(h.state, null);
+});
+
+test("opening Jobright details preserves the committed US search through the list leave transition", async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { listLeaveOnSelect: true, lazy: fixture.job(last) });
+  const committed = h.window.JobrightJobScraper.searchContext().filterKey;
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.detailCloses, [fixture.A, fixture.B, last]);
+  assert.ok(h.captures.every((capture) => capture.job.selectedRegion === "us" &&
+    capture.job.selectedRegionSource === "search-control" && capture.job.searchContextKey === committed));
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("Jobright waits for the result list to fade back in after the detail route closes", async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { listLeaveOnSelect: true, closeFadeDelay: 450, lazy: fixture.job(last) });
+  const committed = h.window.JobrightJobScraper.searchContext().filterKey;
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.detailCloses, [fixture.A, fixture.B, last]);
+  assert.ok(h.captures.every((capture) => capture.job.searchContextKey === committed && capture.job.selectedRegion === "us"));
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("Jobright stops after a bounded wait when the closed detail never restores the result list", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeFadeDelay: Infinity });
+  for (let elapsed = 0; elapsed < 60_000 && !h.detailCloses.length; elapsed += 1000) await h.advance(1000);
+  assert.deepEqual(h.detailCloses, [fixture.A]);
+  await h.advance(1000);
+  assert.ok(h.state, "the closing transition must have time to restore the verified search");
+  await h.advance(20_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("Jobright match-score progressbars do not block lazy loading or completion", async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { listLeaveOnSelect: true, matchScores: true, lazy: fixture.job(last) });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.detailCloses, [fixture.A, fixture.B, last]);
+  assert.equal(h.document.querySelectorAll("[role='progressbar'][aria-valuenow='95']").length, 3);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+for (const resultsLoader of ["busy", "indeterminate"]) test(`Jobright waits for a genuine ${resultsLoader} results loader before collecting the next jobs`, async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { listLeaveOnSelect: true, lazy: fixture.job(last), resultsLoader, loaderDelay: 8000 });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("Jobright stops waiting when a genuine results loader never settles", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, lazy: fixture.job("68c123456789abcdef012303"), resultsLoader: "indeterminate", loaderDelay: Infinity });
+  for (let elapsed = 0; elapsed < 60_000 && !h.document.querySelector("[role='progressbar']:not([aria-valuenow])"); elapsed += 1000) await h.advance(1000);
+  assert.ok(h.document.querySelector("[role='progressbar']:not([aria-valuenow])"));
+  await h.advance(5000);
+  assert.ok(h.state, "a genuine loader must not be mistaken for the end of results");
+  await h.advance(65_000);
+  assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B]);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("a country change under Jobright's detail transition stops before saving the reviewed job", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, changedCountryInDetail: true });
+  await h.advance(80_000);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 0);
+  assert.equal(h.state, null);
+  assert.deepEqual(h.actions, []);
+});
+
+test("stopping while Jobright details cover the results prevents capture and further navigation", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true });
+  await h.advance(4500);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.document.querySelector("[class*='index_jobs-list-leave__']")?.style.opacity, "0");
+  await h.request({ type: "KAI_TRACKER_RUN_STOP" });
+  await h.advance(80_000);
+  assert.equal(h.captures.length, 0);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.deepEqual(h.detailCloses, []);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
 });
 test("independent Jobright runs can collect in background on the same origin", async (t) => {
   const locks = collectionLocks();

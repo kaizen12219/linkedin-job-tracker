@@ -112,7 +112,19 @@
     }).catch(reject));
   }
   const scroller = () => document.querySelector("#jobs-page-main-content");
-  const loading = () => { const scope = scroller(); return scope?.getAttribute("aria-busy") === "true" || !!scope?.querySelector("[role='progressbar'], [aria-busy='true']"); };
+  const loading = () => {
+    const scope = scroller();
+    if (scope?.getAttribute("aria-busy") === "true") return true;
+    // Match percentages and company charts also use progressbar roles.
+    return [...(scope?.querySelectorAll("[role='progressbar']:not([aria-valuenow]), [aria-busy='true']") || [])].some((node) => {
+      if (node.closest("[class*='index_jobDetailContent__'], [hidden], [aria-hidden='true']")) return false;
+      for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+        const style = window.getComputedStyle(current);
+        if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+      }
+      return true;
+    });
+  };
   async function resume(expectedId) {
     if (!window.LinkedInJobCollector || !scraper()) { if (expectedId) throw new Error("Reload the extension and Jobright tab to load job collection."); return; }
     const version = ++startVersion, response = await message({ type: "KAI_TRACKER_RUN_STATE" });
@@ -121,8 +133,29 @@
     if (version !== startVersion || !state || (expectedId && state.id !== expectedId)) return;
     if (collection?.running()) { if (collectionId === state.id) return; await collection.completion(); if (version === startVersion) return resume(expectedId); return; }
     const frozen = state.filterKey || "";
-    const searchKey = () => context().filterKey === frozen && context().selectedRegion === "us" ? window.LinkedInJobCollector.searchKey(window.location.href) : "";
+    const searchKey = () => {
+      const current = context();
+      return current.filterKey === frozen && current.selectedRegion === "us" ? window.LinkedInJobCollector.searchKey(window.location.href) : "";
+    };
     if (!frozen || searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
+    async function returnToResults() {
+      if (!scraper().jobId(window.location.href)) return;
+      const close = document.querySelector("button[id*='job-detail-close-button']");
+      if (!close || close.disabled || close.getAttribute("aria-disabled") === "true") throw new Error("The Jobright detail view could not be closed. Job collection stopped.");
+      // Only close the job details. Apply, Like, Hide and Orion keep their
+      // native behavior and are never part of collection navigation.
+      close.click();
+      for (let elapsed = 0; elapsed < 15_000; elapsed += 200) {
+        if (version !== startVersion) throw new Error("Job collection stopped.");
+        const current = context();
+        if (window.LinkedInJobCollector.searchKey(window.location.href) !== state.searchKey ||
+          (current.filterKey && (current.filterKey !== frozen || current.selectedRegion !== "us"))) throw new Error("The search changed. Job collection stopped.");
+        const collapsed = document.querySelector("#jobs-page-main-content [class*='index_jobs-list__'][class*='index_jobs-list-leave__']");
+        if (!scraper().jobId(window.location.href) && !collapsed && searchKey() === state.searchKey) return;
+        if (!await wait(200, state.id)) throw new Error("Job collection stopped.");
+      }
+      throw new Error("The Jobright results did not return after closing details. Job collection stopped.");
+    }
     waiting = { ...state, localVersion: version };
     let release = () => {}, started = false, leaseAcquired = false;
     try {
@@ -146,8 +179,8 @@
           if (match.banned || match.duplicate) { record.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate"); return false; }
           return active(record);
         },
-        async top() { const target = scroller(); if (!target) throw new Error("The Jobright results list is unavailable."); target.scrollTo({ top: 0, behavior: "instant" }); },
-        async reveal(record) { if (!sameCard(record)) throw new Error("The selected job card changed."); record.card.scrollIntoView({ block: "center", behavior: "instant" }); },
+        async top() { await returnToResults(); const target = scroller(); if (!target) throw new Error("The Jobright results list is unavailable."); target.scrollTo({ top: 0, behavior: "instant" }); },
+        async reveal(record) { await returnToResults(); if (!sameCard(record)) throw new Error("The selected job card changed."); record.card.scrollIntoView({ block: "center", behavior: "instant" }); },
         select(record) {
           if (!active(record) || !record.link.isConnected || scraper().jobId(record.link.href) !== record.id) throw new Error("The selected job card changed.");
           selecting = true; try { record.link.click(); } finally { selecting = false; }
@@ -159,6 +192,7 @@
           return result;
         },
         async more() {
+          await returnToResults();
           if (loading()) return "loading";
           const target = scroller(); if (!target) throw new Error("The Jobright results list is unavailable.");
           if (target.scrollTop + target.clientHeight < target.scrollHeight - 4) {

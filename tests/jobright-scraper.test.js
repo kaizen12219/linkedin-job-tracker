@@ -8,6 +8,20 @@ function setup(t, { html = fixture.page(), url = `https://jobright.ai/jobs/info/
   dom.window.eval(fs.readFileSync(require.resolve("../src/jobright-scraper.js"), "utf8"));
   return { api: dom.window.JobrightJobScraper, document: dom.window.document, window: dom.window };
 }
+
+function detailList(document) {
+  const main = document.querySelector("#jobs-page-main-content");
+  const list = document.createElement("div");
+  list.className = "index_jobs-list__CM7kJ";
+  list.append(document.querySelector("header"), ...main.childNodes);
+  main.append(list);
+  return list;
+}
+
+function concealListForDetails(list) {
+  list.classList.add("index_jobs-list-leave___nSi4");
+  list.setAttribute("style", "opacity:0;height:0;overflow:hidden");
+}
 test("Jobright details extract observed JD sections and exclude private/AI/company material", (t) => {
   const { api, document } = setup(t);
   const value = api.scrape(document, `https://jobright.ai/jobs/info/${fixture.A}?utm_source=feed`);
@@ -92,6 +106,120 @@ test("hidden or measurement country clones cannot override a visible committed f
     document.body.insertAdjacentHTML("beforeend", `<div data-preference-key="country" data-topbar-state="default" ${attributes}><button data-topbar-kind="selector"><span title="United Kingdom">United Kingdom</span></button></div>`);
   }
   assert.equal(api.searchContext().filterKey, active.filterKey);
+});
+
+test("opening a Jobright detail preserves the mounted search filters and card identities", (t) => {
+  const { api, document } = setup(t, { html: fixture.page([fixture.job(), fixture.job(fixture.B)]) });
+  const list = detailList(document);
+  const before = api.searchContext();
+  const beforeCards = Array.from(api.cards(), (record) => record.identity);
+  concealListForDetails(list);
+  const after = api.searchContext();
+  assert.equal(after.filterKey, before.filterKey, "the detail transition is not a search change");
+  assert.equal(after.selectedRegion, "us");
+  assert.equal(after.selectedRegionSource, "search-control");
+  assert.deepEqual(Array.from(api.cards(), (record) => record.identity), beforeCards);
+  const captured = api.scrape();
+  assert.equal(captured.jobId, fixture.A);
+  assert.equal(captured.title, "Software Engineer 1");
+  assert.equal(captured.company, "Company 1");
+  assert.equal(captured.searchContextKey, before.filterKey);
+  assert.equal(captured.selectedRegion, "us");
+  assert.match(captured.description, /5\+ years of software engineering/u);
+});
+
+test("actual committed filter changes remain detectable behind a Jobright detail", (t) => {
+  const { api, document } = setup(t);
+  const list = detailList(document);
+  const before = api.searchContext().filterKey;
+  concealListForDetails(list);
+  document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid");
+  assert.notEqual(api.searchContext().filterKey, before);
+  const country = document.querySelector("[data-preference-key='country'] span");
+  country.setAttribute("title", "United Kingdom");
+  country.textContent = "United Kingdom";
+  const changed = api.searchContext();
+  assert.notEqual(changed.filterKey, before);
+  assert.match(changed.filterKey, /United Kingdom/u);
+  assert.equal(changed.selectedRegion, "");
+  assert.throws(() => api.scrape(), /Select United States/u);
+});
+
+test("detail-list visibility does not admit hidden nested filter or card clones", (t) => {
+  const { api, document } = setup(t);
+  const list = detailList(document);
+  const before = api.searchContext().filterKey;
+  concealListForDetails(list);
+  for (const attributes of ['hidden', 'aria-hidden="true"', 'style="display:none"', 'style="visibility:hidden"', 'style="opacity:0"', 'data-preference-measure="measurement"']) {
+    list.insertAdjacentHTML("beforeend", `<div data-preference-key="country" data-topbar-state="active" ${attributes}><button><span title="United Kingdom">United Kingdom</span></button></div>`);
+  }
+  for (const attributes of ['hidden', 'aria-hidden="true"', 'style="display:none"', 'style="visibility:hidden"', 'style="opacity:0"']) {
+    list.insertAdjacentHTML("beforeend", `<div ${attributes}>${fixture.card(fixture.job(fixture.B))}</div>`);
+  }
+  assert.equal(api.searchContext().filterKey, before);
+  assert.equal(api.searchContext().selectedRegion, "us");
+  assert.deepEqual(Array.from(api.cards(), (record) => record.id), [fixture.A]);
+});
+
+test("an unrelated transparent US control cannot override the retained UK filter", (t) => {
+  const { api, document } = setup(t);
+  const list = detailList(document);
+  const country = list.querySelector("[data-preference-key='country'] span");
+  country.setAttribute("title", "United Kingdom");
+  country.textContent = "United Kingdom";
+  const committed = api.searchContext().filterKey;
+  concealListForDetails(list);
+  const clone = '<div data-preference-key="country" data-topbar-state="active" style="opacity:0"><button><span title="United States">United States</span></button></div>';
+  list.insertAdjacentHTML("beforeend", clone);
+  document.body.insertAdjacentHTML("beforeend", clone);
+  assert.equal(api.searchContext().filterKey, committed);
+  assert.equal(api.searchContext().selectedRegion, "");
+  assert.throws(() => api.scrape(), /Select United States/u);
+});
+
+test("the detail-list opacity exception is restricted to the observed detail route and main list", async (t) => {
+  for (const scenario of ["recommend", "unsupported-route", "outside-main", "wrong-main", "not-list", "not-leaving"]) {
+    await t.test(scenario, (t) => {
+      const url = scenario === "recommend" ? "https://jobright.ai/jobs/recommend" : scenario === "unsupported-route" ? "https://jobright.ai/jobs/other" : `https://jobright.ai/jobs/info/${fixture.A}`;
+      const { api, document } = setup(t, { url });
+      const list = detailList(document);
+      concealListForDetails(list);
+      if (scenario === "outside-main") document.body.append(list);
+      if (scenario === "wrong-main") document.querySelector("main").id = "unrelated-main-content";
+      if (scenario === "not-list") list.classList.remove("index_jobs-list__CM7kJ");
+      if (scenario === "not-leaving") list.classList.remove("index_jobs-list-leave___nSi4");
+      assert.equal(api.searchContext().filterKey, "");
+      assert.equal(api.searchContext().selectedRegion, "");
+      assert.equal(api.cards().length, 0);
+    });
+  }
+});
+
+test("the retained list still rejects genuinely hidden ancestors", async (t) => {
+  for (const attributes of ['hidden', 'aria-hidden="true"', 'style="display:none"', 'style="visibility:hidden"']) {
+    await t.test(attributes, (t) => {
+      const { api, document } = setup(t);
+      const list = detailList(document);
+      concealListForDetails(list);
+      const wrapper = document.createElement("div");
+      wrapper.innerHTML = `<div ${attributes}></div>`;
+      const hidden = wrapper.firstElementChild;
+      list.before(hidden);
+      hidden.append(list);
+      assert.equal(api.searchContext().selectedRegion, "");
+      assert.equal(api.cards().length, 0);
+      assert.throws(() => api.scrape(), /Select United States/u);
+    });
+  }
+});
+
+test("detail headings must stay visible even when mounted inside a retained list", (t) => {
+  const { api, document } = setup(t);
+  const list = detailList(document);
+  list.append(document.querySelector("#details"));
+  concealListForDetails(list);
+  assert.equal(api.searchContext().selectedRegion, "us");
+  assert.throws(() => api.scrape(), /details are not ready/u);
 });
 test("duplicate committed country values are stable but conflicting visible countries fail closed", (t) => {
   const { api, document } = setup(t);

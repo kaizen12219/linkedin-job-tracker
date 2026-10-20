@@ -11,12 +11,19 @@
         ? url.pathname.match(/^\/jobs\/info\/([a-f0-9]{24})\/?$/u)?.[1] || "" : "";
     } catch { return ""; }
   }
-  function visible(node) {
+  function detailBackdrop(doc, sourceUrl) {
+    if (!jobId(sourceUrl)) return null;
+    const lists = [...doc.querySelectorAll("#jobs-page-main-content [class*='index_jobs-list__'][class*='index_jobs-list-leave__']")];
+    return lists.length === 1 ? lists[0] : null;
+  }
+  function visible(node, backdrop = null) {
     if (!node || node.closest("[hidden], [aria-hidden='true'], template")) return false;
     const view = node.ownerDocument?.defaultView;
     for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
       const style = view?.getComputedStyle(current);
-      if (style?.display === "none" || style?.visibility === "hidden" || style?.opacity === "0") return false;
+      // Jobright collapses and fades the committed results while details are
+      // open. Its mounted filters/cards still belong to the same search.
+      if (style?.display === "none" || style?.visibility === "hidden" || (style?.opacity === "0" && current !== backdrop)) return false;
     }
     return true;
   }
@@ -24,19 +31,21 @@
     let valid = false;
     try { const url = new URL(sourceUrl); valid = url.protocol === "https:" && /^(?:www\.)?jobright\.ai$/u.test(url.hostname) && /^\/jobs\/(?:recommend|info\/[a-f0-9]{24})\/?$/u.test(url.pathname); } catch { /* Unsupported page. */ }
     if (!valid) return { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
+    const backdrop = detailBackdrop(doc, sourceUrl);
+    const readable = (node) => visible(node, backdrop);
     const preferences = new Map();
     const draft = "[role='dialog'], [role='listbox'], [role='menu'], [aria-modal='true'], [popover], [inert], .ant-popover, .ant-dropdown, .ant-modal, [data-slot='popover-content'], [data-radix-popper-content-wrapper]";
     for (const control of doc.querySelectorAll("[data-preference-key]")) {
-      if (!visible(control) || control.closest(draft)) continue;
+      if (!readable(control) || control.closest(draft)) continue;
       const measure = control.getAttribute("data-preference-measure");
       if (measure && measure !== "item") continue;
-      const button = [...control.querySelectorAll("button")].find((item) => visible(item) && !item.closest(draft) && item.closest("[data-preference-key]") === control);
+      const button = [...control.querySelectorAll("button")].find((item) => readable(item) && !item.closest(draft) && item.closest("[data-preference-key]") === control);
       if (!button) continue;
-      const valueNodes = [...button.querySelectorAll("[class*='TopbarButton_topbar-button-value']")].filter(visible);
+      const valueNodes = [...button.querySelectorAll("[class*='TopbarButton_topbar-button-value']")].filter(readable);
       // Default filters need not have the active state. Require the observed
       // topbar markers so a preference editor cannot masquerade as a filter.
       if (!control.hasAttribute("data-topbar-state") && measure !== "item" && !button.hasAttribute("data-topbar-kind") && !valueNodes.length) continue;
-      const labelNodes = valueNodes.length ? valueNodes : [...button.querySelectorAll("span[title]")].filter((item) => visible(item) && !item.closest("svg, [role='img']"));
+      const labelNodes = valueNodes.length ? valueNodes : [...button.querySelectorAll("span[title]")].filter((item) => readable(item) && !item.closest("svg, [role='img']"));
       const labels = [...new Set(labelNodes.map((item) => clean(item.getAttribute("title")) || text(item)).filter(Boolean))];
       if (!labels.length) {
         // Ignore icon labels such as "setting" when the button has plain text.
@@ -44,7 +53,7 @@
         const parts = [];
         while (walker.nextNode()) {
           const node = walker.currentNode;
-          if (visible(node.parentElement) && !node.parentElement.closest("svg, [role='img']")) parts.push(node.textContent);
+          if (readable(node.parentElement) && !node.parentElement.closest("svg, [role='img']")) parts.push(node.textContent);
         }
         const label = clean(parts.join(" "));
         if (label) labels.push(label);
@@ -65,7 +74,8 @@
       selectedRegion, selectedRegionSource: selectedRegion ? "search-control" : "" };
   }
   function cards(doc = document) {
-    return [...doc.querySelectorAll(CARD)].filter(visible).map((card) => {
+    const backdrop = detailBackdrop(doc, doc.defaultView?.location?.href);
+    return [...doc.querySelectorAll(CARD)].filter((card) => visible(card, backdrop)).map((card) => {
       const id = card.getAttribute("id") || "";
       if (!ID.test(id)) return null;
       const heading = card.querySelector("h2[class*='index_job-title__']");

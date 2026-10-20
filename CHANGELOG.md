@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.2 — 2026-10-21
+
+- Preserve Jobright's committed search filters and card identities while its job-detail view fades the mounted results list, preventing a false "search changed" stop. Real filter changes still stop collection.
+- Close the job-detail view before returning to the results to select or lazy-load more jobs.
+- Distinguish match-score and company-chart progress bars from actual loading indicators so collection can reach subsequent results and finish normally.
+
 ## 0.8.1 — 2026-10-21
 
 - Recognize Jobright's committed United States filter even when it uses the default topbar state. Ignore draft controls, setting icons and hidden measurement copies; reject conflicting visible countries.
