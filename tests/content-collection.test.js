@@ -267,6 +267,20 @@ test("a delayed failure report cannot dismiss a card after Escape stops collecti
   assert.match(h.notices.at(-1).text, /stopped/);
 });
 
+test("unreadable selected descriptions report bounded layout diagnostics and continue to the next job", async (t) => {
+  const h = fixture(t, [[item(1, { description: "" }), item(2)]]);
+  await h.advance(180000);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "1");
+  assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.ok(report.job.descriptionDiagnostics.length <= 6000);
+  const diagnostics = JSON.parse(report.job.descriptionDiagnostics);
+  assert.equal(diagnostics.descriptionLength, 0);
+  assert.ok(diagnostics.root);
+  assert.equal(report.job.description, undefined);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+});
+
 test("lazy descriptions below the viewport load when their selected About section is revealed", async (t) => {
   const h = fixture(t, [[item(1), item(2, { easy: true })]], { modern: true, standaloneTitle: true, lazyDescriptionDelay: 25000 });
   await h.advance(20000);

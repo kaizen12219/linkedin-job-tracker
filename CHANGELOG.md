@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.10 — 2026-10-21
+
+- Recognize selected LinkedIn About headings rendered as paragraphs, ARIA headings or plain divs for description extraction and lazy loading. Keep exact heading labels and selected-job boundaries.
+- Save bounded, redacted description-layout diagnostics with verification failures so missing content, loading state and panel boundaries can be distinguished without guessing. Retain the 90-second readiness wait, profile routing and capture checks.
+
 ## 0.8.9 — 2026-10-21
 
 - Wait up to 90 seconds for slow job details and require the selected ID, company, title and changed description to settle. Recheck and review late description updates within a three-minute per-job budget; keep Stop and search-change cancellation responsive.

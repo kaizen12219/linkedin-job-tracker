@@ -112,12 +112,14 @@ test('explicit whitelist omits private data and redacts tokens from errors, prom
 });
 
 test('capture verification reports retain the actual readiness reason and tracker version', async () => {
-  const f = fixture(), captured = { ...job(), verificationReason: 'The rendered metadata identifies another job while the selected card is unmounted.', trackerVersion: '0.8.6' };
+  const f = fixture(), captured = { ...job(), verificationReason: 'The rendered metadata identifies another job while the selected card is unmounted.', trackerVersion: '0.8.6',
+    descriptionDiagnostics: JSON.stringify({ root: { tag: 'DIV', ariaBusy: 'true' }, readySource: 'about-section-not-ready' }) };
   await f.create().record(captured, { stage: 'capture', status: 'failed', reason: 'Selected job details could not be confirmed.',
     error: { code: 'DETAILS_NOT_CONFIRMED', message: 'Selected job details could not be confirmed.' } });
   const report = [...f.files.values()][0];
   assert.equal(report.job.verificationReason, captured.verificationReason);
   assert.equal(report.job.trackerVersion, '0.8.6');
+  assert.equal(report.job.descriptionDiagnostics, captured.descriptionDiagnostics);
   assert.equal(report.error.code, 'DETAILS_NOT_CONFIRMED');
   assert.equal(report.stage, 'capture');
 });
@@ -126,29 +128,35 @@ test('verification reason and tracker version stay bounded and redact secrets be
   const f = fixture(), captureRef = 'f'.repeat(64), apiKey = 'sk-proj-' + 'K'.repeat(24);
   const reason = `Rendered metadata mismatch; captureRef=${captureRef} client_nonce=TEST_PRIVATE_NONCE ${apiKey}; ${'diagnostic '.repeat(500)}`;
   const version = `0.8.6 Bearer TEST_VERSION_SECRET ${'v'.repeat(200)}`;
-  await f.create().record({ ...job(), verificationReason: reason, trackerVersion: version, privateReadiness: 'PRIVATE_DIAGNOSTICS' },
-    { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { diagnostics: { job: { verificationReason: reason, trackerVersion: version } } } });
+  const descriptionDiagnostics = `layout captureRef=${captureRef} ${apiKey} ${'x'.repeat(7000)}`;
+  await f.create().record({ ...job(), verificationReason: reason, trackerVersion: version, descriptionDiagnostics, privateReadiness: 'PRIVATE_DIAGNOSTICS' },
+    { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { diagnostics: { job: { verificationReason: reason, trackerVersion: version, descriptionDiagnostics } } } });
   const report = [...f.files.values()][0], raw = JSON.stringify(report);
   assert.ok(report.job.verificationReason.length <= 2000);
   assert.ok(report.job.trackerVersion.length <= 64);
+  assert.equal(report.job.descriptionDiagnostics.length, 6000);
+  assert.match(report.job.descriptionDiagnostics, /^layout captureRef=\[redacted\]/u);
   assert.match(report.job.verificationReason, /^Rendered metadata mismatch/u);
   assert.match(report.job.verificationReason, /\[redacted\]/u);
   assert.match(report.job.trackerVersion, /^0\.8\.6 Bearer \[redacted\]/u);
   assert.equal(report.research.diagnostics.job.verificationReason, report.job.verificationReason);
   assert.equal(report.research.diagnostics.job.trackerVersion, report.job.trackerVersion);
+  assert.equal(report.research.diagnostics.job.descriptionDiagnostics, report.job.descriptionDiagnostics);
   for (const secret of [captureRef, apiKey, 'TEST_PRIVATE_NONCE', 'TEST_VERSION_SECRET', 'PRIVATE_DIAGNOSTICS']) assert.equal(raw.includes(secret), false);
 });
 
 test('verification diagnostics accept only strings and omit nested or scalar non-text data', async () => {
   for (const invalid of [{ reason: 'private nested detail' }, ['nested detail'], 42, true, null]) {
     const f = fixture();
-    await f.create().record({ ...job(), verificationReason: invalid, trackerVersion: invalid },
-      { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { job: { verificationReason: invalid, trackerVersion: invalid } } });
+    await f.create().record({ ...job(), verificationReason: invalid, trackerVersion: invalid, descriptionDiagnostics: invalid },
+      { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { job: { verificationReason: invalid, trackerVersion: invalid, descriptionDiagnostics: invalid } } });
     const report = [...f.files.values()][0];
     assert.equal(report.job.verificationReason, undefined);
     assert.equal(report.job.trackerVersion, undefined);
+    assert.equal(report.job.descriptionDiagnostics, undefined);
     assert.equal(report.research.job.verificationReason, undefined);
     assert.equal(report.research.job.trackerVersion, undefined);
+    assert.equal(report.research.job.descriptionDiagnostics, undefined);
   }
 });
 

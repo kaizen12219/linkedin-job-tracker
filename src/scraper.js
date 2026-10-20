@@ -294,9 +294,9 @@
       if (!descriptionVisible(originals[index]) || originals[index].matches?.(DESCRIPTION_EXCLUDED)) copies[index].remove();
     }
     queryAll(clone, "script, style, svg, button, nav, aside, [role='progressbar'], .artdeco-loader, [data-testid*='skeleton' i]").forEach(element => element.remove());
+    for (const heading of descriptionHeadingCandidates(clone, ABOUT_HEADING_PATTERNS)) heading.remove();
     for (const heading of queryAll(clone, "h1, h2, h3, h4")) {
       const label = readElementText(heading);
-      if (ABOUT_HEADING_PATTERNS.some(pattern => pattern.test(label))) { heading.remove(); continue; }
       if (!OTHER_SECTION.test(label) || clone.matches?.(AUTHORED_DESCRIPTION) || heading.closest(AUTHORED_DESCRIPTION)) continue;
       const section = heading.closest("section, article");
       if (section && section !== clone) { section.remove(); continue; }
@@ -312,7 +312,7 @@
     for (let current = heading; current && current !== root; current = current.parentElement) {
       const fragment = heading.ownerDocument.createElement("div");
       for (let sibling = current.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
-        const firstHeading = sibling.matches?.("h1, h2, h3, h4") ? sibling : queryFirst(sibling, ["h1, h2, h3, h4"]);
+        const firstHeading = findHeading(sibling, [...ABOUT_HEADING_PATTERNS, OTHER_SECTION]);
         if (unrelatedDescription(sibling) || (firstHeading && OTHER_SECTION.test(readElementText(firstHeading)))) break;
         if (descriptionVisible(sibling)) fragment.append(sibling.cloneNode(true));
       }
@@ -333,6 +333,63 @@
     const heading = findHeading(root, ABOUT_HEADING_PATTERNS);
     if (heading && descriptionVisible(heading, true) && !unrelatedDescription(heading)) return heading;
     return descriptionNodes(root, ['.jobs-box__html-content', '.jobs-description__content', '.description__text', '#job-details'])[0] || null;
+  }
+
+  function descriptionDiagnostics(doc = document) {
+    const root = findJobDetailsRoot(doc);
+    const description = extractDescription(doc, root);
+    const target = descriptionTarget(doc);
+    const attributes = (node) => {
+      if (!node) return null;
+      const value = { tag: String(node.tagName || "").toLowerCase() };
+      for (const [name, attribute] of [["role", "role"], ["componentkey", "componentkey"], ["screen", "data-sdui-screen"], ["testid", "data-testid"], ["ariaBusy", "aria-busy"], ["ariaHidden", "aria-hidden"]]) {
+        const text = node.getAttribute?.(attribute);
+        if (text) value[name] = cleanText(text).slice(0, 64);
+      }
+      value.hidden = !!node.hidden;
+      return value;
+    };
+    const nodeSummary = (node) => node ? { ...attributes(node), childCount: node.children?.length || 0,
+      textLength: readElementText(node).length } : null;
+    const cardSelector = "li[data-occludable-job-id], .job-card-container, [data-view-name='job-card'], [componentkey^='job-card-component-ref-']";
+    const allHeadings = descriptionHeadingCandidates(doc, ABOUT_HEADING_PATTERNS);
+    const selected = allHeadings.filter(node => root.contains(node));
+    const outside = allHeadings.filter(node => !root.contains(node));
+    const headings = [...selected.slice(0, 2), ...outside.slice(0, 4)].map(node => {
+      const ancestors = [];
+      for (let current = node.parentElement; current && ancestors.length < 5; current = current.parentElement) ancestors.push(nodeSummary(current));
+      let common = node;
+      while (common && !common.contains(root)) common = common.parentElement;
+      return { ...attributes(node), label: readElementText(node).slice(0, 120), textLength: readElementText(node).length,
+        inSelectedRoot: root.contains(node), ancestors,
+        commonAncestor: common ? { ...nodeSummary(common), jobCardCount: queryAll(common, cardSelector).length } : null };
+    });
+    const view = doc.defaultView;
+    const rectangle = target?.getBoundingClientRect?.();
+    const finite = (value) => Number.isFinite(value) ? Math.round(value) : 0;
+    const renderedJobIds = [...new Set([root.getAttribute?.("data-job-id"), root.getAttribute?.("data-entity-urn")?.match(/jobPosting:(\d+)/u)?.[1],
+      ...queryAll(root, "a[href*='/jobs/view/']").filter(node => !node.closest(cardSelector) && descriptionVisible(node, true))
+        .map(node => node.getAttribute("href")?.match(/\/jobs\/view\/(\d+)/u)?.[1])]
+      .filter(value => /^\d{1,24}$/u.test(value || "")))].slice(0, 3);
+    const summary = {
+      root: { ...nodeSummary(root), renderedJobIds }, readySource: description.source, descriptionLength: description.value.length,
+      counts: { aboutHeadings: selected.length, outsideAboutHeadings: outside.length,
+        aboutScopes: descriptionNodes(root, ['[componentkey^="JobDetails_AboutTheJob"]', '[data-sdui-component*="aboutTheJob" i]', '[data-testid*="job-description" i]']).length,
+        legacyBodies: descriptionNodes(root, ['.jobs-box__html-content', '.jobs-description-content__text', '.jobs-description__content', '.description__text', '.show-more-less-html__markup', '#job-details']).length,
+        expandableBodies: descriptionNodes(root, ['[data-testid="expandable-text-box"]']).length },
+      viewport: { width: finite(view?.innerWidth), height: finite(view?.innerHeight), documentHidden: !!doc.hidden,
+        target: rectangle ? { top: finite(rectangle.top), bottom: finite(rectangle.bottom), height: finite(rectangle.height) } : null },
+      headings
+    };
+    // Keep diagnostics small enough for a failure report even when generated
+    // component identifiers are long. No job body, HTML, or app state is copied.
+    while (JSON.stringify(summary).length > 3900) {
+      const longest = headings.reduce((previous, heading) => heading.ancestors.length > (previous?.ancestors.length || 0) ? heading : previous, null);
+      if (longest?.ancestors.length) longest.ancestors.pop();
+      else if (headings.length) headings.pop();
+      else break;
+    }
+    return summary;
   }
 
   function extractApplyUrl(doc, root, sourceUrl) {
@@ -417,9 +474,15 @@
     return score;
   }
 
+  const DESCRIPTION_HEADING_SELECTOR = "h1, h2, h3, h4, [role='heading'], p, div";
+  function descriptionHeadingCandidates(root, patterns) {
+    return [...(root?.matches?.(DESCRIPTION_HEADING_SELECTOR) ? [root] : []), ...queryAll(root, DESCRIPTION_HEADING_SELECTOR)]
+      .filter((heading) => patterns.some(pattern => pattern.test(readElementText(heading))) &&
+        (!heading.matches("div:not([role='heading'])") || !queryFirst(heading, [DESCRIPTION_HEADING_SELECTOR])) &&
+        !heading.closest("button, a, [role='button']") && descriptionVisible(heading, true) && !unrelatedDescription(heading));
+  }
   function findHeading(root, patterns) {
-    return queryAll(root, "h1, h2, h3, h4")
-      .find((heading) => descriptionVisible(heading, true) && !unrelatedDescription(heading) && patterns.some((pattern) => pattern.test(readElementText(heading))));
+    return descriptionHeadingCandidates(root, patterns)[0];
   }
 
   function firstMeaningfulText(elements) {
@@ -655,6 +718,7 @@
   window.LinkedInJobScraper = {
     scrape,
     descriptionTarget,
+    descriptionDiagnostics,
     _internals: {
       cleanCompany,
       cleanTitle,

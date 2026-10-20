@@ -13,10 +13,11 @@
     'profileRoutingVersion', 'eligible', 'category', 'evidence', 'role', 'experience', 'minimumYears', 'scope',
     'fullyRemote', 'remoteEvidence', 'application', 'emails', 'email', 'address', 'source', 'sourceType',
     'route', 'active', 'applicationsOpen', 'free', 'descriptionEvidence', 'sourceEvidence', 'sourceQuote', 'kind',
-    'detailAvailability', 'applicationsAvailable', 'jobIdSource', 'rejectedCallbacks', 'verificationReason', 'trackerVersion']);
+    'detailAvailability', 'applicationsAvailable', 'jobIdSource', 'rejectedCallbacks', 'verificationReason', 'trackerVersion', 'descriptionDiagnostics']);
   const jobKeys = ['company', 'title', 'description', 'jobTitle', 'jobDescription', 'sourceUrl', 'applyUrl', 'jobId',
     'isEasyApply', 'workplaceType', 'posterName', 'applicationsClosed', 'applicationsAvailable', 'detailAvailability', 'jobIdSource',
-    'selectedRegion', 'selectedRegionSource', 'profileRoutingVersion', 'verificationReason', 'trackerVersion'];
+    'selectedRegion', 'selectedRegionSource', 'profileRoutingVersion', 'verificationReason', 'trackerVersion', 'descriptionDiagnostics'];
+  const detailMetadataLimits = { verificationReason: 2000, trackerVersion: 64, descriptionDiagnostics: 6000 };
   function cleanText(value) {
     return String(value).replace(/\b[a-f0-9]{64}\b/giu, '[redacted]')
       .replace(/\bsk-(?:proj-|svcacct-)?[a-z0-9_-]{12,}\b/giu, '[redacted]')
@@ -41,8 +42,8 @@
     const result = {};
     for (const [key, item] of Object.entries(value)) {
       if (!researchKeys.has(key)) continue;
-      if (key === 'verificationReason' || key === 'trackerVersion') {
-        if (typeof item === 'string') result[key] = cleanText(item).slice(0, key === 'verificationReason' ? 2000 : 64);
+      if (Object.hasOwn(detailMetadataLimits, key)) {
+        if (typeof item === 'string') result[key] = cleanText(item).slice(0, detailMetadataLimits[key]);
         continue;
       }
       const safe = /(?:url|source)$/iu.test(key) && typeof item === 'string' && /^https?:\/\//iu.test(item)
@@ -55,8 +56,8 @@
     const result = {};
     for (const key of jobKeys) if (job?.[key] !== undefined) {
       const value = job[key];
-      if (key === 'verificationReason' || key === 'trackerVersion') {
-        if (typeof value === 'string') result[key] = cleanText(value).slice(0, key === 'verificationReason' ? 2000 : 64);
+      if (Object.hasOwn(detailMetadataLimits, key)) {
+        if (typeof value === 'string') result[key] = cleanText(value).slice(0, detailMetadataLimits[key]);
         continue;
       }
       if (typeof value === 'string') result[key] = /Url$/u.test(key) ? cleanUrl(value) : cleanText(value);

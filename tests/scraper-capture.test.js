@@ -160,3 +160,70 @@ test("descriptionTarget finds only the selected About heading or container for l
   assert.equal(api.descriptionTarget(), null);
   assert.ok(Object.values(api.scrape()).every(value => !value || typeof value !== 'object' || value.nodeType === undefined));
 });
+
+for (const heading of ['<p><span>About the job</span></p>', '<div role="heading" aria-level="2"><span>About the job</span></div>',
+  '<div><span>About the job</span></div>', '<div><p>About the job</p></div>']) test(`plain modern About headings expose their own description and lazy-load target: ${heading}`, (t) => {
+  const { api, document } = descriptionFixture(t, { body: `<section>${heading}<div><p>Build production services.</p><ul><li>Maintain automated tests.</li></ul></div><section><p>About the company</p><p>UNRELATED_COMPANY_MARKETING</p></section></section>` });
+  assert.equal(api.scrape().description, 'Build production services.\n- Maintain automated tests.');
+  const target = api.descriptionTarget();
+  assert.ok(document.querySelector('.jobs-details').contains(target));
+  assert.equal(target.textContent.trim(), 'About the job');
+  assert.equal(api.scrape().selectorsUsed.description, 'about-heading-content');
+});
+
+test("paragraph and accessible headings remain scoped, visible, and exact while a plain About body hydrates", (t) => {
+  const { api, document } = descriptionFixture(t, { body: '<section><p hidden>About the job</p><p>Learn more about the job</p><div role="heading">About the job: unrelated help text</div></section>',
+    outside: '<section><div role="heading">About the job</div><p>FOREIGN_DESCRIPTION</p></section>' });
+  assert.equal(api.scrape().description, '');
+  assert.equal(api.descriptionTarget(), null);
+  const section = document.querySelector('.jobs-details section');
+  section.innerHTML = '<p><span>About the job</span></p><p>Loading...</p>';
+  assert.equal(api.scrape().description, '');
+  assert.equal(api.descriptionTarget(), section.firstElementChild);
+  section.lastElementChild.textContent = 'The selected description has finished loading.';
+  assert.equal(api.scrape().description, 'The selected description has finished loading.');
+});
+
+test("description diagnostics identify an About section outside a narrow selected root without copying the JD or app state", (t) => {
+  const { api, document } = descriptionFixture(t, { body: '<section componentkey="JobDetails_AboutTheJob"><p>About the job</p><p>PRIVATE_JOB_BODY</p><script>PRIVATE_APP_STATE</script></section><li data-occludable-job-id="999"><p>About the job</p><a href="/jobs/view/999/">Private other title</a></li>' });
+  const header = document.querySelector('.job-details-jobs-unified-top-card');
+  header.setAttribute('data-sdui-screen', 'SemanticJobDetails');
+  header.setAttribute('data-testid', 'selected-header');
+  const value = api.descriptionDiagnostics();
+  assert.equal(value.root.tag, 'div');
+  assert.equal(value.root.screen, 'SemanticJobDetails');
+  assert.equal(value.root.testid, 'selected-header');
+  assert.deepEqual(Array.from(value.root.renderedJobIds), ['101']);
+  assert.equal(value.readySource, 'not-found');
+  assert.equal(value.descriptionLength, 0);
+  assert.equal(value.counts.aboutHeadings, 0);
+  assert.equal(value.counts.outsideAboutHeadings, 1);
+  assert.equal(value.headings[0].tag, 'p');
+  assert.equal(value.headings[0].label, 'About the job');
+  assert.equal(value.headings[0].inSelectedRoot, false);
+  assert.equal(value.headings[0].ancestors[0].componentkey, 'JobDetails_AboutTheJob');
+  assert.equal(value.headings[0].commonAncestor.tag, 'div');
+  assert.equal(value.headings[0].commonAncestor.jobCardCount, 1);
+  assert.equal(value.viewport.width, 1024);
+  assert.equal(value.viewport.target, null);
+  const serialized = JSON.stringify(value);
+  assert.doesNotMatch(serialized, /PRIVATE_|Private other title|<script|\/jobs\/view/u);
+  assert.equal(value.root.nodeType, undefined);
+});
+
+test("description diagnostics bound heading counts, ancestry, attributes, and serialized size", (t) => {
+  const marker = 'component-marker-'.repeat(20);
+  const nestedHeading = index => Array.from({ length: 8 }, (_, depth) => `<div componentkey="${marker}" data-testid="layer-${index}-${depth}">`).join('') +
+    '<div role="heading" aria-level="2">About the job</div>' + '</div>'.repeat(8);
+  const { api } = descriptionFixture(t, { rootAttributes: `componentkey="${marker}" aria-busy="true"`,
+    body: '<section><p>About the job</p><p>Loading...</p></section>', outside: Array.from({ length: 6 }, (_, index) => nestedHeading(index)).join('') });
+  const value = api.descriptionDiagnostics();
+  assert.equal(value.root.ariaBusy, 'true');
+  assert.equal(value.readySource, 'not-ready');
+  assert.equal(value.counts.outsideAboutHeadings, 6);
+  assert.ok(value.headings.filter(heading => !heading.inSelectedRoot).length <= 4);
+  assert.ok(value.headings.every(heading => heading.ancestors.length <= 5));
+  assert.ok(value.root.componentkey.length <= 64);
+  assert.ok(JSON.stringify(value).length <= 3900);
+  assert.ok(value.headings.some(heading => !heading.inSelectedRoot), 'outside-root evidence remains within the diagnostic budget');
+});

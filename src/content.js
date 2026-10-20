@@ -300,6 +300,12 @@
     const snapshot = { jobId, company: record.company, title: record.title,
       ...(cause ? { verificationReason: cause } : {}), ...(trackerVersion ? { trackerVersion } : {}),
       sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}/`, detailAvailability: verified ? "verified" : "unavailable" };
+    if (code === "DETAILS_NOT_CONFIRMED") {
+      try {
+        const diagnostics = window.LinkedInJobScraper?.descriptionDiagnostics?.(document);
+        if (diagnostics) snapshot.descriptionDiagnostics = JSON.stringify(diagnostics).slice(0, 6000);
+      } catch { /* Optional bounded diagnostics cannot interfere with collection. */ }
+    }
     if (verified) {
       for (const name of ["description", "workplaceType", "isEasyApply", "applicationsAvailable", "applicationsClosed", "selectedRegion", "selectedRegionSource"]) {
         if (job[name] !== undefined) snapshot[name] = job[name];
