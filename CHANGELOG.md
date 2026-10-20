@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.6 — 2026-10-21
+
+- Keep collecting when Jobright unmounts the selected card after opening its details. Require the exact previously selected ID, company, title and committed search to match the rendered detail metadata; changed or ambiguous cards remain blocked.
+- Permit the bounded detail recovery to restore an unmounted card before rechecking its identity.
+- Retain the specific detail-verification reason and loaded extension version in failure reports, including when the surrounding capture handler supplies only a generic reason.
+
 ## 0.8.5 — 2026-10-21
 
 - Follow the same Jobright job when its card is remounted, using its ID, title and company instead of a stale DOM node. Match harmless casing differences and select the unique detail panel whose rendered metadata identifies that job.

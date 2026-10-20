@@ -4,17 +4,20 @@
   window.__JOBRIGHT_JOB_TRACKER_READY__ = true;
   const scraper = () => window.JobrightJobScraper;
   const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
-  let classificationTimer, classificationVersion = 0, manualTimer, selection = null, selecting = false, scrapeFailure = "";
+  let classificationTimer, classificationVersion = 0, manualTimer, selection = null, selecting = false, scrapeFailure = "", selectedAuthorization = null;
   let collection = null, collectionId = "", startVersion = 0, waiting = null, notice, noticeTimer, lastScrollAt = 0;
   const captured = new Set();
   const records = () => scraper()?.cards(document) || [];
   const context = () => scraper()?.searchContext(document, window.location.href) || { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
+  const identity = (record) => JSON.stringify([record.id, key(record.company), key(record.title)]);
+  const authorizationMatches = (record) => !!record && selectedAuthorization?.identity === identity(record);
+  const hasCard = (record) => [...document.querySelectorAll(".job-card-flag-classname[id]")].some((card) => card.id === record.id);
   const currentRecord = (record) => {
     if (!record) return null;
     // React can replace the mounted card when its details open. Rebind only
     // the same unambiguous job identity, never a reused card or changed role.
-    const matches = records().filter((item) => item.id === record.id && key(item.company) === key(record.company) && key(item.title) === key(record.title));
-    return matches.length === 1 ? matches[0] : null;
+    const matches = records().filter((item) => item.id === record.id);
+    return matches.length === 1 && key(matches[0].company) === key(record.company) && key(matches[0].title) === key(record.title) ? matches[0] : null;
   };
   const safeScrape = () => {
     try {
@@ -26,21 +29,46 @@
       return null;
     }
   };
+  function authorizedMissingCard(record) {
+    if (!record || hasCard(record) || !authorizationMatches(record) || selectedAuthorization.blocked || captured.has(identity(record))) return false;
+    const currentContext = context();
+    return !!selectedAuthorization.filterKey && currentContext.filterKey === selectedAuthorization.filterKey && currentContext.selectedRegion === "us" && currentContext.selectedRegionSource === "search-control";
+  }
   const active = (record) => {
+    if (!record || captured.has(identity(record)) || (authorizationMatches(record) && selectedAuthorization.blocked)) return false;
     const current = currentRecord(record);
-    return !!current && !captured.has(current.identity) && !["banned", "duplicate"].includes(current.card.getAttribute("data-kai-flow-job-state")) &&
-      current.card.getAttribute("aria-disabled") !== "true";
+    if (current) return !["banned", "duplicate"].includes(current.card.getAttribute("data-kai-flow-job-state")) && current.card.getAttribute("aria-disabled") !== "true";
+    // A detail transition can unmount the selected card entirely. Only our
+    // authorized selection may rely on exact rendered details in that case.
+    // A present changed/malformed/duplicate card never gets this fallback.
+    if (!authorizedMissingCard(record)) return false;
+    const job = safeScrape();
+    return !!matches(job, record) && job.searchContextKey === selectedAuthorization.filterKey && job.selectedRegion === "us" && job.selectedRegionSource === "search-control" &&
+      (job.applicationsAvailable !== false || job.applicationsClosed === true);
   };
-  function selectRecord(record) {
+  function authorize(record, filterKey) {
+    selectedAuthorization = { identity: identity(record), company: record.company, filterKey, blocked: false };
+  }
+  function selectRecord(record, filterKey = context().filterKey) {
     const current = currentRecord(record);
+    const currentContext = context();
+    if (!filterKey || currentContext.filterKey !== filterKey || currentContext.selectedRegion !== "us" || currentContext.selectedRegionSource !== "search-control") throw new Error("The search changed. Job collection stopped.");
     if (!current || !active(record) || !current.link.isConnected || scraper().jobId(current.link.href) !== record.id) throw new Error("The selected job card changed.");
+    selectedAuthorization = null;
     selecting = true;
-    try { current.link.click(); }
+    try { current.link.click(); authorize(current, filterKey); }
     finally { selecting = false; }
   }
   const matches = (job, record) => job && job.jobIdSource === "details" && job.jobId === record.id && key(job.company) === key(record.company) && key(job.title) === key(record.title) && job.description?.trim();
   function detailFailure(record) {
-    if (!currentRecord(record)) return "The selected Jobright card is missing, ambiguous, or its company/title changed.";
+    if (captured.has(identity(record))) return "The selected Jobright job has already been captured in this page.";
+    if (authorizationMatches(record) && selectedAuthorization.blocked) return "The selected Jobright company is banned or already recorded.";
+    if (!currentRecord(record)) {
+      if (hasCard(record)) return "The selected Jobright card is ambiguous or its company/title changed.";
+      if (!authorizationMatches(record)) return "The selected Jobright card is missing and no exact selection was authorized.";
+      const currentContext = context();
+      if (currentContext.filterKey !== selectedAuthorization.filterKey || currentContext.selectedRegion !== "us") return "The selected Jobright search changed after the job was selected.";
+    }
     const job = safeScrape();
     if (!job) return scrapeFailure;
     if (!matches(job, record)) return "The rendered Jobright details do not match the selected job ID, company, and title.";
@@ -53,12 +81,16 @@
   }
   async function classifyCards() {
     const version = ++classificationVersion, cards = records();
-    const companies = [...new Map(cards.map((record) => [key(record.company), record.company])).values()];
+    const companies = [...new Map([...cards.map((record) => [key(record.company), record.company]), ...(selectedAuthorization ? [[key(selectedAuthorization.company), selectedAuthorization.company]] : [])]).values()];
     if (!companies.length) return;
     let response;
     try { response = await chrome.runtime.sendMessage({ type: "KAI_TRACKER_CLASSIFY_COMPANIES", companies, refresh: false }); } catch { return; }
     if (!response?.ok || version !== classificationVersion) return;
     const states = new Map((response.result?.companies || []).map((item) => [key(item.company), item]));
+    if (selectedAuthorization) {
+      const selectedState = states.get(key(selectedAuthorization.company));
+      if (selectedState?.banned || selectedState?.duplicate) selectedAuthorization.blocked = selectedState.banned ? "banned" : "duplicate";
+    }
     for (const record of cards) {
       const current = currentRecord(record);
       if (!current) continue;
@@ -75,16 +107,20 @@
   }
   async function notSaved(record, { code, job, reason } = {}, runId) {
     if (!/^[a-f0-9]{24}$/u.test(record?.id || "") || !record.company || !record.title) return;
-    const state = currentRecord(record)?.card.getAttribute("data-kai-flow-job-state");
+    const state = currentRecord(record)?.card.getAttribute("data-kai-flow-job-state") || (authorizationMatches(record) && selectedAuthorization.blocked);
     if (state === "banned") code = "BANNED_COMPANY";
     else if (state === "duplicate") code = "DUPLICATE_COMPANY";
     if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
+    const reasonDetail = (typeof reason === "string" && reason.trim() ? reason.trim() : code === "DETAILS_NOT_CONFIRMED" ? detailFailure(record) : "").slice(0, 2000);
+    let trackerVersion = "";
+    try { trackerVersion = String(chrome.runtime.getManifest?.()?.version || "").slice(0, 64); } catch { /* Diagnostic metadata is optional. */ }
     const snapshot = { jobId: record.id, title: record.title, company: record.company, sourceUrl: `https://jobright.ai/jobs/info/${record.id}`,
+      ...(reasonDetail ? { verificationReason: reasonDetail } : {}), ...(trackerVersion ? { trackerVersion } : {}),
       detailAvailability: matches(job, record) ? "verified" : "unavailable" };
     if (matches(job, record)) for (const name of ["description", "workplaceType", "isEasyApply", "applicationsAvailable", "applicationsClosed", "selectedRegion", "selectedRegionSource", "searchContextKey"]) {
       if (job[name] !== undefined) snapshot[name] = job[name];
     }
-    const reasonDetail = typeof reason === "string" ? reason.trim().slice(0, 2000) : "";
+    if (code === "DETAILS_NOT_CONFIRMED" && reasonDetail) status(`${record.company} — ${reasonDetail}`);
     try { await chrome.runtime.sendMessage({ type: "KAI_TRACKER_NOT_SAVED", job: snapshot, reasonCode: code, ...(reasonDetail ? { reasonDetail } : {}), ...(runId ? { runId } : {}) }); } catch { /* A report must not block native navigation. */ }
   }
   function onClick(event) {
@@ -100,13 +136,16 @@
     const previous = safeScrape();
     selection = { record, previousId: previous?.jobId, previousDescription: previous?.description,
       filterKey: context().filterKey, until: Date.now() + 15_000, stable: "", stableAt: 0 };
+    const currentContext = context();
+    if (currentContext.selectedRegion !== "us" || currentContext.selectedRegionSource !== "search-control" || !selection.filterKey) { selection = null; return; }
+    authorize(record, selection.filterKey);
     scheduleManual(0);
   }
   function scheduleManual(delay) { clearTimeout(manualTimer); manualTimer = setTimeout(() => void captureManual(), delay); }
   async function captureManual() {
     const pending = selection;
     if (!pending || document.hidden) return;
-    if (Date.now() > pending.until || context().filterKey !== pending.filterKey || !active(pending.record)) {
+    if (Date.now() > pending.until || context().filterKey !== pending.filterKey || !authorizationMatches(pending.record) || (!active(pending.record) && !authorizedMissingCard(pending.record))) {
       selection = null; void notSaved(pending.record, { code: "DETAILS_NOT_CONFIRMED" }); return;
     }
     const job = safeScrape();
@@ -116,7 +155,7 @@
     if (value !== pending.stable) { pending.stable = value; pending.stableAt = Date.now(); scheduleManual(200); return; }
     if (Date.now() - pending.stableAt < 500) { scheduleManual(200); return; }
     if (selection !== pending || !active(pending.record)) return;
-    selection = null; captured.add(pending.record.identity);
+    selection = null; captured.add(identity(pending.record));
     try { await chrome.runtime.sendMessage({ type: "KAI_TRACKER_CAPTURE", job }); } catch { /* Do not retry an uncertain write automatically. */ }
   }
   function status(text, state, finished = false) {
@@ -126,7 +165,7 @@
     document.documentElement.append(notice); noticeTimer = setTimeout(() => { notice?.remove(); notice = null; }, 5000);
   }
   function stop(text = "Job collection stopped.") {
-    startVersion++; collection?.stop(text);
+    startVersion++; selectedAuthorization = null; collection?.stop(text);
     const pending = waiting; waiting = null;
     if (pending) { status(text, pending, true); void message({ type: "KAI_TRACKER_RUN_END", runId: pending.id }).catch(() => {}); }
   }
@@ -219,7 +258,7 @@
       }
       if (version !== startVersion) return;
       if (!records().length) throw new Error("Results did not finish loading. Job collection stopped.");
-      selection = null; clearTimeout(manualTimer); collectionId = state.id; lastScrollAt = 0;
+      selection = null; selectedAuthorization = null; clearTimeout(manualTimer); collectionId = state.id; lastScrollAt = 0;
       collection = window.LinkedInJobCollector.create({
         searchKey, wait, cards: records, activeCard: active, scrape: safeScrape, detailFailure, notSaved,
         async allowed(record) {
@@ -228,7 +267,12 @@
           if (!check?.ok) throw new Error(check?.error?.message || "Company checks are unavailable. Job collection stopped.");
           const match = check.result?.companies?.find((item) => key(item.company) === key(record.company));
           if (!match) throw new Error("Company checks are incomplete. Job collection stopped.");
-          if (match.banned || match.duplicate) { currentRecord(record)?.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate"); return false; }
+          if (match.banned || match.duplicate) {
+            const blocked = match.banned ? "banned" : "duplicate";
+            if (authorizationMatches(record)) selectedAuthorization.blocked = blocked;
+            currentRecord(record)?.card.setAttribute("data-kai-flow-job-state", blocked);
+            return false;
+          }
           return active(record);
         },
         async top() { await returnToResults(); const target = scroller(); if (!target) throw new Error("The Jobright results list is unavailable."); target.scrollTo({ top: 0, behavior: "instant" }); },
@@ -238,20 +282,21 @@
           if (!current) throw new Error("The selected job card changed.");
           current.card.scrollIntoView({ block: "center", behavior: "instant" });
         },
-        select: selectRecord,
+        select(record) { selectRecord(record, frozen); },
         async recoverDetails(record) {
+          if (!authorizationMatches(record) || selectedAuthorization.blocked || captured.has(identity(record))) return false;
           if (!await returnToResults({ recover: true })) return false;
           if (searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
           const current = currentRecord(record);
           if (!current || !active(current)) return false;
           current.card.scrollIntoView({ block: "center", behavior: "instant" });
-          selectRecord(current);
+          selectRecord(current, frozen);
           return true;
         },
         async capture(job, runId) {
           if (job.searchContextKey !== frozen) throw new Error("The search changed. Job collection stopped.");
           const result = await message({ type: "KAI_TRACKER_CAPTURE", job, runId });
-          if (result?.ok) { const record = records().find((item) => item.id === job.jobId); if (record) captured.add(record.identity); }
+          if (result?.ok) captured.add(identity({ id: job.jobId, company: job.company, title: job.title }));
           return result;
         },
         async more() {

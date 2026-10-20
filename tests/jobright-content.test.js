@@ -4,11 +4,12 @@ const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 const collectionLocks = require("./fixtures/collection-locks.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, closeFadeDelay = 0, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, closeFadeDelay = 0, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
   const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [], resultNavigations = [];
+  const removedCards = new Map();
   window.Date.now = () => time; window.Math.random = () => .5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
   window.clearTimeout = (id) => timers.delete(id); window.setInterval = () => 0; window.MutationObserver = class { observe() {} };
@@ -62,10 +63,14 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
         const missingDetails = typeof stale === "function" ? stale(value, selections.length) : stale;
         if (!missingDetails) window.setTimeout(() => {
           const details = document.querySelector("#details"); details.innerHTML = fixture.details(value);
-          if (detailsOnOpen) detailsOnOpen(details, value);
+          if (detailsOnOpen) detailsOnOpen(details, value, selections.length);
           if (replaceCardOnOpen) {
             const replacement = document.createElement("template"); replacement.innerHTML = fixture.card(replaceCardOnOpen(value));
             card.replaceWith(replacement.content.firstElementChild); wire();
+          }
+          if (typeof removeCardOnOpen === "function" ? removeCardOnOpen(value, selections.length) : removeCardOnOpen) {
+            const selected = document.getElementById(value.id);
+            if (selected) { removedCards.set(value.id, { value, parent: selected.parentElement, next: selected.nextElementSibling }); selected.remove(); }
           }
         }, 450);
         if (changedCountryInDetail && selections.length === 1) window.setTimeout(() => {
@@ -78,6 +83,13 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   function restoreResults() {
     window.history.replaceState({}, "", "/jobs/recommend");
     document.querySelector("#details").replaceChildren();
+    for (const [id, removed] of removedCards) {
+      if (!document.getElementById(id)) {
+        const replacement = document.createElement("template"); replacement.innerHTML = fixture.card(removed.value);
+        removed.parent.insertBefore(replacement.content.firstElementChild, removed.next?.isConnected ? removed.next : null);
+      }
+    }
+    removedCards.clear(); wire();
     if (list) {
       list.classList.remove("index_jobs-list-leave___nSi4");
       if (!closeFadeDelay) list.style.removeProperty("opacity");
@@ -95,7 +107,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     document.body.prepend(results);
   }
   wire();
-  window.chrome = { runtime: { onMessage: { addListener(listener) { listeners.push(listener); } }, async sendMessage(value) {
+  window.chrome = { runtime: { getManifest() { return { version: "0.8.6" }; }, onMessage: { addListener(listener) { listeners.push(listener); } }, async sendMessage(value) {
     messages.push(structuredClone(value));
     if (value.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: structuredClone(state) } };
     if (value.type === "KAI_TRACKER_RUN_WAIT") return new Promise((resolve) => { window.setTimeout(() => resolve({ ok: true, result: { stopped: state?.id !== value.runId } }), value.milliseconds); });
@@ -159,6 +171,85 @@ test("React replacing a selected Jobright card with the same job does not lose i
   assert.deepEqual(h.selections, [fixture.A, fixture.B]);
   assert.deepEqual(h.actions, []);
   assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
+test("an authorized Jobright selection can capture exact loaded details after its entire card unmounts", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, removeCardOnOpen: true });
+  const original = h.document.querySelector(".job-card-flag-classname");
+  await h.advance(4500);
+  assert.equal(original.isConnected, false);
+  assert.equal(h.document.getElementById(fixture.A), null);
+  await h.advance(180_000);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.equal(h.captures[0].job.company, "Company 1");
+  assert.equal(h.captures[0].job.title, "Software Engineer 1");
+  assert.equal(h.captures[0].job.selectedRegion, "us");
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+for (const failure of ["wrong metadata", "stale job detail", "missing description"]) test(`an unmounted Jobright card cannot authorize ${failure}`, async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, removeCardOnOpen: true,
+    detailsOnOpen(details) {
+      if (failure === "wrong metadata") for (const node of details.querySelectorAll("[data-time-filter-job]")) node.setAttribute("data-time-filter-job", fixture.B);
+      else if (failure === "stale job detail") details.innerHTML = fixture.details(fixture.job(fixture.B));
+      else details.querySelector("#overview-1").remove();
+    } });
+  await h.advance(180_000);
+  assert.equal(h.captures.length, 0);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, fixture.A);
+  assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.equal(report?.job.trackerVersion, "0.8.6");
+  assert.ok(report.job.verificationReason.length > 0 && report.job.verificationReason.length <= 2000);
+  assert.deepEqual(h.actions, []);
+});
+
+test("an unmounted selected Jobright card cannot bypass a committed country change", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, removeCardOnOpen: true, changedCountryInDetail: true });
+  await h.advance(4500);
+  assert.equal(h.document.getElementById(fixture.A), null);
+  await h.advance(80_000);
+  assert.equal(h.captures.length, 0);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
+});
+
+test("one bounded Jobright detail retry rebinds a fresh same-job card before the single capture", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, replaceCardOnOpen: value => ({ ...value }),
+    detailsOnOpen(details, _value, opens) {
+      if (opens === 1) for (const node of details.querySelectorAll("[data-time-filter-job]")) node.setAttribute("data-time-filter-job", fixture.B);
+    } });
+  const original = h.document.querySelector(".job-card-flag-classname");
+  await h.advance(180_000);
+  assert.equal(original.isConnected, false);
+  assert.deepEqual(h.selections, [fixture.A, fixture.A]);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  assert.deepEqual(h.actions, []);
+});
+
+for (const invalid of ["duplicate selected card", "duplicate selected ID with a different employer", "changed linked job ID"]) test(`a present ${invalid} cannot use the absent-card detail authority`, async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true,
+    detailsOnOpen(details, value) {
+      const card = details.ownerDocument.getElementById(value.id);
+      if (invalid.startsWith("duplicate")) {
+        const duplicate = card.cloneNode(true);
+        if (invalid.includes("different employer")) duplicate.querySelector("[class*='index_company-name__']").textContent = "Different Employer";
+        card.after(duplicate);
+      }
+      else card.querySelector("a").href = `/jobs/info/${fixture.B}`;
+    } });
+  await h.advance(180_000);
+  assert.equal(h.captures.length, 0);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.equal(report?.job.jobId, fixture.A);
+  assert.ok(report.job.verificationReason.length > 0);
+  assert.deepEqual(h.actions, []);
 });
 
 for (const changed of [{ company: "Different Employer" }, { title: "Different Vacancy" }]) test(`a replacement card with a changed ${Object.keys(changed)[0]} cannot authorize the original capture`, async (t) => {
@@ -374,6 +465,34 @@ test("manual capture requires trusted primary card selection and waits for exact
   await h.advance(3000); assert.equal(h.captures.length, 1); assert.equal(h.captures[0].runId, undefined);
   assert.equal(h.captures[0].job.jobId, fixture.A);
 });
+test("a trusted manual Jobright selection waits for exact details after its card unmounts", async (t) => {
+  const h = setup(t, { autoStart: false, jobs: [fixture.job()] });
+  const card = h.document.querySelector(".job-card-flag-classname");
+  h.click(card.querySelector("h2")); card.querySelector("a").click(); card.remove();
+  await h.advance(200);
+  assert.equal(h.captures.length, 0, "unmounting the card does not make unfinished details ready");
+  await h.advance(3000);
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.captures[0].runId, undefined);
+  assert.equal(h.captures[0].job.jobId, fixture.A);
+  assert.equal(h.captures[0].job.company, "Company 1");
+  assert.equal(h.captures[0].job.title, "Software Engineer 1");
+  assert.deepEqual(h.actions, []);
+});
+
+for (const failure of ["wrong metadata", "missing description"]) test(`a trusted manual selection with an unmounted card rejects ${failure}`, async (t) => {
+  const h = setup(t, { autoStart: false, jobs: [fixture.job()], detailsOnOpen(details) {
+    if (failure === "wrong metadata") for (const node of details.querySelectorAll("[data-time-filter-job]")) node.setAttribute("data-time-filter-job", fixture.B);
+    else details.querySelector("#overview-1").remove();
+  } });
+  const card = h.document.querySelector(".job-card-flag-classname");
+  h.click(card.querySelector("h2")); card.querySelector("a").click(); card.remove();
+  await h.advance(16_000);
+  assert.equal(h.captures.length, 0);
+  assert.equal(h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED")?.job.jobId, fixture.A);
+  assert.deepEqual(h.actions, []);
+});
+
 test("manual popup scraping and search context use the same verified adapter", async (t) => {
   const h = setup(t, { autoStart: false, jobs: [fixture.job()] });
   assert.equal((await h.request({ type: "SCRAPE_LINKEDIN_JOB" })).ok, false);

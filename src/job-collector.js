@@ -59,7 +59,10 @@
     function matchingJob(run, record, previous) {
       if (!check(run)) return null;
       run.detailFailure = "The selected job card is missing, changed, or filtered.";
-      if (!adapter.activeCard(record)) return null;
+      if (!adapter.activeCard(record)) {
+        run.detailFailure = adapter.detailFailure?.(record) || run.detailFailure;
+        return null;
+      }
       const job = adapter.scrape();
       const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
       if (!job || job.jobIdSource === "query" || String(job.jobId) !== record.id ||
@@ -114,7 +117,7 @@
       let job = await details(run, record, previous);
       // A Jobright SPA transition can fail before any write. Reopen the same
       // verified card once; captures and uncertain saves are never retried.
-      if (!job && check(run) && adapter.activeCard(record) && typeof adapter.recoverDetails === "function") {
+      if (!job && check(run) && typeof adapter.recoverDetails === "function") {
         adapter.status(`Reopening details for ${record.company}…`, run.state);
         try {
           const reopened = await adapter.recoverDetails(record);

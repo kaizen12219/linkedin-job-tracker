@@ -111,6 +111,47 @@ test('explicit whitelist omits private data and redacts tokens from errors, prom
   assert.equal(report.research.diagnostics.events[0].result.decision, 'save');
 });
 
+test('capture verification reports retain the actual readiness reason and tracker version', async () => {
+  const f = fixture(), captured = { ...job(), verificationReason: 'The rendered metadata identifies another job while the selected card is unmounted.', trackerVersion: '0.8.6' };
+  await f.create().record(captured, { stage: 'capture', status: 'failed', reason: 'Selected job details could not be confirmed.',
+    error: { code: 'DETAILS_NOT_CONFIRMED', message: 'Selected job details could not be confirmed.' } });
+  const report = [...f.files.values()][0];
+  assert.equal(report.job.verificationReason, captured.verificationReason);
+  assert.equal(report.job.trackerVersion, '0.8.6');
+  assert.equal(report.error.code, 'DETAILS_NOT_CONFIRMED');
+  assert.equal(report.stage, 'capture');
+});
+
+test('verification reason and tracker version stay bounded and redact secrets before writing', async () => {
+  const f = fixture(), captureRef = 'f'.repeat(64), apiKey = 'sk-proj-' + 'K'.repeat(24);
+  const reason = `Rendered metadata mismatch; captureRef=${captureRef} client_nonce=TEST_PRIVATE_NONCE ${apiKey}; ${'diagnostic '.repeat(500)}`;
+  const version = `0.8.6 Bearer TEST_VERSION_SECRET ${'v'.repeat(200)}`;
+  await f.create().record({ ...job(), verificationReason: reason, trackerVersion: version, privateReadiness: 'PRIVATE_DIAGNOSTICS' },
+    { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { diagnostics: { job: { verificationReason: reason, trackerVersion: version } } } });
+  const report = [...f.files.values()][0], raw = JSON.stringify(report);
+  assert.ok(report.job.verificationReason.length <= 2000);
+  assert.ok(report.job.trackerVersion.length <= 64);
+  assert.match(report.job.verificationReason, /^Rendered metadata mismatch/u);
+  assert.match(report.job.verificationReason, /\[redacted\]/u);
+  assert.match(report.job.trackerVersion, /^0\.8\.6 Bearer \[redacted\]/u);
+  assert.equal(report.research.diagnostics.job.verificationReason, report.job.verificationReason);
+  assert.equal(report.research.diagnostics.job.trackerVersion, report.job.trackerVersion);
+  for (const secret of [captureRef, apiKey, 'TEST_PRIVATE_NONCE', 'TEST_VERSION_SECRET', 'PRIVATE_DIAGNOSTICS']) assert.equal(raw.includes(secret), false);
+});
+
+test('verification diagnostics accept only strings and omit nested or scalar non-text data', async () => {
+  for (const invalid of [{ reason: 'private nested detail' }, ['nested detail'], 42, true, null]) {
+    const f = fixture();
+    await f.create().record({ ...job(), verificationReason: invalid, trackerVersion: invalid },
+      { stage: 'capture', status: 'failed', reason: 'Details not confirmed.', research: { job: { verificationReason: invalid, trackerVersion: invalid } } });
+    const report = [...f.files.values()][0];
+    assert.equal(report.job.verificationReason, undefined);
+    assert.equal(report.job.trackerVersion, undefined);
+    assert.equal(report.research.job.verificationReason, undefined);
+    assert.equal(report.research.job.trackerVersion, undefined);
+  }
+});
+
 test('retry history stays bounded without repeating full descriptions and prompts', async () => {
   const f = fixture(), reports = f.create(), requestId = randomUUID();
   for (let retryCount = 1; retryCount <= 55; retryCount++) await reports.record(job(), { requestId, stage: 'research', status: 'pending',
