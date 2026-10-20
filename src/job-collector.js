@@ -57,13 +57,25 @@
       return false;
     }
     function matchingJob(run, record, previous) {
-      if (!check(run) || !adapter.activeCard(record)) return null;
+      if (!check(run)) return null;
+      run.detailFailure = "The selected job card is missing, changed, or filtered.";
+      if (!adapter.activeCard(record)) return null;
       const job = adapter.scrape();
       const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
       if (!job || job.jobIdSource === "query" || String(job.jobId) !== record.id ||
-        key(job.company) !== key(record.company) || key(job.title) !== key(record.title) || !job.description?.trim() ||
-        (job.applicationsAvailable === false && !job.applicationsClosed) ||
-        (previous && String(previous.jobId) !== record.id && previous.description && job.description === previous.description)) return null;
+        key(job.company) !== key(record.company) || key(job.title) !== key(record.title) || !job.description?.trim()) {
+        run.detailFailure = adapter.detailFailure?.(record) || "The rendered details do not match the selected job's ID, title, and company.";
+        return null;
+      }
+      if (job.applicationsAvailable === false && !job.applicationsClosed) {
+        run.detailFailure = "The selected job has no ready application control or verified external application link.";
+        return null;
+      }
+      if (previous && String(previous.jobId) !== record.id && previous.description && job.description === previous.description) {
+        run.detailFailure = "The selected job still shows the previous job's description.";
+        return null;
+      }
+      run.detailFailure = "The selected job's details did not remain stable long enough to verify.";
       return job;
     }
     async function details(run, record, previous) {
@@ -100,9 +112,23 @@
       try { adapter.select(record); }
       catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
       let job = await details(run, record, previous);
+      // A Jobright SPA transition can fail before any write. Reopen the same
+      // verified card once; captures and uncertain saves are never retried.
+      if (!job && check(run) && adapter.activeCard(record) && typeof adapter.recoverDetails === "function") {
+        adapter.status(`Reopening details for ${record.company}…`, run.state);
+        try {
+          const reopened = await adapter.recoverDetails(record);
+          if (reopened !== false) job = await details(run, record, previous);
+        } catch (error) {
+          run.state.counts.skipped++;
+          await notSaved(run, record, "DETAILS_NOT_CONFIRMED", `${run.detailFailure} Reopening failed: ${error.message}`);
+          throw error;
+        }
+      }
       if (!job) {
         run.state.counts.skipped++;
-        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "Stable details matching the selected job could not be verified before the timeout.");
+        const detailFailure = typeof run.detailFailure === "string" ? run.detailFailure.slice(0, 2000) : "Stable details matching the selected job could not be verified before the timeout.";
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", detailFailure);
         return;
       }
       const reviewedJob = job;

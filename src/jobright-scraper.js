@@ -3,6 +3,7 @@
   const ID = /^[a-f0-9]{24}$/u;
   const CARD = ".job-card-flag-classname[id]";
   const clean = (value) => String(value || "").replace(/\u00a0/gu, " ").replace(/\s+/gu, " ").trim();
+  const identityText = (value) => clean(value).toLocaleLowerCase("en-US");
   const text = (node) => clean(node?.innerText || node?.textContent);
   function jobId(value) {
     try {
@@ -83,7 +84,7 @@
       if (!link || !card.contains(link) || jobId(link.getAttribute("href")) !== id) return null;
       const title = text(heading), company = text(card.querySelector("[class*='index_company-name__']"));
       if (!title || !company) return null;
-      return { card, link, id, captureId: id, title, company, identity: JSON.stringify([id, company.toLocaleLowerCase("en-US"), title]) };
+      return { card, link, id, captureId: id, title, company, identity: JSON.stringify([id, identityText(company), identityText(title)]) };
     }).filter(Boolean);
   }
   function sectionText(overview) {
@@ -112,23 +113,36 @@
     if (!id) throw new Error("Open a Jobright job's details before saving it.");
     const context = searchContext(doc, sourceUrl);
     if (context.selectedRegion !== "us" || context.selectedRegionSource !== "search-control") throw new Error("Select United States in Jobright's country filter before saving or collecting jobs.");
-    const heading = [...doc.querySelectorAll("h1[class*='index_job-title__']")].find(visible);
-    const companyJob = heading?.closest("[class*='index_company-job__']");
+    const headings = [...doc.querySelectorAll("h1[class*='index_job-title__']")].filter(visible);
+    if (!headings.length) throw new Error("Jobright's selected job details are not ready.");
+    const candidates = headings.map((heading) => {
+      const companyJob = heading.closest("[class*='index_company-job__']");
+      const detail = heading.closest("[class*='index_jobDetailContent__']");
+      const panel = heading.closest("[class*='index_jobMainContentInfo']") || heading.closest("[class*='index_jobSimpleIntroduction']")?.parentElement || companyJob?.parentElement;
+      if (!detail || !panel || !detail.contains(panel)) return null;
+      const ids = [...new Set([...panel.querySelectorAll("[data-time-filter-job]")].map((node) => node.getAttribute("data-time-filter-job")).filter((value) => ID.test(value || "")))];
+      return { heading, companyJob, detail, panel, ids };
+    }).filter(Boolean);
+    // The URL changes before the SPA finishes rendering. Select only one
+    // visible detail panel whose own rendered metadata proves its job ID.
+    // An old panel for another ID cannot mask the new job or lend it a JD.
+    const selected = candidates.filter((candidate) => candidate.ids.length === 1 && candidate.ids[0] === id);
+    if (selected.length !== 1) {
+      if (selected.length > 1) throw new Error("Jobright's selected job details are still changing: multiple detail panels identify this job.");
+      const metadataIds = candidates.flatMap((candidate) => candidate.ids);
+      throw new Error(metadataIds.length ? "Jobright's selected job details are still changing: the rendered job ID does not match the selected page." : "Jobright's selected job details are still changing: the rendered job ID is not available.");
+    }
+    const { heading, companyJob, detail, panel } = selected[0];
     const title = text(heading);
     const company = text(companyJob?.querySelector("h2")).replace(/\s*[·•]\s*.*$/u, "").trim();
-    const detail = heading?.closest("[class*='index_jobDetailContent__']");
-    const overview = [...(detail?.querySelectorAll("#overview-1") || [])].find(visible);
+    const overviews = [...detail.querySelectorAll("#overview-1")].filter((node) => visible(node));
+    if (overviews.length > 1 || overviews.some((node) => node.closest("[class*='index_jobDetailContent__']") !== detail)) throw new Error("Jobright's selected job details are still changing: the description panel is ambiguous.");
+    const overview = overviews[0];
     if (!title || !company || !overview) throw new Error("Jobright's selected job details are not ready.");
     const description = sectionText(overview);
     if (!description) throw new Error("The selected job's responsibilities or qualifications are not readable yet.");
-    const panel = heading.closest("[class*='index_jobMainContentInfo']") || heading.closest("[class*='index_jobSimpleIntroduction']")?.parentElement || companyJob.parentElement;
-    const detailIds = [...new Set([...panel.querySelectorAll("[data-time-filter-job]")].map((node) => node.getAttribute("data-time-filter-job")).filter((value) => ID.test(value || "")))];
-    // The SPA updates its URL before the detail fetch finishes. The observed
-    // metadata carries the rendered detail's ID, unlike the navigation URL.
-    if (detailIds.length !== 1 || detailIds[0] !== id) throw new Error("Jobright's selected job details are still changing.");
     const closed = /(?:no longer accepting applications|this job (?:has )?expired|applications (?:are )?closed|job (?:is )?no longer available)/iu.test(text(detail));
     const applyButton = detail.querySelector("#apply-now-button-id");
-    const applicationsAvailable = !closed && !!applyButton && !applyButton.disabled && applyButton.getAttribute("aria-disabled") !== "true";
     const original = [...detail.querySelectorAll("a[href]")].find((anchor) => /^Original Job Post$/iu.test(text(anchor)));
     let applyUrl = `https://jobright.ai/jobs/info/${id}`;
     if (original) {
@@ -138,8 +152,11 @@
         if (external) applyUrl = external;
       } catch { /* Retain the portal reference. */ }
     }
+    // Some ordinary external listings expose only their Original Job Post.
+    // A disabled in-portal Apply control still takes precedence over that URL.
+    const applicationsAvailable = !closed && (applyButton ? !applyButton.disabled && applyButton.getAttribute("aria-disabled") !== "true" : !!root.JobCapturePolicy?.publicUrl(applyUrl));
     const selectedCard = cards(doc).find((record) => record.id === id);
-    if (selectedCard && (selectedCard.title !== title || selectedCard.company !== company)) throw new Error("Jobright's selected job details are still changing.");
+    if (selectedCard && (identityText(selectedCard.title) !== identityText(title) || identityText(selectedCard.company) !== identityText(company))) throw new Error("Jobright's selected job details are still changing: the card and detail company/title do not match.");
     const remote = panel.querySelector(`[data-time-filter-job='${id}'][data-time-filter-field='workModel']`) ||
       selectedCard?.card.querySelector("[class*='index_job-metadata-item__'] svg[aria-label='remote']")?.closest("[class*='index_job-metadata-item__']");
     const remoteLabel = text(remote);

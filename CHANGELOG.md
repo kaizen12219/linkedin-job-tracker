@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.5 — 2026-10-21
+
+- Follow the same Jobright job when its card is remounted, using its ID, title and company instead of a stale DOM node. Match harmless casing differences and select the unique detail panel whose rendered metadata identifies that job.
+- Reopen an unreadable detail view once before any capture, then report the specific verification failure and continue to subsequent jobs. Never retry an uncertain save.
+- Allow a captured public external application link when Jobright omits its Apply control. Keep strict search, rendered-job identity, closure and profile-routing checks; show collection progress on the page.
+
 ## 0.8.4 — 2026-10-21
 
 - Treat Jobright jobs with captured public external links like ordinary LinkedIn Apply jobs. Remove forced Easy Apply classification from the scraper, research client and local worker; portal-only or unusable originals still require route research.

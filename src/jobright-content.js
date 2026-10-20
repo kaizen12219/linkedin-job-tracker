@@ -4,16 +4,49 @@
   window.__JOBRIGHT_JOB_TRACKER_READY__ = true;
   const scraper = () => window.JobrightJobScraper;
   const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
-  let classificationTimer, classificationVersion = 0, manualTimer, selection = null, selecting = false;
+  let classificationTimer, classificationVersion = 0, manualTimer, selection = null, selecting = false, scrapeFailure = "";
   let collection = null, collectionId = "", startVersion = 0, waiting = null, notice, noticeTimer, lastScrollAt = 0;
   const captured = new Set();
   const records = () => scraper()?.cards(document) || [];
   const context = () => scraper()?.searchContext(document, window.location.href) || { filterKey: "", selectedRegion: "", selectedRegionSource: "" };
-  const sameCard = (record) => record.card.isConnected && records().some((item) => item.card === record.card && item.identity === record.identity);
-  const safeScrape = () => { try { return scraper()?.scrape(document, window.location.href) || null; } catch { return null; } };
-  const active = (record) => sameCard(record) && !captured.has(record.identity) && !["banned", "duplicate"].includes(record.card.getAttribute("data-kai-flow-job-state")) &&
-    record.card.getAttribute("aria-disabled") !== "true";
+  const currentRecord = (record) => {
+    if (!record) return null;
+    // React can replace the mounted card when its details open. Rebind only
+    // the same unambiguous job identity, never a reused card or changed role.
+    const matches = records().filter((item) => item.id === record.id && key(item.company) === key(record.company) && key(item.title) === key(record.title));
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const safeScrape = () => {
+    try {
+      const job = scraper()?.scrape(document, window.location.href) || null;
+      scrapeFailure = job ? "" : "The Jobright scraper is not available.";
+      return job;
+    } catch (error) {
+      scrapeFailure = String(error?.message || "The selected Jobright details could not be read.").slice(0, 1000);
+      return null;
+    }
+  };
+  const active = (record) => {
+    const current = currentRecord(record);
+    return !!current && !captured.has(current.identity) && !["banned", "duplicate"].includes(current.card.getAttribute("data-kai-flow-job-state")) &&
+      current.card.getAttribute("aria-disabled") !== "true";
+  };
+  function selectRecord(record) {
+    const current = currentRecord(record);
+    if (!current || !active(record) || !current.link.isConnected || scraper().jobId(current.link.href) !== record.id) throw new Error("The selected job card changed.");
+    selecting = true;
+    try { current.link.click(); }
+    finally { selecting = false; }
+  }
   const matches = (job, record) => job && job.jobIdSource === "details" && job.jobId === record.id && key(job.company) === key(record.company) && key(job.title) === key(record.title) && job.description?.trim();
+  function detailFailure(record) {
+    if (!currentRecord(record)) return "The selected Jobright card is missing, ambiguous, or its company/title changed.";
+    const job = safeScrape();
+    if (!job) return scrapeFailure;
+    if (!matches(job, record)) return "The rendered Jobright details do not match the selected job ID, company, and title.";
+    if (job.applicationsAvailable === false && !job.applicationsClosed) return "The selected Jobright job has no available Apply control or verified external Original Job Post.";
+    return "The selected Jobright details did not remain stable before capture.";
+  }
   function scheduleClassification(delay = 300) {
     clearTimeout(classificationTimer);
     classificationTimer = setTimeout(() => void classifyCards(), delay);
@@ -27,10 +60,11 @@
     if (!response?.ok || version !== classificationVersion) return;
     const states = new Map((response.result?.companies || []).map((item) => [key(item.company), item]));
     for (const record of cards) {
-      if (!sameCard(record)) continue;
+      const current = currentRecord(record);
+      if (!current) continue;
       const match = states.get(key(record.company));
-      if (match?.banned || match?.duplicate) record.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate");
-      else record.card.removeAttribute("data-kai-flow-job-state");
+      if (match?.banned || match?.duplicate) current.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate");
+      else current.card.removeAttribute("data-kai-flow-job-state");
     }
   }
   async function message(value) {
@@ -41,7 +75,7 @@
   }
   async function notSaved(record, { code, job, reason } = {}, runId) {
     if (!/^[a-f0-9]{24}$/u.test(record?.id || "") || !record.company || !record.title) return;
-    const state = sameCard(record) && record.card.getAttribute("data-kai-flow-job-state");
+    const state = currentRecord(record)?.card.getAttribute("data-kai-flow-job-state");
     if (state === "banned") code = "BANNED_COMPANY";
     else if (state === "duplicate") code = "DUPLICATE_COMPANY";
     if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
@@ -86,7 +120,6 @@
     try { await chrome.runtime.sendMessage({ type: "KAI_TRACKER_CAPTURE", job }); } catch { /* Do not retry an uncertain write automatically. */ }
   }
   function status(text, state, finished = false) {
-    if (!finished && text !== "Job collection started." && text !== "Job collection stopped." && !text.startsWith("Stopped —")) return;
     clearTimeout(noticeTimer); notice?.remove();
     notice = document.createElement("div"); notice.dataset.jobTrackerCollection = "true"; notice.setAttribute("role", finished && !text.startsWith("Finished") ? "alert" : "status"); notice.textContent = text;
     Object.assign(notice.style, { position: "fixed", bottom: "18px", right: "18px", zIndex: "2147483647", maxWidth: "360px", padding: "12px 14px", borderRadius: "8px", background: "#193044", color: "white", font: "13px/1.5 Arial,sans-serif", pointerEvents: "none" });
@@ -138,20 +171,39 @@
       return current.filterKey === frozen && current.selectedRegion === "us" ? window.LinkedInJobCollector.searchKey(window.location.href) : "";
     };
     if (!frozen || searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
-    async function returnToResults() {
-      if (!scraper().jobId(window.location.href)) return;
+    async function returnToResults({ recover = false } = {}) {
+      if (!scraper().jobId(window.location.href)) return true;
       const close = document.querySelector("button[id*='job-detail-close-button']");
-      if (!close || close.disabled || close.getAttribute("aria-disabled") === "true") throw new Error("The Jobright detail view could not be closed. Job collection stopped.");
+      let control = close && !close.disabled && close.getAttribute("aria-disabled") !== "true" ? close : null;
+      if (!control) {
+        control = [...document.querySelectorAll("a[href]")].find((anchor) => {
+          try {
+            const url = new URL(anchor.href, window.location.href);
+            if (url.origin !== window.location.origin || !/^\/jobs\/recommend\/?$/u.test(url.pathname) || window.LinkedInJobCollector.searchKey(url.href) !== state.searchKey) return false;
+            if (anchor.closest("[hidden], [aria-hidden='true'], [aria-disabled='true'], template, [inert]")) return false;
+            for (let current = anchor; current && current.nodeType === 1; current = current.parentElement) {
+              const style = window.getComputedStyle(current);
+              if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
+            }
+            return true;
+          } catch { return false; }
+        });
+      }
+      if (!control) {
+        if (recover) return false;
+        throw new Error("The Jobright detail view could not be closed. Job collection stopped.");
+      }
       // Only close the job details. Apply, Like, Hide and Orion keep their
-      // native behavior and are never part of collection navigation.
-      close.click();
+      // native behavior. Navigation may use an observed link to these exact
+      // results if the detail's close control never finished rendering.
+      control.click();
       for (let elapsed = 0; elapsed < 15_000; elapsed += 200) {
         if (version !== startVersion) throw new Error("Job collection stopped.");
         const current = context();
         if (window.LinkedInJobCollector.searchKey(window.location.href) !== state.searchKey ||
           (current.filterKey && (current.filterKey !== frozen || current.selectedRegion !== "us"))) throw new Error("The search changed. Job collection stopped.");
         const collapsed = document.querySelector("#jobs-page-main-content [class*='index_jobs-list__'][class*='index_jobs-list-leave__']");
-        if (!scraper().jobId(window.location.href) && !collapsed && searchKey() === state.searchKey) return;
+        if (!scraper().jobId(window.location.href) && !collapsed && searchKey() === state.searchKey) return true;
         if (!await wait(200, state.id)) throw new Error("Job collection stopped.");
       }
       throw new Error("The Jobright results did not return after closing details. Job collection stopped.");
@@ -169,21 +221,32 @@
       if (!records().length) throw new Error("Results did not finish loading. Job collection stopped.");
       selection = null; clearTimeout(manualTimer); collectionId = state.id; lastScrollAt = 0;
       collection = window.LinkedInJobCollector.create({
-        searchKey, wait, cards: records, activeCard: active, scrape: safeScrape, notSaved,
+        searchKey, wait, cards: records, activeCard: active, scrape: safeScrape, detailFailure, notSaved,
         async allowed(record) {
           if (!active(record)) return false;
           const check = await message({ type: "KAI_TRACKER_CLASSIFY_COMPANIES", companies: [record.company], refresh: false });
           if (!check?.ok) throw new Error(check?.error?.message || "Company checks are unavailable. Job collection stopped.");
           const match = check.result?.companies?.find((item) => key(item.company) === key(record.company));
           if (!match) throw new Error("Company checks are incomplete. Job collection stopped.");
-          if (match.banned || match.duplicate) { record.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate"); return false; }
+          if (match.banned || match.duplicate) { currentRecord(record)?.card.setAttribute("data-kai-flow-job-state", match.banned ? "banned" : "duplicate"); return false; }
           return active(record);
         },
         async top() { await returnToResults(); const target = scroller(); if (!target) throw new Error("The Jobright results list is unavailable."); target.scrollTo({ top: 0, behavior: "instant" }); },
-        async reveal(record) { await returnToResults(); if (!sameCard(record)) throw new Error("The selected job card changed."); record.card.scrollIntoView({ block: "center", behavior: "instant" }); },
-        select(record) {
-          if (!active(record) || !record.link.isConnected || scraper().jobId(record.link.href) !== record.id) throw new Error("The selected job card changed.");
-          selecting = true; try { record.link.click(); } finally { selecting = false; }
+        async reveal(record) {
+          await returnToResults();
+          const current = currentRecord(record);
+          if (!current) throw new Error("The selected job card changed.");
+          current.card.scrollIntoView({ block: "center", behavior: "instant" });
+        },
+        select: selectRecord,
+        async recoverDetails(record) {
+          if (!await returnToResults({ recover: true })) return false;
+          if (searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
+          const current = currentRecord(record);
+          if (!current || !active(current)) return false;
+          current.card.scrollIntoView({ block: "center", behavior: "instant" });
+          selectRecord(current);
+          return true;
         },
         async capture(job, runId) {
           if (job.searchContextKey !== frozen) throw new Error("The search changed. Job collection stopped.");

@@ -252,6 +252,56 @@ test("navigation URL alone cannot make stale rendered details a different job", 
   document.querySelector("[data-time-filter-job]").remove();
   assert.throws(() => api.scrape(), /still changing/u);
 });
+
+test("only the unique visible detail panel matching the requested metadata ID can be captured", (t) => {
+  const { api, document } = setup(t);
+  const stale = fixture.job(fixture.B, { company: "Stale Employer", title: "Stale Engineer" });
+  document.querySelector("#details").insertAdjacentHTML("afterbegin", fixture.details(stale));
+  const selected = api.scrape();
+  assert.equal(selected.jobId, fixture.A);
+  assert.equal(selected.company, "Company 1");
+  assert.equal(selected.title, "Software Engineer 1");
+  assert.match(selected.description, new RegExp(fixture.A, "u"));
+  assert.doesNotMatch(selected.description, new RegExp(fixture.B, "u"));
+  document.querySelector("#details").insertAdjacentHTML("beforeend", fixture.details(fixture.job()));
+  assert.throws(() => api.scrape(), /changing|ambiguous|multiple|confirmed/iu);
+});
+
+test("multiple visible overviews in one Jobright detail cannot mix their descriptions", (t) => {
+  const { api, document } = setup(t);
+  const selected = document.querySelector("#overview-1");
+  const duplicate = selected.cloneNode(true);
+  duplicate.querySelector("span[class*='index_listText__']").textContent = "Build unrelated systems for a different posting.";
+  selected.after(duplicate);
+  assert.throws(() => api.scrape(), /changing|ambiguous|multiple|confirmed/iu);
+  duplicate.hidden = true;
+  assert.match(api.scrape().description, new RegExp(fixture.A, "u"));
+  assert.doesNotMatch(api.scrape().description, /unrelated systems/u);
+});
+
+test("a nested foreign detail overview cannot be mistaken for the selected job description", (t) => {
+  const { api, document } = setup(t);
+  const selected = document.querySelector(".index_jobDetailContent__rhs3U");
+  const foreign = document.createElement("div"); foreign.className = "index_jobDetailContent__nested";
+  foreign.innerHTML = '<section id="overview-1"><h2>Responsibilities</h2><p>Build unrelated nested software for a different posting.</p></section>';
+  selected.append(foreign);
+  assert.throws(() => api.scrape(), /changing|ambiguous|multiple|confirmed/iu);
+  foreign.hidden = true;
+  assert.match(api.scrape().description, new RegExp(fixture.A, "u"));
+  assert.doesNotMatch(api.scrape().description, /unrelated nested/u);
+});
+
+test("case-only differences between the selected card and rendered detail are the same job", (t) => {
+  const { api, document } = setup(t);
+  document.querySelector(".index_company-job__header h2").textContent = "COMPANY 1 · 5 minutes ago";
+  document.querySelector("h1").textContent = "SOFTWARE ENGINEER 1";
+  const value = api.scrape();
+  assert.equal(value.jobId, fixture.A);
+  assert.equal(value.company, "COMPANY 1");
+  assert.equal(value.title, "SOFTWARE ENGINEER 1");
+  document.querySelector(".index_company-job__header h2").textContent = "Different Employer · 5 minutes ago";
+  assert.throws(() => api.scrape(), /still changing|identity|match/iu);
+});
 test("missing, draft, or non-US country filters cannot select a US profile", (t) => {
   const { api, document } = setup(t);
   const country = document.querySelector("[data-preference-key='country']");
@@ -291,9 +341,32 @@ test("Jobright keeps captured external apply links ordinary and portal reference
     assert.equal(api.scrape().isEasyApply, true, url);
   }
 });
-test("a missing or disabled Apply control cannot be treated as an active application", (t) => {
+test("an absent Apply widget can use a safe external original, while an explicitly disabled control remains blocked", (t) => {
   const { api, document } = setup(t);
   const button = document.querySelector("#apply-now-button-id"); button.disabled = true;
   assert.equal(api.scrape().applicationsAvailable, false);
-  button.remove(); assert.equal(api.scrape().applicationsAvailable, false); assert.equal(api.scrape().applicationsClosed, false);
+  button.remove();
+  assert.equal(api.scrape().applicationsAvailable, true);
+  assert.equal(api.scrape().isEasyApply, false);
+  assert.equal(api.scrape().applicationsClosed, false);
+  document.querySelector(".index_jobDetailContent__rhs3U").insertAdjacentHTML("beforeend", "<p>Applications are closed</p>");
+  assert.equal(api.scrape().applicationsAvailable, false);
+  assert.equal(api.scrape().applicationsClosed, true);
+});
+
+test("an absent Apply widget with only a missing, portal, or unsafe original stays unavailable", (t) => {
+  const { api, document } = setup(t);
+  document.querySelector("#apply-now-button-id").remove();
+  const original = document.querySelector("a[href^='https://careers']");
+  for (const url of [`https://jobright.ai/jobs/info/${fixture.A}`, "https://www.linkedin.com/jobs/view/123", "javascript:void(0)", "http://127.0.0.1/jobs/123",
+    "https://careers.example.com/redirect?url=" + encodeURIComponent(`https://jobright.ai/jobs/info/${fixture.A}`)]) {
+    original.setAttribute("href", url);
+    const value = api.scrape();
+    assert.equal(value.applicationsAvailable, false, url);
+    assert.equal(value.isEasyApply, true, url);
+    assert.equal(value.applyUrl, `https://jobright.ai/jobs/info/${fixture.A}`, url);
+  }
+  original.remove();
+  assert.equal(api.scrape().applicationsAvailable, false);
+  assert.equal(api.scrape().applicationsClosed, false);
 });

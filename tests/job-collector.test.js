@@ -150,6 +150,44 @@ test("uncertain saves stop without retrying the job or moving to another page", 
   assert.match(h.finishes[0].message, /Unconfirmed save/);
   assert.deepEqual(h.finishes[0].state.visited, ["1"]);
 });
+test("a failed detail transition reopens once before review and captures each job once", async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  let recovered = false;
+  const reopened = [];
+  h.adapter.scrape = () => recovered ? scrape() : null;
+  h.adapter.detailFailure = () => "Jobright's selected job details are still changing.";
+  h.adapter.recoverDetails = async (record) => { reopened.push(record.id); recovered = true; };
+  await h.advance(300_000);
+  assert.deepEqual(reopened, ["1"]);
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["1", "2"]);
+  assert.equal(h.reports.length, 0);
+  assert.equal(h.app.running(), false);
+});
+test("permanently unreadable details get one reopening, a precise report, and collection continues", async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  const reopened = [];
+  h.adapter.scrape = () => { const job = scrape(); return job?.jobId === "1" ? null : job; };
+  h.adapter.detailFailure = () => "The rendered panel metadata still identifies a different job.";
+  h.adapter.recoverDetails = async (record) => reopened.push(record.id);
+  await h.advance(300_000);
+  assert.deepEqual(reopened, ["1"]);
+  assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["2"]);
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].code, "DETAILS_NOT_CONFIRMED");
+  assert.match(h.reports[0].reason, /panel metadata/);
+  assert.equal(h.app.running(), false);
+});
+test("detail recovery is never invoked after an uncertain capture", async () => {
+  const h = harness([[row(1), row(2)]], { failure: { ok: false, error: { code: "TRACKER_SAVE_UNCONFIRMED", message: "Unconfirmed save" } } });
+  let reopened = 0;
+  h.adapter.recoverDetails = async () => reopened++;
+  await h.advance(300_000);
+  assert.equal(reopened, 0);
+  assert.equal(h.captures.length, 1);
+  assert.match(h.finishes[0].message, /Unconfirmed save/);
+});
 test("resume preserves attempted jobs and completed pages; repeated pages and changed searches stop", async () => {
   const resumed = harness([[row(1)], [row(2)]], { state: { visited: ["1"], pages: ["page-0"] } });
   await resumed.advance(300_000); assert.deepEqual(resumed.captures.map((entry) => entry.job.jobId), ["2"]);
