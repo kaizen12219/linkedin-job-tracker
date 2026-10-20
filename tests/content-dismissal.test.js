@@ -78,6 +78,7 @@ function harness(cards, options = {}) {
     Date: class extends Date { static now() { return time; } },
     document,
     window: { innerWidth: 1000, innerHeight: 800, location: { href: "https://www.linkedin.com/jobs/search/" },
+      ...(options.collector ? { LinkedInJobCollector: options.collector } : {}),
       ...(options.scrape ? { LinkedInJobScraper: { scrape: options.scrape } } : {}) },
     MutationObserver: class { observe() {} },
     clearTimeout: (id) => timers.delete(id),
@@ -91,6 +92,7 @@ function harness(cards, options = {}) {
       onMessage: { addListener: (callback) => listeners.push(callback) },
       async sendMessage(message) {
         messages.push(message);
+        if (message.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: null } };
         if (message.type === "KAI_TRACKER_CAPTURE") return { ok: true, result: { status: "researching" } };
         if (message.type === "KAI_TRACKER_NOT_SAVED") return { ok: true, result: { reported: true } };
         if (options.respond) {
@@ -139,6 +141,26 @@ test("a user card selection waits for the matching detail identity and captures 
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
   await app.advance(15_000);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
+});
+
+test("manual identical-role selection waits for a fresh description render through the shared collector check", async () => {
+  const target = card("BigID", "102"); target.title = "Senior Software Engineer";
+  let details = { jobId: "101", jobIdSource: "details", company: "BigID", title: target.title,
+    description: "Design and build production data services and maintain automated tests.", descriptionRenderId: "previous-render" };
+  const app = harness([target], { scrape: () => details, collector: { descriptionIsCurrent: require("../src/job-collector.js").descriptionIsCurrent } });
+  app.states.delete("BigID"); app.click(target, { isTrusted: true });
+  details = { ...details, jobId: "102", company: "BIGID", title: "SENIOR SOFTWARE ENGINEER" };
+  await app.advance(1000);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE").length, 0, "a header-only transition retains the previous body");
+  details = { ...details, descriptionRenderId: "new-body-render" };
+  await app.advance(400);
+  const captures = app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE");
+  assert.equal(captures.length, 1);
+  assert.equal(captures[0].job.jobId, "102");
+  assert.equal(captures[0].job.descriptionRenderId, "new-body-render");
+  await app.advance(12_000);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
 });
 
 test("an intended manual selection reports an expired details check once without including another job's description", async () => {

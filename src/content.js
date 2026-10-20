@@ -208,7 +208,7 @@
       !["duplicate", "banned"].includes(card.getAttribute("data-kai-flow-job-state"))) {
       let previous;
       try { previous = window.LinkedInJobScraper.scrape(document, window.location.href); } catch { /* Wait for readable details. */ }
-      captureSelection = { record, previousId: previous?.jobId, previousDescription: previous?.description,
+      captureSelection = { record, previousId: previous?.jobId, previousDescription: previous?.description, previousJob: previous,
         expiresAt: Date.now() + 10000, stableValue: "", stableAt: 0 };
       scheduleCapture(0);
     }
@@ -244,10 +244,11 @@
     if (!cardId || job.jobIdSource === "query" || String(job.jobId) !== String(cardId) || companyKey(job.company) !== companyKey(record.company) ||
       companyKey(job.title) !== companyKey(record.title) || !job.description?.trim()) { scheduleCapture(200); return; }
     if (job.applicationsAvailable === false && !job.applicationsClosed) { scheduleCapture(200); return; }
-    // Header and description can update in separate renders. A different job
-    // must replace the old description, and the full capture must settle.
-    if (String(selection.previousId) !== String(cardId) && selection.previousDescription &&
-      job.description === selection.previousDescription) { scheduleCapture(200); return; }
+    // Header and description can update separately. A new posting needs
+    // changed text or a fresh matching description render before settling.
+    const freshDescription = window.LinkedInJobCollector?.descriptionIsCurrent?.(job, selection.previousJob) ??
+      !(String(selection.previousId) !== String(cardId) && selection.previousDescription && job.description === selection.previousDescription);
+    if (!freshDescription) { scheduleCapture(200); return; }
     const stableValue = JSON.stringify([job.jobId, job.company, job.title, job.description, job.workplaceType, job.isEasyApply, job.applicationsClosed]);
     if (selection.stableValue !== stableValue) { selection.stableValue = stableValue; selection.stableAt = Date.now(); scheduleCapture(200); return; }
     if (Date.now() - selection.stableAt < 200) { scheduleCapture(200); return; }
@@ -259,7 +260,7 @@
     } catch { /* A failed capture does not interfere with native selection. */ }
   }
 
-  async function reportNotSaved(record, { code, reason, job } = {}, runId) {
+  async function reportNotSaved(record, { code, reason, job, verificationReason } = {}, runId) {
     const jobId = String(record?.captureId || "");
     if (!/^\d+$/u.test(jobId) || !record.company || !record.title) return;
     const classification = sameJob(record) ? record.card.getAttribute("data-kai-flow-job-state") : null;
@@ -268,7 +269,11 @@
     if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
     const verified = job && job.jobIdSource !== "query" && String(job.jobId) === jobId &&
       companyKey(job.company) === companyKey(record.company) && companyKey(job.title) === companyKey(record.title) && job.description?.trim();
+    const cause = (typeof verificationReason === "string" ? verificationReason : code === "DETAILS_NOT_CONFIRMED" ? collectionDetailFailure(record) : "").slice(0, 2000);
+    let trackerVersion = "";
+    try { trackerVersion = String(chrome.runtime.getManifest?.()?.version || "").slice(0, 64); } catch { /* Optional diagnostic metadata. */ }
     const snapshot = { jobId, company: record.company, title: record.title,
+      ...(cause ? { verificationReason: cause } : {}), ...(trackerVersion ? { trackerVersion } : {}),
       sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}/`, detailAvailability: verified ? "verified" : "unavailable" };
     if (verified) {
       for (const name of ["description", "workplaceType", "isEasyApply", "applicationsAvailable", "applicationsClosed", "selectedRegion", "selectedRegionSource"]) {
@@ -425,6 +430,27 @@
     const bounds = card.getBoundingClientRect();
     return bounds.width > 0 && bounds.height > 0 && style.display !== "none" && style.visibility !== "hidden" && Number(style.opacity || 1) > 0;
   }
+  let collectionScrapeError = "";
+  function scrapeCollectionJob() {
+    try {
+      const job = window.LinkedInJobScraper?.scrape(document, window.location.href) || null;
+      collectionScrapeError = job ? "" : "The LinkedIn scraper is not available.";
+      return job;
+    } catch (error) {
+      collectionScrapeError = String(error?.message || "The selected job details could not be read.").slice(0, 1000);
+      return null;
+    }
+  }
+  function collectionDetailFailure(record) {
+    if (!activeCollectionCard(record)) return "The selected LinkedIn card is missing, changed, or filtered.";
+    const job = scrapeCollectionJob();
+    if (!job) return collectionScrapeError;
+    if (job.jobIdSource === "query" || String(job.jobId) !== String(record.captureId)) return "The rendered LinkedIn detail ID does not match the selected job.";
+    if (companyKey(job.company) !== companyKey(record.company) || companyKey(job.title) !== companyKey(record.title)) return "The rendered LinkedIn company or title does not match the selected card.";
+    if (!job.description?.trim()) return "The selected LinkedIn job description is not readable yet.";
+    if (job.applicationsAvailable === false && !job.applicationsClosed) return "The selected LinkedIn job has no ready Apply control.";
+    return "The selected LinkedIn details did not remain stable before capture.";
+  }
   function ownCollectionSelection(record) {
     return collectionSelection?.record.card === record.card && collectionSelection.record.identity === record.identity ? collectionSelection : null;
   }
@@ -567,7 +593,8 @@
       wait: waitForCollection,
       cards: () => readableCards().map((record) => ({ ...record, id: record.captureId })),
       activeCard: activeCollectionCard,
-      notSaved: reportNotSaved,
+      notSaved(record, outcome, runId) { return reportNotSaved(record, { ...outcome, verificationReason: outcome.reason }, runId); },
+      detailFailure: collectionDetailFailure,
       async allowed(record) {
         if (!activeCollectionCard(record)) return false;
         const response = await collectionMessage({ type: "KAI_TRACKER_CLASSIFY_COMPANIES", companies: [record.company], refresh: false });
@@ -594,7 +621,7 @@
         // without waiting for a throttled hidden-page timer.
         clickDismissButton(record);
       },
-      scrape() { try { return window.LinkedInJobScraper?.scrape(document, window.location.href); } catch { return null; } },
+      scrape: scrapeCollectionJob,
       async capture(job, runId) {
         const response = await collectionMessage({ type: "KAI_TRACKER_CAPTURE", job, runId });
         if (response?.ok) {

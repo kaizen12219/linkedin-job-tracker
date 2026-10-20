@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.8 — 2026-10-21
+
+- Allow separate LinkedIn postings of the same role to share description text when the selected ID, company and title match and a fresh description render is observed. Keep unchanged old bodies and mismatched identities blocked.
+- Apply the same description-readiness rule to automatic and manual selection, and preserve the specific verification reason and extension version in LinkedIn failure reports.
+
 ## 0.8.7 — 2026-10-21
 
 - Recheck LinkedIn's live top-frame URL when its browser message retains a previous job ID after in-page navigation. Accept only the captured job in the same active document; mismatched jobs, sources, documents and frames remain blocked.

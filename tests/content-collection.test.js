@@ -8,12 +8,13 @@ const root = path.resolve(__dirname, "..");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const item = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: `Engineer ${id}`, description: `Job ${id}. ` + "Build useful software for our customers. ".repeat(15), ...extra });
 function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, covered = false, restoredVisited = [], renderDelay = 0, holdCapture = false,
-  standaloneTitle = false, dismissRemovesCard = false, reportError = false, locks = collectionLocks(), runId = "authorized-run" } = {}) {
+  standaloneTitle = false, dismissRemovesCard = false, reportError = false, detailTransition = null, locks = collectionLocks(), runId = "authorized-run" } = {}) {
   const dom = new JSDOM("<html><body><div class='jobs-search-results-list' style='overflow-y:auto'><ul></ul><nav class='jobs-search-pagination'></nav></div><div class='jobs-details'></div></body></html>", { url: SEARCH, runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const window = dom.window, document = window.document;
   let time = 0, timerId = 0, page = 0, scrollTop = 0, hidden = false;
   const timers = new Map(), captures = [], selections = [], dismissals = [], nextClicks = [], messages = [], listeners = [], notices = [];
+  const detailRenders = [];
   const append = document.documentElement.append.bind(document.documentElement);
   document.documentElement.append = (...nodes) => {
     for (const node of nodes) if (node.dataset?.collectionNotice) notices.push({ text: node.textContent, tone: node.dataset.collectionNotice, time });
@@ -59,6 +60,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
     target.innerHTML = `<div class='job-details-jobs-unified-top-card'><${heading}><a href='/jobs/view/${job.id}/'>${job.title}</a></${heading}><a href='/company/${job.id}/'>${job.company}</a><button>${job.workplace || "Remote"}</button><button>${job.easy ? "Easy Apply" : "Apply"}</button></div><div class='jobs-description__content'><div class='jobs-box__html-content'></div></div>`;
     target.querySelector(".jobs-box__html-content").setAttribute("data-testid", "expandable-text-box");
     target.querySelector(".jobs-box__html-content").textContent = job.description;
+    detailRenders.push({ id: job.id, time });
   }
   function render() {
     const list = document.querySelector("ul"); list.replaceChildren();
@@ -87,7 +89,10 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
         if (event.target.closest("button")) return;
         event.preventDefault(); selections.push({ id: job.id, time, target: event.target.tagName });
         window.history.replaceState({}, "", `${SEARCH}&start=${page * 25}&currentJobId=${job.id}`);
-        window.setTimeout(() => details(job), 450);
+        window.setTimeout(() => {
+          if (detailTransition) detailTransition(job, { document, window, renderDetails: details });
+          else details(job);
+        }, 450);
       }); list.append(card);
     });
     const pagination = document.querySelector("nav"); pagination.innerHTML = `<button aria-current='page'>${page + 1}</button><button aria-label='View next page'>Next</button>`;
@@ -125,7 +130,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
     }
   } };
   for (const file of ["scraper.js", "job-collector.js", "content.js"]) window.eval(fs.readFileSync(path.join(root, "src", file), "utf8"));
-  return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases,
+  return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases, detailRenders,
     releaseCapture() { releaseCapture(); },
     restart(id = "new-run") {
       state = { id, searchKey: SEARCH, visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
@@ -143,6 +148,69 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
     }
   };
 }
+function changeDetailHeader(document, job) {
+  const header = document.querySelector(".job-details-jobs-unified-top-card");
+  const title = header.querySelector("a[href*='/jobs/view/']");
+  title.href = `/jobs/view/${job.id}/`; title.textContent = job.title;
+  const company = header.querySelector("a[href*='/company/']");
+  company.href = `/company/${job.id}/`; company.textContent = job.company;
+}
+
+const identicalBigId = { company: "BigID", title: "Senior Software Engineer", easy: true,
+  description: "Design and build production data services, maintain automated tests, and improve service reliability. ".repeat(2) };
+
+test("distinct BigID postings with identical descriptions queue after each fresh detail render and collection continues", async (t) => {
+  const h = fixture(t, [[item(101, identicalBigId), item(102, { ...identicalBigId, company: "BIGID", title: "SENIOR SOFTWARE ENGINEER" }), item(103)]],
+    { modern: true, standaloneTitle: true, dismissRemovesCard: true });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101", "102", "103"]);
+  assert.equal(h.captures[0].job.description, h.captures[1].job.description);
+  assert.equal(h.captures[0].job.jobIdSource, "details");
+  assert.equal(h.captures[1].job.jobIdSource, "details");
+  assert.notEqual(h.captures[0].job.descriptionRenderId, h.captures[1].job.descriptionRenderId);
+  assert.deepEqual(h.dismissals, ["101", "102", "103"]);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
+test("a new LinkedIn header cannot authorize an identical description retained in the previous body node", async (t) => {
+  const h = fixture(t, [[item(101, identicalBigId), item(102, identicalBigId)]], { detailTransition(job, context) {
+    if (job.id === "102") changeDetailHeader(context.document, job);
+    else context.renderDetails(job);
+  } });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101"]);
+  const current = h.window.LinkedInJobScraper.scrape(h.document, h.window.location.href);
+  assert.equal(current.jobId, "102"); assert.equal(current.jobIdSource, "details");
+  assert.equal(current.descriptionRenderId, h.captures[0].job.descriptionRenderId);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "102"); assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
+});
+
+for (const changed of [{ id: "999" }, { company: "Different Employer" }, { title: "Different Vacancy" }]) test(`a fresh description render cannot override the wrong selected ${Object.keys(changed)[0]}`, async (t) => {
+  const h = fixture(t, [[item(101, identicalBigId), item(102, identicalBigId)]], { detailTransition(job, context) {
+    context.renderDetails(job.id === "102" ? { ...job, ...changed } : job);
+  } });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101"]);
+  const current = h.window.LinkedInJobScraper.scrape(h.document, h.window.location.href);
+  assert.notEqual(current.descriptionRenderId, h.captures[0].job.descriptionRenderId);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "102"); assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
+});
+
+test("a delayed LinkedIn body replacement must settle and receive a full review before capture", async (t) => {
+  const h = fixture(t, [[item(101, identicalBigId), item(102, identicalBigId)]], { detailTransition(job, context) {
+    if (job.id !== "102") { context.renderDetails(job); return; }
+    changeDetailHeader(context.document, job);
+    context.window.setTimeout(() => context.renderDetails(job), 8000);
+  } });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101", "102"]);
+  const committed = h.detailRenders.find(render => render.id === "102");
+  assert.ok(h.captures[1].time >= committed.time + 5000, "the newly rendered body receives its own review delay");
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
 test("legacy and modern result cards collect using actual scraper details, skip grey and banned cards, and stop at disabled Next", async (t) => {
   for (const modern of [false, true]) {
     const h = fixture(t, [[item(1), item(2, { workplace: "Hybrid" }), item(3, { dismissed: true }), item(4, { company: "Blocked" }), item(5, { company: "Company 1" })], [item(1), item(6, { easy: true })]], { modern });

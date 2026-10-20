@@ -56,3 +56,61 @@ test("missing Apply controls cannot be mistaken for an ordinary external-apply j
   const data = scrape(t, "Remote", "");
   assert.equal(data.applicationsAvailable, false);
 });
+
+function descriptionRenderFixture(t) {
+  const description = "Design and build production data services, maintain automated tests, and improve service reliability. ".repeat(3);
+  const dom = new JSDOM(`<div class="jobs-details"><div class="job-details-jobs-unified-top-card"><h1><a href="/jobs/view/101/">Senior Software Engineer</a></h1>
+    <a href="/company/bigid/">BigID</a><button>Remote</button><button>Easy Apply</button></div>
+    <section componentkey="JobDetails_AboutTheJob"><div data-testid="expandable-text-box">${description}</div></section></div>`,
+    { url: "https://www.linkedin.com/jobs/search/?currentJobId=101", runScripts: "outside-only" });
+  t.after(() => dom.window.close()); dom.window.eval(source);
+  return { api: dom.window.LinkedInJobScraper, document: dom.window.document, window: dom.window };
+}
+
+test("LinkedIn description render identity stays stable for an unchanged body despite header and URL updates", (t) => {
+  const { api, document, window } = descriptionRenderFixture(t);
+  const first = api.scrape();
+  assert.equal(typeof first.descriptionRenderId, "string");
+  assert.ok(first.descriptionRenderId.length > 0);
+  assert.equal(api.scrape().descriptionRenderId, first.descriptionRenderId);
+  const title = document.querySelector("h1 a"); title.href = "/jobs/view/102/";
+  title.textContent = "SENIOR SOFTWARE ENGINEER";
+  window.history.replaceState({}, "", "?currentJobId=102");
+  const headerChanged = api.scrape();
+  assert.equal(headerChanged.jobId, "102"); assert.equal(headerChanged.jobIdSource, "details");
+  assert.equal(headerChanged.descriptionRenderId, first.descriptionRenderId);
+  assert.equal(headerChanged.description, first.description);
+  assert.equal(JSON.parse(JSON.stringify(headerChanged)).descriptionRenderId, first.descriptionRenderId);
+  assert.ok(Object.values(headerChanged).every(value => !value || typeof value !== "object" || value.nodeType === undefined));
+});
+
+test("LinkedIn gives fresh description render identities to equal-text replacement nodes and text revisions", (t) => {
+  const { api, document } = descriptionRenderFixture(t);
+  const first = api.scrape();
+  const original = document.querySelector("[data-testid='expandable-text-box']");
+  const replacement = original.cloneNode(true); original.replaceWith(replacement);
+  const replaced = api.scrape();
+  assert.equal(original.isConnected, false);
+  assert.equal(replaced.description, first.description);
+  assert.notEqual(replaced.descriptionRenderId, first.descriptionRenderId);
+  assert.equal(api.scrape().descriptionRenderId, replaced.descriptionRenderId);
+  replacement.textContent += " Maintain newly introduced software services.";
+  const changed = api.scrape();
+  assert.notEqual(changed.descriptionRenderId, replaced.descriptionRenderId);
+  assert.equal(api.scrape().descriptionRenderId, changed.descriptionRenderId);
+  replacement.remove();
+  const missing = api.scrape();
+  assert.equal(missing.description, ""); assert.equal(missing.descriptionRenderId, "");
+});
+
+test("a global description fallback outside the selected details keeps its text without render authority", (t) => {
+  const { api, document } = descriptionRenderFixture(t);
+  const selected = api.scrape();
+  assert.ok(selected.descriptionRenderId);
+  const foreign = document.querySelector("[componentkey='JobDetails_AboutTheJob']");
+  document.body.append(foreign);
+  const fallback = api.scrape();
+  assert.equal(fallback.jobId, "101"); assert.equal(fallback.jobIdSource, "details");
+  assert.equal(fallback.description, selected.description, "existing fallback extraction still returns the same text");
+  assert.equal(fallback.descriptionRenderId, "", "a description from outside the selected detail cannot authorize a fresh render");
+});

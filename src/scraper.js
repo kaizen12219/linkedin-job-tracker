@@ -32,6 +32,8 @@
     /^(show|see|view|learn)\s+(more|less)(\s+about\s+(the\s+)?company)?\.?$/i,
     /^(follow|following|apply|save|share|search|results|job alert)$/i
   ];
+  const descriptionRenders = new WeakMap();
+  let descriptionRenderVersion = 0;
 
   function scrape(doc = document, sourceUrl = window.location.href) {
     const root = findJobDetailsRoot(doc);
@@ -46,6 +48,7 @@
       title: titleResult.value,
       company: companyResult.value,
       description: descriptionResult.value,
+      descriptionRenderId: descriptionResult.renderId || "",
       applyUrl: applyResult.value,
       ...metadata,
       selectedRegion: searchRegion.region,
@@ -207,14 +210,14 @@
     const scopedTextBox = aboutScope ? queryFirst(aboutScope, ['[data-testid="expandable-text-box"]']) : null;
 
     if (scopedTextBox) {
-      return result(readRichText(scopedTextBox), "about-section-expandable-text-box", 0.98);
+      return descriptionResultForNode(root, scopedTextBox, "about-section-expandable-text-box", 0.98);
     }
 
     const heading = findHeading(root || doc, ABOUT_HEADING_PATTERNS) || findHeading(doc, ABOUT_HEADING_PATTERNS);
     const textBoxNearHeading = heading ? findTextBoxNearHeading(heading) : null;
 
     if (textBoxNearHeading) {
-      return result(readRichText(textBoxNearHeading), "heading-near-expandable-text-box", 0.9);
+      return descriptionResultForNode(root, textBoxNearHeading, "heading-near-expandable-text-box", 0.9);
     }
 
     const longestExpandable = queryAll(doc, '[data-testid="expandable-text-box"]')
@@ -227,7 +230,7 @@
       .sort((a, b) => b.text.length - a.text.length)[0];
 
     if (longestExpandable) {
-      return result(longestExpandable.text, longestExpandable.source, 0.7);
+      return descriptionResultForNode(root, longestExpandable.element, longestExpandable.source, 0.7, longestExpandable.text);
     }
 
     const linkedInDescription = queryFirst(doc, [
@@ -237,10 +240,23 @@
     ]);
 
     if (linkedInDescription) {
-      return result(readRichText(linkedInDescription), "description-attribute", 0.6);
+      return descriptionResultForNode(root, linkedInDescription, "description-attribute", 0.6);
     }
 
     return result("", "not-found", 0);
+  }
+
+  function descriptionResultForNode(root, element, source, confidence, value = readRichText(element)) {
+    if (!root?.contains(element)) return { ...result(value, source, confidence), renderId: "" };
+    // Identical descriptions can belong to distinct postings. Record whether
+    // the selected description itself rendered again, independently of its
+    // header and the SPA URL; exporting a token keeps DOM nodes private.
+    let rendered = descriptionRenders.get(element);
+    if (!rendered || rendered.text !== value) {
+      rendered = { text: value, id: `linkedin-description:${++descriptionRenderVersion}` };
+      descriptionRenders.set(element, rendered);
+    }
+    return { ...result(value, source, confidence), renderId: rendered.id };
   }
 
   function extractApplyUrl(doc, root, sourceUrl) {

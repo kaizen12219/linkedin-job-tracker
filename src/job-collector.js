@@ -18,6 +18,19 @@
     // Half the original review time, with the same description sizing and jitter.
     return Math.round(0.5 * Math.min(90_000, Math.max(10_000, Math.min(80_000, words / (220 + random() * 100) * 60_000) * (0.85 + random() * 0.3))));
   }
+  function descriptionIsCurrent(job, previous) {
+    if (!previous || String(previous.jobId) === String(job?.jobId) || !previous.description || job?.description !== previous.description) return true;
+    const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+    // Separate postings of the same role can have identical text. Require a
+    // fresh description render as well as the exact rendered role identity;
+    // changing only the header must never authorize the previous job's body.
+    return job?.jobIdSource === "details" && previous.jobIdSource === "details" &&
+      !!key(job.company) && key(job.company) === key(previous.company) &&
+      !!key(job.title) && key(job.title) === key(previous.title) &&
+      typeof job.descriptionRenderId === "string" && !!job.descriptionRenderId &&
+      typeof previous.descriptionRenderId === "string" && !!previous.descriptionRenderId &&
+      job.descriptionRenderId !== previous.descriptionRenderId;
+  }
   function create(adapter, { random = Math.random, now = () => Date.now(), schedule = setTimeout, unschedule = clearTimeout } = {}) {
     let current = null;
     const actionDelay = () => Math.round(450 + random() * 800);
@@ -74,8 +87,8 @@
         run.detailFailure = "The selected job has no ready application control or verified external application link.";
         return null;
       }
-      if (previous && String(previous.jobId) !== record.id && previous.description && job.description === previous.description) {
-        run.detailFailure = "The selected job still shows the previous job's description.";
+      if (!descriptionIsCurrent(job, previous)) {
+        run.detailFailure = "The selected job still shows the previous description without a fresh matching role render.";
         return null;
       }
       run.detailFailure = "The selected job's details did not remain stable long enough to verify.";
@@ -262,7 +275,7 @@
     }
     return Object.freeze({ start, stop, running: () => !!current, completion: () => current?.completion });
   }
-  const api = Object.freeze({ create, searchKey, reviewDelay });
+  const api = Object.freeze({ create, searchKey, reviewDelay, descriptionIsCurrent });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.LinkedInJobCollector = api;
 })(typeof globalThis === "undefined" ? this : globalThis);

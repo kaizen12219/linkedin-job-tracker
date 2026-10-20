@@ -1,6 +1,6 @@
 {
   "name": "linkedin-job-tracker-extension",
-  "version": "0.8.7",
+  "version": "0.8.8",
   "private": true,
   "description": "Capture LinkedIn and Jobright jobs directly in ApplicantAlly’s data folder, with automatic profile selection.",
   "scripts": {

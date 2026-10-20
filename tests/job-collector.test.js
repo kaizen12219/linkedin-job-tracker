@@ -90,6 +90,24 @@ test("review time grows with description size and stays within variable bounded 
     assert.ok(delay >= 5_000 && delay <= 45_000);
   }
 });
+test("identical descriptions across postings require a fresh render of the same explicitly identified role", () => {
+  const previous = { jobId: "101", jobIdSource: "details", company: "BigID", title: "Senior IT Operations Engineer",
+    description: "Build and maintain production automation and identity systems.", descriptionRenderId: "description:1" };
+  const current = { ...previous, jobId: "102", company: "BIGID", descriptionRenderId: "description:2" };
+  assert.equal(collector.descriptionIsCurrent(current, previous), true);
+  for (const update of [
+    { descriptionRenderId: previous.descriptionRenderId }, { descriptionRenderId: "" }, { descriptionRenderId: undefined },
+    { company: "Another company" }, { title: "Another role" }, { jobIdSource: "query" }, { jobIdSource: "page" }
+  ]) assert.equal(collector.descriptionIsCurrent({ ...current, ...update }, previous), false, JSON.stringify(update));
+  assert.equal(collector.descriptionIsCurrent(current, { ...previous, descriptionRenderId: undefined }), false);
+  assert.equal(collector.descriptionIsCurrent(current, { ...previous, jobIdSource: "query" }), false);
+});
+test("ordinary changed descriptions and the same selected job retain their existing readiness behavior", () => {
+  const previous = { jobId: "101", description: "Previous description" };
+  assert.equal(collector.descriptionIsCurrent({ jobId: "101", description: previous.description }, previous), true);
+  assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: "New description" }, previous), true);
+  assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: previous.description }, previous), false);
+});
 test("short-job pacing reaches research in under twelve seconds and continues to Next", async () => {
   for (const random of [() => 0, () => 1]) {
     const h = harness([[row(1, { description: 'Build production software.', easy: true })], [row(2)]], { random });
