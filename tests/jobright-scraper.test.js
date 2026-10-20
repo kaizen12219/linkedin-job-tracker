@@ -5,7 +5,7 @@ const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 function setup(t, { html = fixture.page(), url = `https://jobright.ai/jobs/info/${fixture.A}` } = {}) {
   const dom = new JSDOM(html, { url, runScripts: "outside-only" }); t.after(() => dom.window.close());
-  dom.window.eval(fs.readFileSync(require.resolve("../src/jobright-scraper.js"), "utf8"));
+  for (const name of ["capture-policy.js", "jobright-scraper.js"]) dom.window.eval(fs.readFileSync(require.resolve(`../src/${name}`), "utf8"));
   return { api: dom.window.JobrightJobScraper, document: dom.window.document, window: dom.window };
 }
 
@@ -32,7 +32,7 @@ test("Jobright details extract observed JD sections and exclude private/AI/compa
   assert.match(value.description, /Benefits\n- Health insurance/u);
   assert.doesNotMatch(value.description, /AI generated|private@example|Jane Doe|CEO|worldwide strategy|Excellent fit/u);
   assert.equal(value.selectedRegion, "us"); assert.equal(value.selectedRegionSource, "search-control");
-  assert.equal(value.workplaceType, "remote"); assert.equal(value.isEasyApply, true);
+  assert.equal(value.workplaceType, "remote"); assert.equal(value.isEasyApply, false);
   assert.equal(value.applyUrl, `https://careers.example.com/${fixture.A}`);
   assert.equal(value.sourceUrl, `https://jobright.ai/jobs/info/${fixture.A}`);
 });
@@ -267,10 +267,29 @@ test("external Original Job Post is optional and only explicit job controls mark
   const { api, document } = setup(t);
   document.querySelector("a[href^='https://careers']").remove();
   assert.equal(api.scrape().applyUrl, `https://jobright.ai/jobs/info/${fixture.A}`);
+  assert.equal(api.scrape().isEasyApply, true);
   document.querySelector("#details").insertAdjacentHTML("beforeend", "<p>No longer accepting applications</p>");
   assert.equal(api.scrape().applicationsClosed, false, "unrelated page text is outside the selected panel");
   document.querySelector(".index_jobDetailContent__rhs3U").insertAdjacentHTML("beforeend", "<p>No longer accepting applications</p>");
   assert.equal(api.scrape().applicationsClosed, true);
+});
+test("Jobright keeps captured external apply links ordinary and portal references require research", (t) => {
+  const { api, document } = setup(t);
+  const original = document.querySelector("a[href^='https://careers']");
+  const button = document.querySelector("#apply-now-button-id");
+  const external = "https://bcbst.wd1.myworkdayjobs.com/external/job/USA-TN-Chattanooga-Remote/Senior-AI-Engineer_R-51142";
+  original.href = external;
+  for (const label of ["Apply Now", "Apply with Autofill"]) {
+    button.textContent = label;
+    assert.equal(api.scrape().applyUrl, external);
+    assert.equal(api.scrape().isEasyApply, false);
+  }
+  for (const url of [`https://jobright.ai/jobs/info/${fixture.A}`, "https://www.linkedin.com/jobs/view/123", "javascript:void(0)", "http://127.0.0.1/jobs/123",
+    "https://redirect.example.com/?url=" + encodeURIComponent(`https://jobright.ai/jobs/info/${fixture.A}`)]) {
+    original.setAttribute("href", url);
+    assert.equal(api.scrape().applyUrl, `https://jobright.ai/jobs/info/${fixture.A}`, url);
+    assert.equal(api.scrape().isEasyApply, true, url);
+  }
 });
 test("a missing or disabled Apply control cannot be treated as an active application", (t) => {
   const { api, document } = setup(t);

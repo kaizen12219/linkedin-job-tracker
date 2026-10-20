@@ -2,7 +2,7 @@
 
 This extension captures qualifying LinkedIn and Jobright jobs into ApplicantAlly. Research uses independent Codex sessions in Rezi Builder; saving and duplicate checks use ApplicantAlly’s local JSON store.
 
-Current release: **0.8.3**. See [CHANGELOG.md](CHANGELOG.md) for changes and the versioning policy. Future releases increment the patch version for fixes, the minor version for compatible features, and the major version for incompatible changes.
+Current release: **0.8.4**. See [CHANGELOG.md](CHANGELOG.md) for changes and the versioning policy. Future releases increment the patch version for fixes, the minor version for compatible features, and the major version for incompatible changes.
 
 ## Install and start
 
@@ -44,7 +44,7 @@ In LinkedIn's job details panel, click the **job title** to copy the title or th
 
 Open a LinkedIn or Jobright job and select the extension. **Scrape** reads the company, job title, description, and real application URL. Review or edit the fields in this order: Company → Job title → Apply URL → Profile → Job description, then choose **Save**. Company, title, and description are required.
 
-On Jobright, use `/jobs/recommend` results or a `/jobs/info/…` job page. The tracker reads the selected job's details and the committed search-location filter in the top bar. An employer address, another result's location, or a country typed but not applied to the search cannot determine the profile. Set and apply the search country to **United States** to use the same Kevin Lee/Jagjeet Wani routing as LinkedIn. Jobright captures with an unknown or non-US committed country are rejected; a manual profile cannot bypass this check. LinkedIn's existing region and manual-profile behavior remains available. Each Jobright capture requires AI verification of a current, free external application route for the exact vacancy, including the existing published-email route where applicable. The tracker does not click Apply, submit an application, or fill application forms.
+On Jobright, use `/jobs/recommend` results or a `/jobs/info/…` job page. The tracker reads the selected job's details and the committed search-location filter in the top bar. An employer address, another result's location, or a country typed but not applied to the search cannot determine the profile. Set and apply the search country to **United States** to use the same Kevin Lee/Jagjeet Wani routing as LinkedIn. Jobright captures with an unknown or non-US committed country are rejected; a manual profile cannot bypass this check. LinkedIn's existing region and manual-profile behavior remains available. A captured public external Original Job Post link follows the same ordinary Apply rules as LinkedIn, including role, remote and experience checks. If only a portal reference or unusable original link is available, AI must verify an external application route or the existing published-email route. The tracker does not click Apply, submit an application, or fill application forms.
 
 New jobs use a permanent local job ID, status `added` (Pending), no application date, and **Job Tracker** attribution. Profile choices come from ApplicantAlly’s local settings. A blank Profile is allowed and remembered for the shortcut. Temporary save failures retry the same capture ID so a lost response cannot create a duplicate.
 

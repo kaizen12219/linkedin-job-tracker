@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.4 — 2026-10-21
+
+- Treat Jobright jobs with captured public external links like ordinary LinkedIn Apply jobs. Remove forced Easy Apply classification from the scraper, research client and local worker; portal-only or unusable originals still require route research.
+- Accept engineering work described under qualifications as role evidence. Generic skill keywords alone remain insufficient, and candidate skill matching is not part of collection.
+- Include the matching worker update and regression tests. Existing seniority exclusions, remote checks, identity verification, profile routing and coordinated Pending saves remain in place.
+
 ## 0.8.3 — 2026-10-21
 
 - Verify Jobright captures against the current top-frame URL and document identity after in-page job navigation. A stale initial message URL no longer rejects the newly selected job; mismatched jobs, documents and frames remain blocked.

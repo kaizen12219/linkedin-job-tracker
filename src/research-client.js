@@ -286,7 +286,8 @@
           (region !== "us" || job.selectedRegionSource !== "search-control"))
           throw new Error("Select United States in Jobright's search country filter, then reopen the job before saving.");
         const capturedJob = { ...job, ...(region ? { selectedRegion: region, profileRoutingVersion: JobProfileRouting.VERSION } : {}),
-          ...(JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" ? { isEasyApply: true } : {}) };
+          ...(JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright"
+            ? { isEasyApply: job.isEasyApply !== false || !JobCapturePolicy.publicUrl(job.applyUrl) } : {}) };
         const records = await read();
         const sourceIdentity = JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" ? `jobright:${job.jobId || job.sourceUrl}` : job.jobId || job.sourceUrl || "";
         const identity = JSON.stringify([sourceIdentity, job.company, job.title, job.description, state.sheetUrl, region ? "automatic" : profile, ...(region ? [region] : [])]);

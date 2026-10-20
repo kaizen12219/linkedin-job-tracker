@@ -6,4 +6,6 @@ The extension's 0.8.0 file-save protocol requires the matching local research wo
 
 Keep the standalone worker, ApplicantAlly's rebuild source under `workspace/tracker-captures`, and its bundled builder copy aligned. Restart the local research worker after updating it. The extension must keep saves queued when ownership coordination is unavailable.
 
+`0.8.4-jobright-parity.patch` applies after the 0.8.0 update. It aligns captured external Apply links with LinkedIn's ordinary Apply behavior and accepts engineering duties described under qualifications. Check and apply it with the same `git apply --unidiff-zero` workflow. Copy `jobright-research-0.8.4.test.mjs` into the worker's `tests/jobright-research.test.mjs` and run it with the other research tests. Apply this update before using the 0.8.4 extension, then restart the worker; the local installation is synchronized by the release workflow.
+
 The local installation was updated as part of this release. These maintenance files are excluded from the extension ZIP's runtime allowlist.

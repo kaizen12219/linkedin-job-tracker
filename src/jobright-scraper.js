@@ -132,7 +132,11 @@
     const original = [...detail.querySelectorAll("a[href]")].find((anchor) => /^Original Job Post$/iu.test(text(anchor)));
     let applyUrl = `https://jobright.ai/jobs/info/${id}`;
     if (original) {
-      try { const url = new URL(original.getAttribute("href"), sourceUrl); if (/^https?:$/u.test(url.protocol) && !/(^|\.)jobright\.ai$/u.test(url.hostname)) applyUrl = url.href; } catch { /* Retain the portal reference. */ }
+      try {
+        const url = new URL(original.getAttribute("href"), sourceUrl);
+        const external = root.JobCapturePolicy?.publicUrl(url.href);
+        if (external) applyUrl = external;
+      } catch { /* Retain the portal reference. */ }
     }
     const selectedCard = cards(doc).find((record) => record.id === id);
     if (selectedCard && (selectedCard.title !== title || selectedCard.company !== company)) throw new Error("Jobright's selected job details are still changing.");
@@ -142,7 +146,7 @@
     const workplaceType = /\bhybrid\b/iu.test(remoteLabel) ? "hybrid" : /\bremote\b/iu.test(remoteLabel) ? "remote" : /\bon[ -]?site\b/iu.test(remoteLabel) ? "on-site" : "unknown";
     return { jobId: id, jobIdSource: "details", title, company, description, applyUrl,
       sourceUrl: `https://jobright.ai/jobs/info/${id}`, selectedRegion: context.selectedRegion, selectedRegionSource: context.selectedRegionSource,
-      searchContextKey: context.filterKey, workplaceType, isEasyApply: true, applicationsAvailable, applicationsClosed: closed,
+      searchContextKey: context.filterKey, workplaceType, isEasyApply: !root.JobCapturePolicy?.publicUrl(applyUrl), applicationsAvailable, applicationsClosed: closed,
       descriptionEmails: [...new Set(description.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/giu) || [])],
       scrapedAt: new Date().toISOString(), confidence: { title: "high", company: "high", description: "high", applyUrl: original ? "high" : "low" },
       selectorsUsed: { title: "jobright-detail-heading", company: "jobright-detail-company", description: "jobright-overview-sections", applyUrl: original ? "jobright-original-post" : "jobright-reference" }, warnings: [] };

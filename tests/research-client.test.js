@@ -254,6 +254,64 @@ test("Jobright research uses a distinct provider identity, preserves US routing 
   assert.equal(JSON.parse(h.calls[1].options.body).job.isEasyApply, true);
 });
 
+test("Jobright preserves ordinary Apply only for an explicit false flag and a safe external original URL", async () => {
+  const id = "123456789012345678901234", sourceUrl = `https://jobright.ai/jobs/info/${id}`;
+  const external = "https://careers.mews.com/jobs/123";
+  for (const [label, isEasyApply, applyUrl, expected] of [
+    ["ordinary external", false, external, false],
+    ["explicit Easy Apply", true, external, true],
+    ["unspecified Apply type", undefined, external, true],
+    ["missing original", false, undefined, true],
+    ["Jobright portal", false, sourceUrl, true],
+    ["LinkedIn portal", false, "https://www.linkedin.com/jobs/view/123", true],
+    ["encoded portal redirect", false, `https://careers.mews.com/redirect?next=${encodeURIComponent(encodeURIComponent(sourceUrl))}`, true],
+    ["non-HTTPS original", false, "http://careers.mews.com/jobs/123", true],
+    ["local original", false, "https://127.0.0.1/jobs/123", true],
+    ["non-web original", false, "javascript:void(0)", true]
+  ]) {
+    const h = harness();
+    await h.client.start({ ...job, jobId: id, sourceUrl, selectedRegion: "us", selectedRegionSource: "search-control", isEasyApply, applyUrl });
+    const record = h.stored.jobTrackerResearchV1[0];
+    const payload = JSON.parse(h.calls[0].options.body);
+    assert.equal(record.job.isEasyApply, expected, label);
+    assert.equal(payload.job.isEasyApply, expected, label);
+    assert.equal(record.profileRouting.region, "us", label);
+    assert.equal(h.saves.length, 0, "normalizing Apply type never bypasses AI review");
+  }
+});
+
+test("ordinary LinkedIn and Jobright jobs share AI role and experience checks and save with Jagjeet without application research", async () => {
+  const experience = "3 years of professional software engineering experience required.";
+  const description = `${duties} ${experience}`;
+  for (const [sourceUrl, jobId] of [
+    ["https://www.linkedin.com/jobs/view/123", "123"],
+    ["https://jobright.ai/jobs/info/123456789012345678901234", "123456789012345678901234"]
+  ]) {
+    const h = harness({ destination: FILE_DESTINATION, coordinator: saveCoordinator() });
+    const target = { ...job, title: "Senior Software Engineer", description, sourceUrl, jobId, isEasyApply: false,
+      applyUrl: "https://careers.mews.com/jobs/123", selectedRegion: "us", selectedRegionSource: "search-control" };
+    const started = await h.client.start(target);
+    assert.equal(started.status, "researching");
+    assert.equal(h.saves.length, 0, sourceUrl);
+    const payload = JSON.parse(h.calls[0].options.body);
+    assert.equal(payload.job.isEasyApply, false, sourceUrl);
+    assert.equal(payload.job.description, description);
+    h.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: {
+      decision: "save", company: target.company, title: target.title, role,
+      experience: { minimumYears: 3, scope: "senior", evidence: experience }
+    } });
+    await h.client.poll();
+    assert.equal(h.saves.length, 1, sourceUrl);
+    assert.equal(h.saves[0].data.isEasyApply, false);
+    assert.equal(h.saves[0].data.applyUrl, target.applyUrl);
+    assert.equal(h.saves[0].options.profile, "jagjeet");
+    assert.equal(h.saves[0].options.requestId, started.requestId);
+    assert.equal(h.saves[0].options.trashed, undefined);
+    assert.equal(h.stored.jobTrackerResearchV1[0].state, "saved");
+    assert.equal(h.reports.length, 0);
+  }
+});
+
 test("Jobright cannot fall back to a manual profile when its committed US search country is missing", async () => {
   for (const country of [{}, { selectedRegion: "us" }, { selectedRegion: "uk", selectedRegionSource: "search-control" }]) {
     const h = harness();
