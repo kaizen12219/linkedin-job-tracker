@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.3 — 2026-10-21
+
+- Verify Jobright captures against the current top-frame URL and document identity after in-page job navigation. A stale initial message URL no longer rejects the newly selected job; mismatched jobs, documents and frames remain blocked.
+- Record pre-research identity failures in the existing failure reports with a specific reason code.
+
 ## 0.8.2 — 2026-10-21
 
 - Preserve Jobright's committed search filters and card identities while its job-detail view fades the mounted results list, preventing a false "search changed" stop. Real filter changes still stop collection.

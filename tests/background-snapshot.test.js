@@ -19,7 +19,7 @@ const successfulResearch = async (_url, options) => ({ ok: true, json: async () 
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
 function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [],
-  tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null, tabStates = {}, searchContexts = {} } = {}) {
+  tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null, tabStates = {}, searchContexts = {}, injectionResults = {}, injectionError = null } = {}) {
   const calls = [];
   const timers = new Map();
   let timerId = 0;
@@ -86,7 +86,15 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
       onRemoved: { addListener(listener) { tabRemovedListeners.push(listener); } }
     },
     commands: { onCommand: { addListener() {} } },
-    scripting: { async executeScript(options) { calls.push({ action: "execute-script", tabId: options.target?.tabId, args: clone(options.args) }); } }
+    scripting: { async executeScript(options) {
+      const tabId = options.target?.tabId;
+      calls.push({ action: "execute-script", tabId, target: clone(options.target), args: clone(options.args) });
+      if (!options.target?.frameIds) return;
+      if (injectionError) throw injectionError;
+      if (Object.hasOwn(tabStates, tabId) && !tabStates[tabId]) throw new Error("Tab no longer exists");
+      if (Object.hasOwn(injectionResults, tabId)) return clone(injectionResults[tabId]);
+      return [{ frameId: 0, documentId: tabStates[tabId]?.documentId || `document-${tabId}`, result: tabStates[tabId]?.url || tabUrl }];
+    } }
   };
   const context = vm.createContext({
     chrome,
@@ -142,6 +150,10 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
       : kind === "linkedin" ? { id: chrome.runtime.id, url: "https://www.linkedin.com/jobs/search-results/" }
         : { id: chrome.runtime.id, url: "https://example.test/" };
     const sender = { ...base, ...overrides };
+    if (/^https:\/\/(?:www\.)?jobright\.ai\/jobs\//u.test(sender.url || "")) {
+      const tabId = sender.tab?.id ?? 9;
+      Object.assign(sender, { frameId: 0, documentId: `document-${tabId}`, documentLifecycle: "active", ...overrides });
+    }
     let handled;
     const response = await new Promise((resolve) => {
       handled = messageListeners[0](message, sender, resolve);
@@ -208,9 +220,94 @@ test("Jobright query-bearing searches collect with the frozen filters and canoni
   const h = harness({ tabUrl: tab.url, searchContext: { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" }, profiles: ["kevin", "jagjeet"] });
   await settle(); await h.context.toggleJobCollection(tab);
   const state = collection(h);
+  h.tabStates[tab.id].url = `https://jobright.ai/jobs/info/${jobrightId}?sort=recent`;
   const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob, runId: state.id }, "foreign", { url: "https://jobright.ai/jobs/info/" + jobrightId + "?sort=recent", tab });
   assert.equal(result.response.ok, true); assert.equal(result.response.result.queued, true);
   assert.deepEqual(collection(h).visited, [jobrightId]);
+});
+
+test("Jobright captures bind to the current detail in the same top-frame document after SPA navigation", async () => {
+  const previous = "https://jobright.ai/jobs/info/6ad79ccb52aa6152bb69d5ce";
+  for (const initialUrl of [previous, "https://jobright.ai/jobs/recommend"]) {
+    const tab = { id: 9, url: initialUrl };
+    const h = harness({ tabStates: { [tab.id]: { ...tab, url: jobrightUrl, documentId: "same-jobright-document" } },
+      searchContext: { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" }, profiles: ["kevin", "jagjeet"] });
+    await settle(); await h.context.toggleJobCollection(tab);
+    const state = collection(h);
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob, runId: state.id }, "foreign",
+      { url: initialUrl, tab, frameId: 0, documentId: "same-jobright-document" });
+    assert.equal(result.response.ok, true, initialUrl);
+    assert.equal(result.response.result.status, "researching");
+    assert.equal(h.stored.jobTrackerResearchV1[0].job.sourceUrl, jobrightUrl);
+    assert.deepEqual(collection(h).visited, [jobrightId]);
+    const probe = h.calls.find(call => call.action === "execute-script" && call.target.frameIds);
+    assert.deepEqual(probe.target, { tabId: tab.id, frameIds: [0] });
+    assert.equal(h.calls.some(call => call.action === "save"), false);
+  }
+});
+
+test("Jobright rejects current routes that do not identify the captured job and writes the identity failure report", async () => {
+  for (const currentUrl of [
+    "https://jobright.ai/jobs/info/6ad79ccb52aa6152bb69d5ce", "https://jobright.ai/jobs/recommend",
+    "https://jobright.ai/profile", "https://www.linkedin.com/jobs/view/123", "https://jobright.ai.evil.test/jobs/info/" + jobrightId
+  ]) {
+    const h = harness({ tabUrl: currentUrl }); await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob }, "foreign", { url: jobrightUrl, tab: { id: 9 } });
+    assert.equal(result.response.ok, false, currentUrl);
+    assert.equal(result.response.error.code, "TRACKER_IDENTITY_MISMATCH", currentUrl);
+    const report = h.calls.find(call => call.action === "failure-report")?.report;
+    assert.equal(report?.error.code, "TRACKER_IDENTITY_MISMATCH", currentUrl);
+    assert.equal(report.job.jobId, jobrightId);
+    assert.equal(report.stage, "capture"); assert.equal(report.status, "failed");
+    assert.match(report.reason, /selected job source and identity could not be verified/iu);
+    assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim"].includes(call.action)), false);
+    assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0);
+  }
+});
+
+test("Jobright refuses stale documents and malformed live-frame results before any research or save", async () => {
+  const valid = { frameId: 0, documentId: "document-9", result: jobrightUrl };
+  for (const frames of [
+    [], null, undefined, [valid, valid], [{ ...valid, frameId: 1 }], [{ ...valid, documentId: "previous-document" }],
+    [{ frameId: 0, result: jobrightUrl }], [{ frameId: 0, documentId: "document-9" }], { 0: valid, length: 1 }
+  ]) {
+    const h = harness({ tabUrl: jobrightUrl, injectionResults: { 9: frames } }); await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob }, "foreign", { url: jobrightUrl, tab: { id: 9 } });
+    assert.equal(result.response.error?.code, "TRACKER_IDENTITY_MISMATCH", JSON.stringify(frames));
+    assert.equal(h.calls.find(call => call.action === "failure-report")?.report.error.code, "TRACKER_IDENTITY_MISMATCH");
+    assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim"].includes(call.action)), false);
+    assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0);
+  }
+});
+
+test("Jobright requires an active top-frame sender document and an available live tab", async () => {
+  const cases = [
+    { sender: { frameId: 1 } }, { sender: { frameId: undefined } }, { sender: { documentId: "" } },
+    { sender: { documentId: undefined } }, { sender: { documentId: 42 } }, { sender: { documentLifecycle: "cached" } },
+    { sender: { tab: undefined } }, { sender: { tab: { id: "9" } } }, { tabStates: { 9: null } },
+    { injectionError: new Error("The tab cannot be inspected") }
+  ];
+  for (const options of cases) {
+    const h = harness({ tabUrl: jobrightUrl, tabStates: options.tabStates || {}, injectionError: options.injectionError }); await settle();
+    const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob }, "foreign",
+      { url: jobrightUrl, tab: { id: 9 }, ...options.sender });
+    assert.equal(result.response.error?.code, "TRACKER_IDENTITY_MISMATCH", JSON.stringify(options.sender || options));
+    assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim"].includes(call.action)), false);
+    assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0);
+    if (options.sender?.frameId === 1) assert.equal(h.calls.some(call => call.action === "failure-report"), false);
+  }
+});
+
+test("Jobright live-route verification retains foreign-source rejection and LinkedIn's existing capture behavior", async () => {
+  const h = harness({ tabUrl: jobrightUrl }); await settle();
+  const foreign = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob }, "foreign",
+    { url: "https://www.linkedin.com/jobs/search-results/", tab: { id: 9 }, frameId: 0, documentId: "document-9" });
+  assert.equal(foreign.response.error?.code, "TRACKER_IDENTITY_MISMATCH");
+  assert.equal(h.calls.some(call => call.action === "failure-report" || call.target?.frameIds), false);
+  const linkedin = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: engineeringJob }, "linkedin");
+  assert.equal(linkedin.response.ok, true);
+  assert.equal(linkedin.response.result.status, "researching");
+  assert.equal(h.calls.some(call => call.target?.frameIds), false);
 });
 
 test("content captures and failure reports cannot cross LinkedIn and Jobright sender boundaries", async () => {

@@ -148,6 +148,31 @@ function matchesJobSource(job, sender) {
   return JobCapturePolicy.validJobId(String(job?.jobId || ""), job?.sourceUrl) &&
     JobCapturePolicy.sourceSite(job.sourceUrl) === JobCapturePolicy.sourceSite(sender.url);
 }
+async function verifyCaptureIdentity(job, sender) {
+  const mismatch = (reason = "") => Object.assign(new Error("The selected job source and identity could not be verified." + (reason ? " " + reason : "")), { code: "TRACKER_IDENTITY_MISMATCH" });
+  const jobId = String(job?.jobId || "");
+  if (!matchesJobSource(job, sender)) throw mismatch();
+  if (JobCapturePolicy.sourceSite(job.sourceUrl) !== "jobright") {
+    if (!JobCapturePolicy.validJobId(jobId, sender.url)) throw mismatch();
+    return;
+  }
+  // A Jobright SPA can move to another job while MessageSender.url still
+  // names the content script's original page. Bind the capture to the live
+  // top-frame document instead of accepting an arbitrary same-site job ID.
+  if (!Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || typeof sender.documentId !== "string" || !sender.documentId ||
+    (sender.documentLifecycle && sender.documentLifecycle !== "active")) throw mismatch("Restart collection from the current Jobright page.");
+  let frames;
+  try {
+    frames = await chrome.scripting.executeScript({
+      target: { tabId: sender.tab.id, frameIds: [0] },
+      func: () => window.location.href
+    });
+  } catch { throw mismatch("The current Jobright page could not be rechecked. Refresh it and restart collection."); }
+  const frame = Array.isArray(frames) && frames.length === 1 ? frames[0] : null;
+  if (frame?.frameId !== 0 || frame.documentId !== sender.documentId) throw mismatch("The Jobright page was replaced before capture. Restart collection on the current page.");
+  if (JobCapturePolicy.sourceSite(frame.result) !== "jobright" ||
+    JobCapturePolicy.jobIdFromUrl(frame.result) !== jobId || !JobCapturePolicy.validJobId(jobId, frame.result)) throw mismatch("Jobright is no longer showing the captured job. Nothing was saved.");
+}
 
 async function handleTrackerMessage(message, sender = {}) {
   if (message.type === "KAI_TRACKER_NOT_SAVED") {
@@ -205,8 +230,12 @@ async function handleTrackerMessage(message, sender = {}) {
 
   let profile = message.profile ?? "";
   if (message.type === "KAI_TRACKER_CAPTURE") {
-    if (!matchesJobSource(message.job, sender) || !JobCapturePolicy.validJobId(String(message.job.jobId), sender.url))
-      throw new Error("The selected job source and identity could not be verified.");
+    try { await verifyCaptureIdentity(message.job, sender); }
+    catch (error) {
+      if (matchesJobSource(message.job, sender) && (sender.frameId === undefined || sender.frameId === 0))
+        await logNotSaved(message.job, { stage: "capture", status: "failed", reason: error.message, error });
+      throw error;
+    }
     const settings = await chrome.storage.local.get(PROFILE_STORAGE_KEY);
     profile = settings[PROFILE_STORAGE_KEY] ?? "";
   }
