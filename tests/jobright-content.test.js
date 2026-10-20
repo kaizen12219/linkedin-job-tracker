@@ -3,7 +3,8 @@ const fs = require("node:fs");
 const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, hidden = false, blocked = new Set(), changedFilterAt = 0, revealError = "" } = {}) {
+const collectionLocks = require("./fixtures/collection-locks.js");
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, hidden = false, blocked = new Set(), changedFilterAt = 0, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
@@ -15,7 +16,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   const listeners = [];
   const addEventListener = document.addEventListener.bind(document);
   document.addEventListener = (name, listener, options) => { if (name === "click") clickHandler = listener; addEventListener(name, listener, options); };
-  Object.defineProperty(window.navigator, "locks", { value: { async request(_name, _options, callback) { return callback({}); } } });
+  Object.defineProperty(window.navigator, "locks", { value: locks });
   const scroller = document.querySelector("main");
   Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => 700 } });
   scroller.scrollTo = ({ top }) => {
@@ -48,7 +49,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     throw new Error(`Unexpected message ${value.type}`);
   } } };
   for (const file of ["capture-policy.js", "jobright-scraper.js", "job-collector.js"]) window.eval(fs.readFileSync(require.resolve(`../src/${file}`), "utf8"));
-  function newState() { return { id: "jobright-run", searchKey: window.LinkedInJobCollector.searchKey(window.location.href), filterKey: window.JobrightJobScraper.searchContext().filterKey, visited: [], pages: [], counts: {} }; }
+  function newState() { return { id: runId, searchKey: window.LinkedInJobCollector.searchKey(window.location.href), filterKey: window.JobrightJobScraper.searchContext().filterKey, visited: [], pages: [], counts: {} }; }
   if (autoStart) state = newState();
   window.eval(fs.readFileSync(require.resolve("../src/jobright-content.js"), "utf8"));
   if (changedFilterAt) window.setTimeout(() => document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid"), changedFilterAt);
@@ -74,6 +75,30 @@ test("Jobright infinite collection captures exact loaded jobs in background and 
   assert.deepEqual(h.selections, [fixture.A, fixture.B, "68c123456789abcdef012303"]);
   assert.ok(h.captures.every((capture) => capture.runId === "jobright-run" && capture.job.selectedRegion === "us"));
   assert.deepEqual(h.actions, []); assert.equal(h.state, null);
+});
+test("independent Jobright runs can collect in background on the same origin", async (t) => {
+  const locks = collectionLocks();
+  const first = setup(t, { jobs: [fixture.job()], hidden: true, locks, runId: "first-run" });
+  const second = setup(t, { jobs: [fixture.job(fixture.B)], hidden: true, locks, runId: "second-run" });
+  await first.advance(1000); await second.advance(1000);
+  assert.deepEqual(locks.heldNames.sort(), ["job-tracker-collection:first-run", "job-tracker-collection:second-run"]);
+  assert.ok(locks.requests.every((request) => request.ifAvailable === true));
+  await first.advance(180_000); await second.advance(180_000);
+  assert.deepEqual(first.captures.map((capture) => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(second.captures.map((capture) => capture.job.jobId), [fixture.B]);
+  assert.equal(locks.acquired, 2); assert.equal(locks.released, 2); assert.equal(locks.held, false);
+});
+test("a replacement Jobright document cannot collect or end an owned run and resumes after release", async (t) => {
+  const locks = collectionLocks();
+  const first = setup(t, { jobs: [fixture.job()], locks, runId: "same-run" }); await first.advance(1000);
+  const replacement = setup(t, { jobs: [fixture.job(fixture.B)], locks, runId: "same-run" }); await replacement.advance(1000);
+  assert.equal(replacement.captures.length, 0); assert.equal(replacement.selections.length, 0);
+  assert.equal(replacement.messages.some((message) => message.type === "KAI_TRACKER_RUN_END"), false);
+  assert.deepEqual(locks.heldNames, ["job-tracker-collection:same-run"]);
+  await first.advance(180_000); assert.equal(locks.held, false);
+  const resumed = replacement.start(); await replacement.advance(0); await resumed; await replacement.advance(180_000);
+  assert.deepEqual(replacement.captures.map((capture) => capture.job.jobId), [fixture.B]);
+  assert.equal(locks.acquired, 2); assert.equal(locks.released, 2); assert.equal(locks.held, false);
 });
 test("changing committed filters stops before capture", async (t) => {
   const h = setup(t, { changedFilterAt: 3000 }); await h.advance(40_000);

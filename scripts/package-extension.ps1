@@ -2,6 +2,8 @@ $ErrorActionPreference = 'Stop'
 $trackerRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $trackerDist = Join-Path $trackerRoot 'dist'
 $trackerVersion = (Get-Content -LiteralPath (Join-Path $trackerRoot 'manifest.json') -Raw | ConvertFrom-Json).version
+& node (Join-Path $PSScriptRoot 'check-version.cjs')
+if ($LASTEXITCODE -ne 0) { throw 'Release metadata validation failed.' }
 $trackerArchive = Join-Path $trackerDist ("linkedin-job-tracker-{0}-{1}.zip" -f $trackerVersion, (Get-Date -Format 'yyyyMMdd-HHmmss'))
 # Deliberate allowlist: no legacy server scripts, keys, .env, source credentials, or tests.
 $trackerFiles = @('manifest.json', 'popup.html', 'popup.css', 'folder.html', 'src/folder-access.js', 'src/folder-settings.js', 'src/background.js', 'src/kai-local-store-client.js', 'src/failure-reports.js', 'src/banned-companies.js', 'src/capture-policy.js', 'src/profile-routing.js', 'src/research-client.js', 'src/popup-kai-flow.js', 'src/scraper.js', 'src/detail-copy.js', 'src/jobright-scraper.js', 'src/jobright-content.js', 'src/job-collector.js', 'src/content.js', 'native/research-host.cjs', 'native/research-launcher.ps1', 'scripts/install-research-helper.ps1', 'scripts/install-research-helper.cmd')

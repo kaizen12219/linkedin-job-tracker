@@ -102,9 +102,11 @@
     if (!response?.ok) throw new Error(response?.error?.message || "Collection timing is unavailable. Job collection stopped.");
     return response.result?.stopped !== true;
   }
-  function lease() {
+  function lease(runId) {
     if (!window.navigator?.locks?.request) throw new Error("This browser cannot run background collection. Update your browser.");
-    return new Promise((resolve, reject) => window.navigator.locks.request("linkedin-job-tracker-collection", { ifAvailable: true }, (lock) => {
+    if (typeof runId !== "string" || !runId || runId.length > 128) throw new Error("The collection identity is invalid. Restart job collection.");
+    // Reloaded documents share a run lock; independent runs keep collecting.
+    return new Promise((resolve, reject) => window.navigator.locks.request(`job-tracker-collection:${runId}`, { ifAvailable: true }, (lock) => {
       if (!lock) { reject(new Error("Another collection is still stopping. Try again shortly.")); return; }
       return new Promise((release) => resolve(release));
     }).catch(reject));
@@ -122,9 +124,10 @@
     const searchKey = () => context().filterKey === frozen && context().selectedRegion === "us" ? window.LinkedInJobCollector.searchKey(window.location.href) : "";
     if (!frozen || searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
     waiting = { ...state, localVersion: version };
-    let release = () => {}, started = false;
+    let release = () => {}, started = false, leaseAcquired = false;
     try {
-      release = await lease();
+      release = await lease(state.id);
+      leaseAcquired = true;
       for (let elapsed = 0; !records().length && elapsed < 15_000; elapsed += 200) {
         if (!await wait(200, state.id) || version !== startVersion) return;
         if (searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
@@ -176,7 +179,7 @@
       collection.start(state); started = true;
       void collection.completion().then(release, release);
     } catch (error) {
-      await message({ type: "KAI_TRACKER_RUN_END", runId: state.id }); status(error.message, state, true); throw error;
+      if (leaseAcquired) await message({ type: "KAI_TRACKER_RUN_END", runId: state.id }); status(error.message, state, true); throw error;
     } finally { if (waiting?.localVersion === version) waiting = null; if (!started) release(); }
   }
   chrome.runtime.onMessage.addListener((request, _sender, respond) => {

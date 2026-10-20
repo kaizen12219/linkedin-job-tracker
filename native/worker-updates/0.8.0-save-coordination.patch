@@ -1,0 +1,94 @@
+diff --git a/job-research.js b/job-research.js
+index 6a6eb30..c86af77 100644
+--- a/job-research.js
++++ b/job-research.js
+@@ -13,0 +14,2 @@ const ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
++const CLIENT_ID = /^[a-f0-9]{64}$/u;
++const SAVE_DESTINATION = /^applicantally-file:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+@@ -204,0 +207,2 @@ export class JobResearchService {
++    this.saveClaimsFile = path.join(this.directory, "save-claims.json");
++    this.saveClaimsMarker = path.join(this.directory, ".save-claims-initialized");
+@@ -225,0 +230,76 @@ export class JobResearchService {
++  async persistSaveClaims(claims) {
++    const temporary = `${this.saveClaimsFile}.${crypto.randomUUID()}.tmp`;
++    try {
++      await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
++      await fs.writeFile(temporary, JSON.stringify({ version: 1, claims }), { mode: 0o600 });
++      await fs.rename(temporary, this.saveClaimsFile);
++    } catch {
++      throw fail("Save coordination storage is unavailable. Nothing may be written until it recovers.", 503);
++    } finally { await fs.unlink(temporary).catch(() => {}); }
++  }
++  async loadSaveClaims() {
++    // Read afresh for every operation. Losing/corrupting this file must never
++    // silently transfer ownership to another browser while a writer is paused.
++    let initialized = false;
++    try {
++      const marker = JSON.parse(await fs.readFile(this.saveClaimsMarker, "utf8"));
++      if (marker?.version !== 1) throw new Error("Invalid marker.");
++      initialized = true;
++    } catch (error) {
++      if (error.code !== "ENOENT") throw fail("Save coordination storage is invalid. No save was authorized.", 503);
++    }
++    let data;
++    try { data = JSON.parse(await fs.readFile(this.saveClaimsFile, "utf8")); }
++    catch (error) {
++      if (error.code !== "ENOENT" || initialized)
++        throw fail("Save coordination storage is missing or invalid. No save was authorized.", 503);
++      await this.persistSaveClaims([]);
++      data = { version: 1, claims: [] };
++    }
++    const seen = new Set();
++    if (data?.version !== 1 || !Array.isArray(data.claims) || data.claims.some(claim => {
++      if (!claim || typeof claim !== "object" || !CLIENT_ID.test(claim.key || "") || !CLIENT_ID.test(claim.client || "") ||
++        !ID.test(claim.requestId || "") || !SAVE_DESTINATION.test(claim.destination || "") || !ID.test(claim.token || "") ||
++        !Number.isFinite(claim.createdAt) || claim.createdAt < 0 || seen.has(claim.key)) return true;
++      seen.add(claim.key); return false;
++    })) throw fail("Save coordination storage is invalid. No save was authorized.", 503);
++    if (!initialized) {
++      try { await fs.writeFile(this.saveClaimsMarker, JSON.stringify({ version: 1 }), { mode: 0o600, flag: "wx" }); }
++      catch { throw fail("Save coordination storage is unavailable. No save was authorized.", 503); }
++    }
++    return data.claims;
++  }
++  async saveClaim(client, requestId, value) {
++    return this.serial(async () => {
++      if (!CLIENT_ID.test(client || "") || !ID.test(requestId || "") || !value || typeof value !== "object" || Array.isArray(value) ||
++        !["acquire", "settle"].includes(value.action) || !SAVE_DESTINATION.test(value.destination || "") ||
++        Object.keys(value).some(key => !["action", "destination", "token"].includes(key)) ||
++        (value.token !== undefined && !ID.test(value.token))) throw fail("Invalid save coordination request.");
++      if (value.action === "settle" && !ID.test(value.token || "")) throw fail("A save ownership token is required.");
++      const claims = await this.loadSaveClaims();
++      const owned = claims.find(claim => claim.client === client && claim.requestId === requestId && claim.destination === value.destination);
++      if (value.action === "settle") {
++        // Stale acknowledgments may arrive after a new browser acquired the key.
++        // They are idempotent and must never remove that browser's claim.
++        if (owned?.token === value.token) await this.persistSaveClaims(claims.filter(claim => claim !== owned));
++        return { settled: true };
++      }
++      // Recovery remains possible even if old research history was trimmed.
++      if (owned) return { acquired: true, token: owned.token };
++      await this.load();
++      const record = this.records.find(entry => entry.client === client && entry.requestId === requestId);
++      if (!record) throw fail("Research request not found.", 404);
++      if (record.state !== "completed" || record.result?.decision !== "save" || !CapturePolicy.supportedJobPage(record.job?.sourceUrl) ||
++        CapturePolicy.roleSkipReason(record.job))
++        throw fail("Only approved completed research can authorize a save.", 409);
++      const company = text(record.job.company).toLocaleLowerCase("en-US");
++      if (!company) throw fail("The captured employer is invalid.");
++      const key = hash(`${value.destination}\0${company}`);
++      if (claims.some(claim => claim.key === key)) return { acquired: false, code: "SAVE_COORDINATION_BUSY",
++        message: "Another browser is finishing a save for this company. This job remains queued." };
++      const claim = { key, client, requestId, destination: value.destination, token: crypto.randomUUID(), createdAt: this.clock() };
++      // No TTL: a paused browser can resume its authorized filesystem write.
++      await this.persistSaveClaims([...claims, claim]);
++      return { acquired: true, token: claim.token };
++    });
++  }
+@@ -501 +581 @@ export class JobResearchService {
+-      } else if (req.method === "POST" && url.pathname === "/job-research") {
++      } else if (req.method === "POST" && (url.pathname === "/job-research" || /^\/job-research\/[a-f0-9-]{36}\/save-claim$/u.test(url.pathname))) {
+@@ -507 +587,2 @@ export class JobResearchService {
+-        json(202, await this.enqueue(client, value.requestId, value.job, value.model, value.reasoningEffort));
++        if (url.pathname.endsWith("/save-claim")) json(200, await this.saveClaim(client, url.pathname.split("/")[2], value));
++        else json(202, await this.enqueue(client, value.requestId, value.job, value.model, value.reasoningEffort));

@@ -274,7 +274,7 @@ test("unsupported Jobright pages and lookalike domains cannot trigger popup scra
 test("manifest grants exact Jobright hosts and injects its supported job adapters in dependency order", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json"), "utf8"));
   assert.equal(manifest.name, "Job Tracker");
-  assert.equal(manifest.version, "0.7.7");
+  assert.equal(manifest.version, JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).version);
   assert.equal(manifest.host_permissions.includes("https://jobright.ai/*"), true);
   assert.equal(manifest.host_permissions.includes("https://www.jobright.ai/*"), true);
   assert.equal(manifest.host_permissions.some(value => value.includes("*.jobright.ai")), false);

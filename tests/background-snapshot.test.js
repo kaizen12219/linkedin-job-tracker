@@ -8,6 +8,7 @@ const ROOT = path.resolve(__dirname, "..");
 const BACKGROUND = fs.readFileSync(path.join(ROOT, "src/background.js"), "utf8");
 const BANNED = fs.readFileSync(path.join(ROOT, "src/banned-companies.js"), "utf8");
 const SNAPSHOT_KEY = "kaiFlowCompanySnapshotV1";
+const COLLECTIONS_KEY = "jobTrackerCollectionsV2";
 const duties = "Design and build JavaScript services and maintain automated tests.";
 const engineeringJob = { jobId: "123", jobIdSource: "details", sourceUrl: "https://www.linkedin.com/jobs/search-results/",
   company: "New Company", title: "Senior JavaScript Engineer", description: duties, workplaceType: "remote", isEasyApply: false };
@@ -18,15 +19,17 @@ const successfulResearch = async (_url, options) => ({ ok: true, json: async () 
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
 function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [],
-  tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null } = {}) {
+  tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null, tabStates = {}, searchContexts = {} } = {}) {
   const calls = [];
   const timers = new Map();
   let timerId = 0;
   const messageListeners = [];
+  const tabRemovedListeners = [];
   let snapshotCursor = 0;
   const local = {
     async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, clone(stored[name])])); },
-    async set(value) { Object.assign(stored, clone(value)); }
+    async set(value) { Object.assign(stored, clone(value)); },
+    async remove(key) { for (const name of Array.isArray(key) ? key : [key]) delete stored[name]; }
   };
   const client = {
     async init() {},
@@ -50,8 +53,9 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
   const chrome = {
     alarms: { onAlarm: { addListener() {} }, async create() {}, async clear() {} },
     storage: { local, session: {
-      async get(key) { return { [key]: clone(sessionStored[key]) }; },
-      async set(values) { Object.assign(sessionStored, clone(values)); }
+      async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, clone(sessionStored[name])])); },
+      async set(values) { Object.assign(sessionStored, clone(values)); },
+      async remove(key) { for (const name of Array.isArray(key) ? key : [key]) delete sessionStored[name]; }
     } },
     runtime: {
       id: "extension-id",
@@ -66,14 +70,23 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
       async setTitle() {}
     },
     tabs: {
-      async get(id) { return { id, url: tabUrl, autoDiscardable }; },
-      async update(id, properties) { calls.push({ action: "tab-update", tabId: id, properties: clone(properties) }); return { id, ...properties }; },
+      async get(id) {
+        if (Object.hasOwn(tabStates, id) && !tabStates[id]) throw new Error("Tab no longer exists");
+        return { id, url: tabUrl, autoDiscardable, ...clone(tabStates[id]) };
+      },
+      async update(id, properties) {
+        calls.push({ action: "tab-update", tabId: id, properties: clone(properties) });
+        if (Object.hasOwn(tabStates, id) && !tabStates[id]) throw new Error("Tab no longer exists");
+        tabStates[id] = { ...(tabStates[id] || { id, url: tabUrl, autoDiscardable }), ...clone(properties) };
+        return { id, ...tabStates[id] };
+      },
       async query() { return []; },
       async sendMessage(tabId, message) { calls.push({ action: "tab-message", tabId, message: clone(message) });
-        return message.type === "KAI_TRACKER_SEARCH_CONTEXT" ? { ok: true, result: searchContext } : { ok: true }; }
+        return message.type === "KAI_TRACKER_SEARCH_CONTEXT" ? { ok: true, result: searchContexts[tabId] || searchContext } : { ok: true }; },
+      onRemoved: { addListener(listener) { tabRemovedListeners.push(listener); } }
     },
     commands: { onCommand: { addListener() {} } },
-    scripting: { async executeScript() {} }
+    scripting: { async executeScript(options) { calls.push({ action: "execute-script", tabId: options.target?.tabId, args: clone(options.args) }); } }
   };
   const context = vm.createContext({
     chrome,
@@ -81,7 +94,19 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
     console,
     crypto: require("node:crypto").webcrypto,
     AbortSignal,
-    fetch: researchFetch || (async () => { throw new Error("Unexpected research request"); }),
+    fetch: async (url, options) => {
+      if (/\/job-research\/[a-f0-9-]{36}\/save-claim$/u.test(String(url))) {
+        const body = JSON.parse(options.body);
+        calls.push({ action: "save-claim", operation: body.action, destination: body.destination });
+        assert.equal(options.method, "POST");
+        assert.equal(body.destination, "applicantally-file:00000000-0000-0000-0000-000000000001");
+        assert.ok(["acquire", "settle"].includes(body.action));
+        return { ok: true, json: async () => body.action === "acquire"
+          ? { acquired: true, token: require("node:crypto").randomUUID() } : { settled: true } };
+      }
+      if (researchFetch) return researchFetch(url, options);
+      throw new Error("Unexpected research request");
+    },
     setTimeout(callback, delay) { const id = ++timerId; timers.set(id, { callback, delay }); return id; },
     clearTimeout(id) { timers.delete(id); },
     importScripts() {},
@@ -125,8 +150,12 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
     return { handled, response };
   }
 
-  return { calls, send, sendRaw, stored, sessionStored, context, chrome, timers };
+  return { calls, send, sendRaw, stored, sessionStored, context, chrome, timers, tabStates,
+    removeTab(tabId) { tabStates[tabId] = null; for (const listener of tabRemovedListeners) listener(tabId); } };
 }
+
+function collections(h) { return h.sessionStored[COLLECTIONS_KEY] || []; }
+function collection(h, tabId) { return collections(h).find(state => tabId === undefined || state.tabId === tabId) || null; }
 
 async function settle() {
   await new Promise((resolve) => setImmediate(resolve));
@@ -145,7 +174,7 @@ test("Jobright collector freezes committed search filters and validates source I
   await settle();
   const tab = { id: 9, url: jobrightUrl };
   await h.context.toggleJobCollection(tab);
-  const state = h.sessionStored.jobTrackerCollectionV1;
+  const state = collection(h);
   assert.equal(state.filterKey, jobrightFilters);
   assert.equal(state.searchKey, "https://jobright.ai/jobs/recommend");
   assert.equal(h.calls.find(c => c.message?.type === "KAI_TRACKER_RUN_START").message.state.filterKey, jobrightFilters);
@@ -153,10 +182,10 @@ test("Jobright collector freezes committed search filters and validates source I
   assert.equal((await send({ ...jobrightJob, searchContextKey: "changed-filter" })).response.ok, false);
   assert.equal((await send({ ...jobrightJob, jobId: "123" })).response.ok, false);
   assert.equal((await send({ ...jobrightJob, jobId: "6ad79ccb52aa6152bb69d5ce" })).response.ok, false);
-  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, []);
+  assert.deepEqual(collection(h).visited, []);
   const accepted = await send(jobrightJob);
   assert.equal(accepted.response.ok, true); assert.equal(accepted.response.result.queued, true);
-  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, [jobrightId]);
+  assert.deepEqual(collection(h).visited, [jobrightId]);
   assert.equal(h.stored.jobTrackerResearchV1[0].job.isEasyApply, true);
   assert.equal(h.stored.jobTrackerResearchV1[0].job.selectedRegion, "us");
   const checkpoint = await h.sendRaw({ type: "KAI_TRACKER_RUN_CHECKPOINT", runId: state.id,
@@ -170,7 +199,7 @@ test("Jobright collector freezes committed search filters and validates source I
 test("Jobright collector cannot start until a committed country filter is readable", async () => {
   const h = harness({ tabUrl: jobrightUrl }); await settle();
   await h.context.toggleJobCollection({ id: 9, url: jobrightUrl });
-  assert.equal(h.sessionStored.jobTrackerCollectionV1, undefined);
+  assert.equal(collection(h), null);
   assert.equal(h.calls.some(c => c.message?.type === "KAI_TRACKER_RUN_START"), false);
 });
 
@@ -178,10 +207,10 @@ test("Jobright query-bearing searches collect with the frozen filters and canoni
   const tab = { id: 9, url: "https://jobright.ai/jobs/recommend?sort=recent" };
   const h = harness({ tabUrl: tab.url, searchContext: { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" }, profiles: ["kevin", "jagjeet"] });
   await settle(); await h.context.toggleJobCollection(tab);
-  const state = h.sessionStored.jobTrackerCollectionV1;
+  const state = collection(h);
   const result = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: jobrightJob, runId: state.id }, "foreign", { url: "https://jobright.ai/jobs/info/" + jobrightId + "?sort=recent", tab });
   assert.equal(result.response.ok, true); assert.equal(result.response.result.queued, true);
-  assert.deepEqual(h.sessionStored.jobTrackerCollectionV1.visited, [jobrightId]);
+  assert.deepEqual(collection(h).visited, [jobrightId]);
 });
 
 test("content captures and failure reports cannot cross LinkedIn and Jobright sender boundaries", async () => {
@@ -246,7 +275,7 @@ test("pre-capture report messages enforce LinkedIn sender and active run identit
     sourceUrl: "https://www.linkedin.com/jobs/view/123/", detailAvailability: "unavailable" }, reasonCode: "DETAILS_NOT_CONFIRMED" };
   for (const sender of ["popup", "foreign"]) assert.equal((await h.sendRaw(message, sender)).response.error.code, "TRACKER_FORBIDDEN");
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
-  await h.context.toggleJobCollection(tab); const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  await h.context.toggleJobCollection(tab); const runId = collection(h).id;
   const denied = await h.sendRaw({ ...message, runId }, "linkedin", { tab: { id: 7 } });
   assert.equal(denied.response.error.code, "TRACKER_RUN_STOPPED");
   assert.equal(h.calls.some(call => call.action === "failure-report"), false);
@@ -277,7 +306,7 @@ test("popup, card click, collector and shortcut all save the search-selected UK 
     } else if (path === "collector") {
       const tab = { id: 7, url: target.sourceUrl };
       await h.context.toggleJobCollection(tab);
-      const runId = h.sessionStored.jobTrackerCollectionV1.id;
+      const runId = collection(h).id;
       const response = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: target, runId }, "linkedin", { tab });
       assert.equal(response.response.ok, true);
     } else {
@@ -418,7 +447,7 @@ test("collection hotkey toggles one tab run; stopped runs and other tabs cannot 
   const h = harness(); await settle();
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
   await h.context.toggleJobCollection(tab);
-  const state = h.sessionStored.jobTrackerCollectionV1;
+  const state = collection(h);
   assert.ok(state.id); assert.equal(state.tabId, tab.id);
   assert.equal(h.calls.find((entry) => entry.action === "tab-message").message.type, "KAI_TRACKER_RUN_START");
   const job = { jobId: "123", jobIdSource: "details", sourceUrl: tab.url, company: "New Company", title: "Engineer", description: "Description", workplaceType: "remote", isEasyApply: false };
@@ -426,7 +455,7 @@ test("collection hotkey toggles one tab run; stopped runs and other tabs cannot 
   assert.equal(outsider.response.error.code, "TRACKER_RUN_STOPPED");
   const otherState = await h.sendRaw({ type: "KAI_TRACKER_RUN_STATE" }, "linkedin", { tab: { id: 7 } });
   assert.equal(otherState.response.result.state, null);
-  await h.context.toggleJobCollection(tab); assert.equal(h.sessionStored.jobTrackerCollectionV1, null);
+  await h.context.toggleJobCollection(tab); assert.equal(collection(h), null);
   const late = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId: state.id }, "linkedin", { tab });
   assert.equal(late.response.error.code, "TRACKER_RUN_STOPPED");
   assert.equal(h.calls.some((entry) => entry.action === "save"), false);
@@ -437,7 +466,7 @@ test("automated capture claims each job durably once, including concurrent messa
   const requests = [];
   const h = harness({ researchFetch: async (url, options) => { requests.push(url); return successfulResearch(url, options); } }); await settle();
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
-  await h.context.toggleJobCollection(tab); const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  await h.context.toggleJobCollection(tab); const runId = collection(h).id;
   const job = engineeringJob;
   const results = await Promise.all([1, 2].map(() => h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId }, "linkedin", { tab })));
   assert.deepEqual(results.map((entry) => entry.response.result.status).sort(), ["researching", "skipped"]);
@@ -446,7 +475,7 @@ test("automated capture claims each job durably once, including concurrent messa
   const replay = await resumed.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId }, "linkedin", { tab });
   assert.equal(replay.response.result.status, "skipped"); assert.equal(resumed.calls.some((entry) => entry.action === "save"), false);
   const changed = await resumed.sendRaw({ type: "KAI_TRACKER_RUN_STATE" }, "linkedin", { tab, url: tab.url + "?keywords=different" });
-  assert.equal(changed.response.result.state, null); assert.equal(resumed.sessionStored.jobTrackerCollectionV1, null);
+  assert.equal(changed.response.result.state, null); assert.equal(collection(resumed), null);
 });
 test("automated collection accepts successive offline research captures without falsely counting saved jobs", async () => {
   const requests = [];
@@ -457,14 +486,14 @@ test("automated collection accepts successive offline research captures without 
   await settle();
   const tab = { id: 42, url: engineeringJob.sourceUrl };
   await h.context.toggleJobCollection(tab);
-  const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  const runId = collection(h).id;
   for (const [jobId, company] of [["123", "First Company"], ["456", "Second Company"]]) {
     const captured = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, jobId, company }, runId }, "linkedin", { tab });
     assert.equal(captured.response.ok, true);
     assert.equal(captured.response.result.status, "researching"); assert.equal(captured.response.result.queued, true);
     assert.equal(captured.response.result.requestId, requests.at(-1).requestId);
   }
-  const state = h.sessionStored.jobTrackerCollectionV1;
+  const state = collection(h);
   assert.equal(state.id, runId); assert.deepEqual(state.visited, ["123", "456"]);
   assert.deepEqual(state.counts, { saved: 0, researching: 2, skipped: 0 });
   assert.equal(h.stored.jobTrackerResearchV1.length, 2);
@@ -474,28 +503,28 @@ test("automated collection accepts successive offline research captures without 
 
   const replay = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, company: "First Company" }, runId }, "linkedin", { tab });
   assert.equal(replay.response.result.status, "skipped"); assert.equal(requests.length, 2);
-  assert.equal(h.sessionStored.jobTrackerCollectionV1.counts.researching, 2);
+  assert.equal(collection(h).counts.researching, 2);
 });
 test("an uncertain automatic write remains claimed after failure and cannot be replayed on worker recovery", async () => {
   const sessionStored = {}, tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
   const h = harness({ sessionStored, researchFetch: successfulResearch, saveError: Object.assign(new Error("Unconfirmed write"), { code: "TRACKER_SAVE_UNCONFIRMED" }) }); await settle();
-  await h.context.toggleJobCollection(tab); const runId = sessionStored.jobTrackerCollectionV1.id;
+  await h.context.toggleJobCollection(tab); const runId = collection({ sessionStored }).id;
   const job = engineeringJob;
   const queued = await h.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId }, "linkedin", { tab });
   assert.equal(queued.response.result.status, "researching");
   await vm.runInContext("researchClient.poll()", h.context);
-  assert.equal(h.stored.jobTrackerResearchV1[0].state, "save-unconfirmed"); assert.deepEqual(sessionStored.jobTrackerCollectionV1.visited, ["123"]);
+  assert.equal(h.stored.jobTrackerResearchV1[0].state, "save-unconfirmed"); assert.deepEqual(collection({ sessionStored }).visited, ["123"]);
   assert.equal(h.calls.filter((entry) => entry.action === "save").length, 1);
   const recovered = harness({ sessionStored, stored: h.stored }); await settle();
   const again = await recovered.sendRaw({ type: "KAI_TRACKER_CAPTURE", job, runId }, "linkedin", { tab });
   assert.equal(again.response.result.status, "skipped"); assert.equal(recovered.calls.some((entry) => entry.action === "save"), false);
 });
 
-test("background waits are bound to the owner and cancel immediately when stopped from another browser tab", async () => {
+test("background waits are bound to the owner and cancel immediately on the emergency shortcut from an unsupported tab", async () => {
   const h = harness(); await settle();
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
   await h.context.toggleJobCollection(tab);
-  const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  const runId = collection(h).id;
   const outsider = await h.sendRaw({ type: "KAI_TRACKER_RUN_WAIT", runId, milliseconds: 20_000 }, "linkedin", { tab: { id: 7 } });
   assert.equal(outsider.response.result.stopped, true);
   const invalid = await h.sendRaw({ type: "KAI_TRACKER_RUN_WAIT", runId, milliseconds: 30_000 }, "linkedin", { tab });
@@ -505,7 +534,7 @@ test("background waits are bound to the owner and cancel immediately when stoppe
   assert.ok([...h.timers.values()].some((timer) => timer.delay === 20_000));
   await h.context.toggleJobCollection({ id: 7, url: "https://example.test/" });
   assert.equal((await waiting).response.result.stopped, true);
-  assert.equal(h.sessionStored.jobTrackerCollectionV1, null);
+  assert.equal(collection(h), null);
   assert.equal([...h.timers.values()].some((timer) => timer.delay === 20_000), false);
   assert.deepEqual(h.calls.filter((entry) => entry.action === "tab-update").map((entry) => entry.properties),
     [{ autoDiscardable: false }, { autoDiscardable: true }]);
@@ -515,7 +544,7 @@ test("worker delay completion rechecks run ownership and preserves an existing n
   const h = harness({ autoDiscardable: false }); await settle();
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
   await h.context.toggleJobCollection(tab);
-  const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  const runId = collection(h).id;
   const waiting = h.sendRaw({ type: "KAI_TRACKER_RUN_WAIT", runId, milliseconds: 250 }, "linkedin", { tab });
   await settle();
   const pending = [...h.timers.values()].find((timer) => timer.delay === 250);
@@ -530,15 +559,281 @@ test("a new document after Next replaces the old document's pending delay withou
   const h = harness(); await settle();
   const tab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/" };
   await h.context.toggleJobCollection(tab);
-  const runId = h.sessionStored.jobTrackerCollectionV1.id;
+  const runId = collection(h).id;
   const oldWait = h.sendRaw({ type: "KAI_TRACKER_RUN_WAIT", runId, milliseconds: 250 }, "linkedin", { tab, documentId: "old-page" });
   await settle();
   const newWait = h.sendRaw({ type: "KAI_TRACKER_RUN_WAIT", runId, milliseconds: 200 }, "linkedin", { tab, documentId: "new-page" });
   await settle();
   assert.equal((await oldWait).response.result.stopped, true);
-  assert.equal(h.sessionStored.jobTrackerCollectionV1.id, runId);
+  assert.equal(collection(h).id, runId);
   const pending = [...h.timers.values()].find((timer) => timer.delay === 200);
   pending.callback();
   assert.equal((await newWait).response.result.stopped, false);
   await h.context.stopActiveCollection();
+});
+
+const linkedinTab = { id: 42, url: "https://www.linkedin.com/jobs/search-results/?keywords=backend&location=United+States" };
+const jobrightTab = { id: 9, url: jobrightUrl };
+const usSearchContext = { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" };
+
+async function dualCollectorHarness(options = {}) {
+  const h = harness({ profiles: ["kevin", "jagjeet"], researchFetch: async () => { throw new Error("offline"); },
+    tabStates: { [linkedinTab.id]: { ...linkedinTab, autoDiscardable: true }, [jobrightTab.id]: { ...jobrightTab, autoDiscardable: false } },
+    searchContexts: { [jobrightTab.id]: usSearchContext }, ...options });
+  await settle();
+  await Promise.all([h.context.toggleJobCollection(linkedinTab), h.context.toggleJobCollection(jobrightTab)]);
+  assert.equal(collections(h).length, 2);
+  return h;
+}
+
+function sendFromTab(h, tab, message, overrides = {}) {
+  return h.sendRaw(message, "foreign", { url: tab.url, tab, ...overrides });
+}
+
+test("LinkedIn and Jobright collect simultaneously with independent durable claims and research counts", async () => {
+  const h = await dualCollectorHarness();
+  const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+  assert.notEqual(liRun.id, jrRun.id);
+  assert.equal(jrRun.filterKey, jobrightFilters);
+  const liJob = { ...engineeringJob, sourceUrl: linkedinTab.url, selectedRegion: "us", selectedRegionSource: "search-control" };
+  const jrJob = { ...jobrightJob, company: "Jobright Company" };
+  const outcomes = await Promise.all([
+    sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_CAPTURE", job: liJob, runId: liRun.id }),
+    sendFromTab(h, jobrightTab, { type: "KAI_TRACKER_CAPTURE", job: jrJob, runId: jrRun.id })
+  ]);
+  assert.ok(outcomes.every(outcome => outcome.response.ok && outcome.response.result.queued));
+  assert.deepEqual(collection(h, linkedinTab.id).visited, [liJob.jobId]);
+  assert.deepEqual(collection(h, jobrightTab.id).visited, [jrJob.jobId]);
+  assert.deepEqual(collection(h, linkedinTab.id).counts, { saved: 0, researching: 1, skipped: 0 });
+  assert.deepEqual(collection(h, jobrightTab.id).counts, { saved: 0, researching: 1, skipped: 0 });
+  assert.equal(h.stored.jobTrackerResearchV1.length, 2);
+  assert.deepEqual(h.stored.jobTrackerResearchV1.map(record => record.tabId).sort((a, b) => a - b), [9, 42]);
+  assert.equal(h.calls.some(call => call.message?.type === "KAI_TRACKER_RUN_STOP"), false);
+  for (const [tab, run, job] of [[linkedinTab, liRun, liJob], [jobrightTab, jrRun, jrJob]]) {
+    const replay = await sendFromTab(h, tab, { type: "KAI_TRACKER_CAPTURE", job, runId: run.id });
+    assert.equal(replay.response.result.status, "skipped");
+    const state = await sendFromTab(h, tab, { type: "KAI_TRACKER_RUN_STATE" });
+    assert.equal(state.response.result.state.id, run.id);
+  }
+  assert.equal(h.stored.jobTrackerResearchV1.length, 2);
+});
+
+test("simultaneous approved LinkedIn and Jobright captures save with their own US experience-selected profiles", async () => {
+  const submitted = new Map();
+  const evidence = { linkedin: "5+ years of professional software engineering experience required.",
+    jobright: "3 years of professional software engineering experience required." };
+  const h = await dualCollectorHarness({ researchFetch: async (url, options) => {
+    if (options.method === "POST") {
+      const body = JSON.parse(options.body); submitted.set(body.requestId, body.job);
+      return { ok: true, json: async () => ({ state: "queued" }) };
+    }
+    const job = submitted.get(String(url).split("/").at(-1));
+    assert.ok(job, "only captured jobs are researched");
+    const isJobright = job.sourceUrl.startsWith("https://jobright.ai/");
+    return { ok: true, json: async () => ({ state: "completed", completedAt: new Date().toISOString(), result: {
+      decision: "save", company: job.company, title: job.title,
+      role: { eligible: true, category: "software-development", evidence: duties },
+      experience: { minimumYears: isJobright ? 3 : 5, scope: isJobright ? "senior" : "ordinary", evidence: isJobright ? evidence.jobright : evidence.linkedin },
+      application: { url: `https://careers.example.com/jobs/${isJobright ? "jobright-three" : "linkedin-five"}`, company: job.company,
+        title: job.title, applicationsOpen: true, free: true, evidence: "Open application form observed with submit button." }
+    } }) };
+  } });
+  const liJob = { ...engineeringJob, sourceUrl: linkedinTab.url, company: "US LinkedIn Five", title: "Software Engineer",
+    description: `${duties} ${evidence.linkedin}`, selectedRegion: "us", selectedRegionSource: "search-control" };
+  const jrJob = { ...jobrightJob, company: "US Jobright Three", title: "Senior Software Engineer", description: `${duties} ${evidence.jobright}` };
+  const captures = await Promise.all([[linkedinTab, liJob], [jobrightTab, jrJob]].map(([tab, job]) =>
+    sendFromTab(h, tab, { type: "KAI_TRACKER_CAPTURE", job, runId: collection(h, tab.id).id })));
+  assert.ok(captures.every(capture => capture.response.ok && capture.response.result.status === "researching"));
+  await vm.runInContext("researchClient.poll()", h.context);
+  const saves = h.calls.filter(call => call.action === "save");
+  assert.equal(saves.length, 2);
+  assert.equal(saves.find(call => call.company === liJob.company).options.profile, "kevin");
+  assert.equal(saves.find(call => call.company === jrJob.company).options.profile, "jagjeet");
+  assert.ok(saves.every(call => call.options.trashed === undefined));
+  assert.deepEqual(new Set(saves.map(call => call.options.requestId)), new Set(captures.map(capture => capture.response.result.requestId)));
+  assert.ok(h.stored.jobTrackerResearchV1.every(record => record.state === "saved" && record.terminal));
+  assert.equal(h.calls.filter(call => call.action === "save-claim" && call.operation === "acquire").length, 2);
+  assert.equal(h.calls.filter(call => call.action === "save-claim" && call.operation === "settle").length, 2);
+  assert.equal(collections(h).length, 2);
+});
+
+test("two active runs reject cross-tab run IDs and checkpoints without changing either history", async () => {
+  const h = await dualCollectorHarness();
+  const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+  const before = clone(collections(h));
+  for (const [tab, other, job] of [[linkedinTab, jrRun, { ...engineeringJob, sourceUrl: linkedinTab.url }], [jobrightTab, liRun, jobrightJob]]) {
+    const capture = await sendFromTab(h, tab, { type: "KAI_TRACKER_CAPTURE", job, runId: other.id });
+    assert.equal(capture.response.error.code, "TRACKER_RUN_STOPPED");
+    const wait = await sendFromTab(h, tab, { type: "KAI_TRACKER_RUN_WAIT", runId: other.id, milliseconds: 250 });
+    assert.equal(wait.response.result.stopped, true);
+    const checkpoint = await sendFromTab(h, tab, { type: "KAI_TRACKER_RUN_CHECKPOINT", runId: other.id,
+      state: { visited: [job.jobId], pages: [], counts: { saved: 99, researching: 0, skipped: 0 } } });
+    assert.equal(checkpoint.response.result.stopped, true);
+    const end = await sendFromTab(h, tab, { type: "KAI_TRACKER_RUN_END", runId: other.id });
+    assert.equal(end.response.result.stopped, true);
+  }
+  assert.deepEqual(collections(h), before);
+  assert.equal(h.stored.jobTrackerResearchV1.length, 0);
+});
+
+test("the shortcut stops only its own tab and preserves the other run's wait, checkpoints and discard preference", async () => {
+  const h = await dualCollectorHarness();
+  const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+  const liWait = sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_WAIT", runId: liRun.id, milliseconds: 251 });
+  const jrWait = sendFromTab(h, jobrightTab, { type: "KAI_TRACKER_RUN_WAIT", runId: jrRun.id, milliseconds: 252 });
+  await settle();
+  await h.context.toggleJobCollection(linkedinTab);
+  assert.equal((await liWait).response.result.stopped, true);
+  assert.equal(collection(h, linkedinTab.id), null);
+  assert.equal(collection(h, jobrightTab.id).id, jrRun.id);
+  const jrTimer = [...h.timers.values()].find(timer => timer.delay === 252);
+  assert.ok(jrTimer, "the second tab's delay remains pending");
+  jrTimer.callback();
+  assert.equal((await jrWait).response.result.stopped, false);
+  const checkpoint = await sendFromTab(h, jobrightTab, { type: "KAI_TRACKER_RUN_CHECKPOINT", runId: jrRun.id,
+    state: { visited: [jobrightId], pages: ["page-1"], counts: { saved: 0, researching: 1, skipped: 0 } } });
+  assert.equal(checkpoint.response.result.state.id, jrRun.id);
+  assert.deepEqual(collection(h, jobrightTab.id).visited, [jobrightId]);
+  assert.deepEqual(h.calls.filter(call => call.message?.type === "KAI_TRACKER_RUN_STOP").map(call => call.tabId), [linkedinTab.id]);
+  assert.equal(h.tabStates[linkedinTab.id].autoDiscardable, true);
+  assert.equal(h.tabStates[jobrightTab.id].autoDiscardable, false);
+  const stale = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_CAPTURE", job: { ...engineeringJob, sourceUrl: linkedinTab.url }, runId: liRun.id });
+  assert.equal(stale.response.error.code, "TRACKER_RUN_STOPPED");
+});
+
+test("a third automatic collector is rejected without stopping or resetting either active run", async () => {
+  const third = { id: 77, url: "https://www.linkedin.com/jobs/search-results/?keywords=java" };
+  const h = await dualCollectorHarness();
+  h.tabStates[third.id] = { ...third, autoDiscardable: true };
+  const before = clone(collections(h));
+  await h.context.toggleJobCollection(third);
+  assert.deepEqual(collections(h), before);
+  assert.equal(h.calls.filter(call => call.message?.type === "KAI_TRACKER_RUN_START").length, 2);
+  assert.equal(h.calls.some(call => call.message?.type === "KAI_TRACKER_RUN_STOP"), false);
+  assert.equal(h.tabStates[third.id].autoDiscardable, true);
+  assert.ok(h.calls.some(call => call.action === "execute-script" && call.tabId === third.id && /two|2/i.test(call.args?.[0])), "the limit is explained in the third tab");
+});
+
+test("an invalid Jobright country or failed second-tab controls leave the first collector running", async () => {
+  for (const failure of ["country", "controls"]) {
+    const h = harness({ tabStates: { [linkedinTab.id]: { ...linkedinTab, autoDiscardable: true }, [jobrightTab.id]: { ...jobrightTab, autoDiscardable: true } },
+      searchContexts: { [jobrightTab.id]: failure === "country" ? { ...usSearchContext, selectedRegion: "uk" } : usSearchContext } });
+    await settle();
+    await h.context.toggleJobCollection(linkedinTab);
+    const first = clone(collection(h, linkedinTab.id));
+    const original = h.chrome.tabs.sendMessage;
+    if (failure === "controls") h.chrome.tabs.sendMessage = async (tabId, message) =>
+      tabId === jobrightTab.id && message.type === "KAI_TRACKER_RUN_START" ? { ok: false, error: "Unable to start controls" } : original(tabId, message);
+    await h.context.toggleJobCollection(jobrightTab);
+    assert.deepEqual(collections(h), [first], failure);
+    assert.equal(h.tabStates[linkedinTab.id].autoDiscardable, false, failure);
+    assert.equal(h.tabStates[jobrightTab.id].autoDiscardable, true, failure);
+    assert.equal(h.calls.some(call => call.message?.type === "KAI_TRACKER_RUN_STOP" && call.tabId === linkedinTab.id), false, failure);
+    const state = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_STATE" });
+    assert.equal(state.response.result.state.id, first.id, failure);
+  }
+});
+
+test("ending or closing one collector never clears its peer or restores the peer's discard setting", async () => {
+  for (const reason of ["end", "close"]) {
+    const h = await dualCollectorHarness();
+    const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+    const before = h.calls.length;
+    if (reason === "end") {
+      const result = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_END", runId: liRun.id });
+      assert.equal(result.response.result.stopped, true);
+    } else { h.removeTab(linkedinTab.id); await settle(); }
+    assert.equal(collection(h, linkedinTab.id), null, reason);
+    assert.equal(collection(h, jobrightTab.id).id, jrRun.id, reason);
+    assert.equal(h.calls.slice(before).some(call => call.action === "tab-update" && call.tabId === jobrightTab.id), false, reason);
+    const peer = await sendFromTab(h, jobrightTab, { type: "KAI_TRACKER_RUN_STATE" });
+    assert.equal(peer.response.result.state.id, jrRun.id);
+  }
+});
+
+test("a changed search invalidates only that tab while worker recovery preserves the other run", async () => {
+  const h = await dualCollectorHarness();
+  const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+  const resumed = harness({ stored: h.stored, sessionStored: h.sessionStored, tabStates: clone(h.tabStates), searchContexts: { [jobrightTab.id]: usSearchContext } });
+  await settle();
+  assert.equal(collections(resumed).length, 2);
+  assert.equal(collection(resumed, linkedinTab.id).id, liRun.id);
+  assert.equal(collection(resumed, jobrightTab.id).id, jrRun.id);
+  const changed = await sendFromTab(resumed, linkedinTab, { type: "KAI_TRACKER_RUN_STATE" }, { url: linkedinTab.url + "&f_TPR=r86400" });
+  assert.equal(changed.response.result.state, null);
+  assert.equal(collection(resumed, linkedinTab.id), null);
+  assert.equal(collection(resumed, jobrightTab.id).id, jrRun.id);
+  assert.equal(resumed.tabStates[linkedinTab.id].autoDiscardable, true);
+  assert.equal(resumed.tabStates[jobrightTab.id].autoDiscardable, false);
+});
+
+test("worker recovery removes a missing tab's run and keeps the other collector available", async () => {
+  const h = await dualCollectorHarness();
+  const jrRun = clone(collection(h, jobrightTab.id));
+  const resumed = harness({ sessionStored: h.sessionStored,
+    tabStates: { [linkedinTab.id]: null, [jobrightTab.id]: clone(h.tabStates[jobrightTab.id]) } });
+  await settle();
+  assert.deepEqual(collections(resumed), [jrRun]);
+  const peer = await sendFromTab(resumed, jobrightTab, { type: "KAI_TRACKER_RUN_STATE" });
+  assert.equal(peer.response.result.state.id, jrRun.id);
+  assert.equal(resumed.calls.some(call => call.message?.type === "KAI_TRACKER_RUN_STOP" && call.tabId === jobrightTab.id), false);
+});
+
+test("new documents replace only their own pending wait when both collectors are running", async () => {
+  const h = await dualCollectorHarness();
+  const liRun = collection(h, linkedinTab.id), jrRun = collection(h, jobrightTab.id);
+  const oldWait = sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_WAIT", runId: liRun.id, milliseconds: 251 }, { documentId: "old-document" });
+  const peerWait = sendFromTab(h, jobrightTab, { type: "KAI_TRACKER_RUN_WAIT", runId: jrRun.id, milliseconds: 252 }, { documentId: "jobright-document" });
+  await settle();
+  const newWait = sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_WAIT", runId: liRun.id, milliseconds: 253 }, { documentId: "new-document" });
+  await settle();
+  assert.equal((await oldWait).response.result.stopped, true);
+  assert.equal(collections(h).length, 2);
+  for (const delay of [252, 253]) { const timer = [...h.timers.values()].find(item => item.delay === delay); assert.ok(timer); timer.callback(); }
+  assert.equal((await peerWait).response.result.stopped, false);
+  assert.equal((await newWait).response.result.stopped, false);
+});
+
+test("settings changes and the emergency shortcut stop both collectors and cancel both waits", async () => {
+  for (const reason of ["configure", "clear", "emergency"]) {
+    const h = await dualCollectorHarness();
+    const waits = [linkedinTab, jobrightTab].map((tab, index) => sendFromTab(h, tab, { type: "KAI_TRACKER_RUN_WAIT", runId: collection(h, tab.id).id, milliseconds: 251 + index }));
+    await settle();
+    if (reason === "emergency") await h.context.toggleJobCollection({ id: 77, url: "https://example.test/" });
+    else {
+      const result = await h.send({ type: reason === "configure" ? "KAI_TRACKER_CONFIGURE" : "KAI_TRACKER_CLEAR_CONFIG" }, "popup");
+      assert.equal(result.ok, true, JSON.stringify(result));
+    }
+    assert.ok((await Promise.all(waits)).every(result => result.response.result.stopped), reason);
+    assert.deepEqual(collections(h), [], reason);
+    assert.equal(h.tabStates[linkedinTab.id].autoDiscardable, true, reason);
+    assert.equal(h.tabStates[jobrightTab.id].autoDiscardable, false, reason);
+    assert.deepEqual(h.calls.filter(call => call.message?.type === "KAI_TRACKER_RUN_STOP").map(call => call.tabId).sort((a, b) => a - b), [9, 42], reason);
+  }
+});
+
+test("legacy single-run state migrates once with the same identity, history and discard preference", async () => {
+  const legacy = { id: "legacy-run", tabId: linkedinTab.id, searchKey: "https://www.linkedin.com/jobs/search-results/?keywords=backend&location=United+States",
+    originalAutoDiscardable: true, visited: ["123"], pages: ["first-page"], counts: { saved: 0, researching: 1, skipped: 0 } };
+  const sessionStored = { jobTrackerCollectionV1: clone(legacy) };
+  const h = harness({ sessionStored, tabStates: { [linkedinTab.id]: clone(linkedinTab) } });
+  await settle();
+  assert.deepEqual(collections(h), [legacy]);
+  assert.ok(!sessionStored.jobTrackerCollectionV1, "the legacy key cannot resurrect a stopped run");
+  const own = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_STATE" });
+  assert.equal(own.response.result.state.id, legacy.id);
+  await h.context.toggleJobCollection(linkedinTab);
+  assert.deepEqual(collections(h), []);
+  const resumed = harness({ sessionStored, tabStates: { [linkedinTab.id]: clone(linkedinTab) } });
+  await settle();
+  assert.deepEqual(collections(resumed), []);
+});
+
+test("an existing empty V2 state does not resurrect stale legacy collection data", async () => {
+  const sessionStored = { [COLLECTIONS_KEY]: [], jobTrackerCollectionV1: { id: "stale", tabId: linkedinTab.id, searchKey: linkedinTab.url } };
+  const h = harness({ sessionStored, tabStates: { [linkedinTab.id]: clone(linkedinTab) } });
+  await settle();
+  assert.deepEqual(collections(h), []);
+  const state = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_STATE" });
+  assert.equal(state.response.result.state, null);
 });

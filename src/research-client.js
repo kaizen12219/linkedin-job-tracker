@@ -9,6 +9,7 @@
   const ALARM = "job-tracker-research";
   const MAX_AGE = 24 * 60 * 60 * 1000;
   const RETRYABLE_STATUS = new Set([408, 429, 502, 503, 504]);
+  const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
   function researchUnavailable(status) {
     return Object.assign(new Error("Job research is temporarily unavailable. This job is queued and will retry automatically when the local research worker is running."),
       { code: "RESEARCH_UNAVAILABLE", retryableResearch: true, ...(status ? { status } : {}) });
@@ -32,7 +33,7 @@
     }
     async function write(records) {
       await storage.set({ [STORAGE_KEY]: records });
-      if (records.some((record) => !record.terminal)) await alarms.create(ALARM, { periodInMinutes: 0.5 });
+      if (records.some((record) => !record.terminal || record.saveClaim)) await alarms.create(ALARM, { periodInMinutes: 0.5 });
       else await alarms.clear(ALARM);
     }
     async function clientKey() {
@@ -42,6 +43,91 @@
         await storage.set({ [CLIENT_KEY]: value });
       }
       return value;
+    }
+    const fileDestination = (destination) => typeof destination === "string" && destination.startsWith("applicantally-file:");
+    function coordinationFailure(error) {
+      return Object.assign(new Error(error?.message || "Another browser is saving this company. This job will retry automatically."),
+        { code: error?.code === "SAVE_COORDINATION_BUSY" ? error.code : "SAVE_COORDINATION_UNAVAILABLE", saveCoordination: true });
+    }
+    async function persistSaveState(records) {
+      try { await write(records); }
+      catch (error) { error.saveStatePersistence = true; throw error; }
+    }
+    async function acquireSaveClaim(record, records) {
+      record.saveClaim = { ...record.saveClaim, destination: record.sheetUrl, phase: "acquiring" };
+      record.terminal = false; record.state = "waiting-save";
+      await persistSaveState(records);
+      let result;
+      try {
+        if (!UUID.test(record.sheetUrl.slice("applicantally-file:".length))) throw new Error("The original ApplicantAlly destination is invalid.");
+        result = await request(`/${encodeURIComponent(record.requestId)}/save-claim`, { action: "acquire", destination: record.sheetUrl });
+        if (result?.acquired !== true || !UUID.test(result.token || "")) throw coordinationFailure(result);
+      } catch (error) { throw error.saveCoordination ? error : coordinationFailure(error); }
+      record.saveClaim = { token: result.token, destination: record.sheetUrl, phase: "writing" };
+      record.terminal = false; record.state = "waiting-save";
+      // A crash can replay the same request/file. Never write before ownership
+      // and its recovery identity have reached durable browser storage.
+      await persistSaveState(records);
+    }
+    async function settleSaveClaim(record, records) {
+      const claim = record.saveClaim;
+      if (claim?.phase !== "settle") return false;
+      try {
+        const result = await request(`/${encodeURIComponent(record.requestId)}/save-claim`,
+          { action: "settle", destination: claim.destination, token: claim.token });
+        if (result?.settled !== true) return false;
+      } catch { return false; }
+      delete record.saveClaim;
+      delete record.saveResearch;
+      await persistSaveState(records);
+      return true;
+    }
+    async function cancelSaveClaim(record, records) {
+      if (!record.saveClaim) return true;
+      record.saveCancelled = true; record.terminal = true; record.state = "cancelled";
+      await persistSaveState(records);
+      if (record.saveClaim.phase !== "settle") {
+        // This function runs only after this client's save promise has settled.
+        // Recover an ambiguous grant before cancelling; never start a file write.
+        if (!record.saveClaim.token) {
+          let result;
+          try { result = await request(`/${encodeURIComponent(record.requestId)}/save-claim`, { action: "acquire", destination: record.saveClaim.destination }); }
+          catch { return false; }
+          if (result?.acquired !== true || !UUID.test(result.token || "")) return false;
+          record.saveClaim.token = result.token;
+        }
+        record.saveClaim.phase = "settle";
+        await persistSaveState(records);
+      }
+      return settleSaveClaim(record, records);
+    }
+    async function saveJob(record, job, records, response) {
+      const gated = fileDestination(record.sheetUrl);
+      if (gated) {
+        record.saveResearch = { state: response.state, completedAt: response.completedAt, result: response.result };
+        await acquireSaveClaim(record, records);
+      }
+      let result;
+      try {
+        result = await sheetClient.saveJob(job, { profile: record.profile, requestId: record.requestId,
+          ...(gated ? { sheetUrl: record.sheetUrl,
+            ...(Date.now() - Date.parse(response.completedAt) >= 60 * 60 * 1000 ? { replayOnly: true } : {}) } : {}) });
+      } catch (error) {
+        if (gated) {
+          // The filesystem promise has settled, including close/abort. Only
+          // this phase may release a claim, even after a worker restart.
+          record.saveClaim.phase = "settle";
+          await persistSaveState(records);
+        }
+        throw error;
+      }
+      record.terminal = true; record.state = "saved";
+      if (gated) {
+        record.saveClaim.phase = "settle";
+        await persistSaveState(records);
+        await settleSaveClaim(record, records);
+      }
+      return result;
     }
     async function request(route, body) {
       // Storage errors must remain errors: only a failed research request can
@@ -214,8 +300,9 @@
           profile: selection?.profile ?? (routing ? "" : profile), tabId,
           ...(routing ? { profileRouting: routing } : {}), ...(selection ? { profileSelection: selection } : {}),
           sheetUrl: state.sheetUrl, createdAt: Date.now(), state: "requesting" };
-        const active = records.filter((entry) => !entry.terminal);
-        const history = records.filter((entry) => entry.terminal && Date.now() - entry.createdAt < MAX_AGE).slice(-(199 - active.length));
+        const active = records.filter((entry) => !entry.terminal || entry.saveClaim);
+        const historyLimit = Math.max(0, 199 - active.length);
+        const history = historyLimit ? records.filter((entry) => entry.terminal && !entry.saveClaim && Date.now() - entry.createdAt < MAX_AGE).slice(-historyLimit) : [];
         const next = [...history, ...active, record];
         await write(next);
         if (selection) await onProfileSelected(record, selection);
@@ -240,17 +327,26 @@
     async function poll() {
       return serial(async () => {
         const records = await read();
+        // Saved terminal records still owe an ACK if the worker went offline
+        // after close. Retrying it must never repeat or reverse their save.
+        for (const record of records) {
+          if (record.saveCancelled && record.saveClaim) await cancelSaveClaim(record, records);
+          else if (record.saveClaim?.phase === "settle") await settleSaveClaim(record, records);
+        }
         const state = await sheetClient.getStatus();
         for (const record of records.filter((entry) => !entry.terminal)) {
+          if (record.saveClaim?.phase === "settle") continue;
           const roleSkipReason = JobCapturePolicy.roleSkipReason(record.job);
           if (roleSkipReason) {
+            if (record.saveClaim) await cancelSaveClaim(record, records);
             record.terminal = true; record.state = "skipped";
             await notSaved(record, { stage: "local-policy", reason: roleSkipReason });
             await write(records);
             await onOutcome(record, roleSkipReason);
             continue;
           }
-          if (!state.configured || state.sheetUrl !== record.sheetUrl || Date.now() - record.createdAt > MAX_AGE) {
+          if (!state.configured || state.sheetUrl !== record.sheetUrl || (!record.saveClaim && Date.now() - record.createdAt > MAX_AGE)) {
+            if (record.saveClaim) await cancelSaveClaim(record, records);
             record.terminal = true; record.state = "cancelled";
             await notSaved(record, { stage: "queue", reason: !state.configured ? "ApplicantAlly folder configuration was cleared."
               : state.sheetUrl !== record.sheetUrl ? "The ApplicantAlly destination changed after this job was captured."
@@ -259,11 +355,14 @@
           }
           let response;
           try {
-            if (record.state === "requesting") {
-              freezeAcceptedSettings(record, await request("", submission(record)));
-              record.state = "researching";
+            if (["acquiring", "writing"].includes(record.saveClaim?.phase) && record.saveResearch) response = record.saveResearch;
+            else {
+              if (record.state === "requesting") {
+                freezeAcceptedSettings(record, await request("", submission(record)));
+                record.state = "researching";
+              }
+              response = await request(`/${encodeURIComponent(record.requestId)}`);
             }
-            response = await request(`/${encodeURIComponent(record.requestId)}`);
           } catch (error) {
             // One outage must not hold the capture queue for 12 seconds per job.
             // The next alarm retries, retaining the original request IDs.
@@ -271,7 +370,10 @@
               await notSaved(record, { stage: "research", status: "pending", reason: error.message, error, willRetry: true });
               break;
             }
-            if (error.status === 404 || error.status === 409) { record.terminal = true; record.state = "failed"; }
+            if (error.status === 404 || error.status === 409) {
+              if (record.saveClaim) await cancelSaveClaim(record, records);
+              record.terminal = true; record.state = "failed";
+            }
             await notSaved(record, { stage: "research", status: record.terminal ? "failed" : "pending", reason: error.message, error, willRetry: !record.terminal });
             continue;
           }
@@ -282,14 +384,18 @@
           }
           // Captures carry a persistent request ID. A lost local-store response
           // can be retried without inserting the job twice.
-          record.terminal = true;
+          record.terminal = !fileDestination(record.sheetUrl);
           record.state = response.state === "failed" ? "failed" : "skipped";
           await write(records);
           const verifiedAt = Date.parse(response.completedAt);
           const job = response.state === "completed" && Number.isFinite(verifiedAt) &&
-            Date.now() - verifiedAt < 60 * 60 * 1000 && verifiedAt <= Date.now() + 60_000
+            (record.saveClaim || Date.now() - verifiedAt < 60 * 60 * 1000) && verifiedAt <= Date.now() + 60_000
             ? JobCapturePolicy.verifiedJob(record.job, response.result) : null;
           if (!job) {
+            if (record.saveClaim) {
+              await cancelSaveClaim(record, records);
+            }
+            record.terminal = true;
             const failure = verificationFailure(record, response, verifiedAt);
             await notSaved(record, { ...failure, research: response, error: { code: failure.code, message: failure.reason } });
             await write(records);
@@ -311,18 +417,24 @@
               await write(records);
             }
             if (await bannedCompanies.has(job.company)) throw Object.assign(new Error("Skipped: company is banned."), { code: "BANNED_COMPANY" });
-            const result = await sheetClient.saveJob(job, { profile: record.profile, requestId: record.requestId });
-            record.state = "saved";
+            const result = await saveJob(record, job, records, response);
             try { await onSaved(job.company); } catch { /* Post-save UI updates cannot reverse a confirmed file save. */ }
             try { await onOutcome(record, "Saved to ApplicantAlly.", result); } catch { /* Reporting and notifications remain independent of saving. */ }
           } catch (error) {
-            if (error.code === "LOCAL_STORE_UNAVAILABLE") {
+            if (error.saveStatePersistence) throw error;
+            if (error.saveCoordination || error.code === "LOCAL_STORE_UNAVAILABLE") {
               record.terminal = false;
               record.state = "waiting-save";
-              await notSaved(record, { stage: "save", status: "pending", reason: error.message, error, research: response, willRetry: true });
+              await notSaved(record, { stage: error.saveCoordination ? "save-coordination" : "save", status: "pending", reason: error.message, error, research: response, willRetry: true });
+              await write(records);
+              await settleSaveClaim(record, records);
               continue;
             }
+            if (record.saveClaim && record.saveClaim.phase !== "settle") await cancelSaveClaim(record, records);
+            record.terminal = true;
             record.state = error.code === "TRACKER_SAVE_UNCONFIRMED" ? "save-unconfirmed" : "failed";
+            await write(records);
+            await settleSaveClaim(record, records);
             await notSaved(record, { stage: /^PROFILE_/u.test(error.code || "") ? "profile-selection" : "save", reason: error.message, error, research: response });
             await onOutcome(record, error.code === "BANNED_COMPANY" ? error.message
               : error.code === "TRACKER_SAVE_UNCONFIRMED" ? "Save not confirmed. Check ApplicantAlly."
@@ -334,11 +446,16 @@
       });
     }
     function clear() { return serial(async () => {
-      for (const record of (await read()).filter(entry => !entry.terminal)) {
+      const records = await read();
+      for (const record of records) if (record.saveClaim?.phase === "settle") await settleSaveClaim(record, records);
+      for (const record of records.filter(entry => !entry.terminal)) {
+        if (record.saveClaim) await cancelSaveClaim(record, records);
         record.state = "cancelled";
         await notSaved(record, { stage: "queue", reason: "Pending research was cleared by the user." });
       }
-      await storage.remove(STORAGE_KEY); await alarms.clear(ALARM);
+      const retained = records.filter(record => record.saveClaim);
+      if (retained.length) await write(retained);
+      else { await storage.remove(STORAGE_KEY); await alarms.clear(ALARM); }
     }); }
     return { start, poll, clear, getModels, setModel, setReasoningEffort, startWorker };
   }

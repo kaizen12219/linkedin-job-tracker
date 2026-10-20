@@ -82,15 +82,18 @@
       const current = [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('');
       return current === revision ? { revision: current, unchanged: true } : { companies, revision: current, unchanged: false };
     }
-    function saveJob(input, { profile = '', requestId = cryptoImpl.randomUUID() } = {}) {
+    function saveJob(input, { profile = '', requestId = cryptoImpl.randomUUID(), sheetUrl = '', replayOnly = false } = {}) {
       const save = async () => {
         const folder = await workspace();
+        if (sheetUrl && sheetUrl !== `applicantally-file:${folder.descriptor.storeId}`)
+          throw fail('The ApplicantAlly destination changed after this job was captured. Nothing was saved.', 'SAVE_DESTINATION_CHANGED');
         if (!/^[a-f0-9-]{36}$/u.test(requestId)) throw fail('Invalid capture identity.', 'INVALID_CAPTURE_REQUEST');
         const name = `capture-${requestId}.json`;
         const records = await recordsAt(folder, { includeDeleted: true });
         const existing = records.find(value => value.name === name || value.record.job.captureRequestId === requestId);
         if (existing?.record.deleted) throw fail('This captured job was deleted in ApplicantAlly.', 'CAPTURE_DELETED');
         if (existing) return { inserted: false, replayed: true, job: existing.record.job, rowNumber: existing.record.job.rowNumber || null };
+        if (replayOnly) throw fail('The research result expired before a job was saved. Nothing was added.', 'RESEARCH_RESULT_EXPIRED');
         const job = { company: normalize(input.company), jobTitle: normalize(input.jobTitle || input.title),
           jobDescription: String(input.jobDescription || input.description || '').trim(), applyUrl: normalize(input.applyUrl),
           info: String(input.info || ''), profile, status: 'added',

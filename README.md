@@ -2,6 +2,8 @@
 
 This extension captures qualifying LinkedIn and Jobright jobs into ApplicantAlly. Research uses independent Codex sessions in Rezi Builder; saving and duplicate checks use ApplicantAlly’s local JSON store.
 
+Current release: **0.8.0**. See [CHANGELOG.md](CHANGELOG.md) for changes and the versioning policy. Future releases increment the patch version for fixes, the minor version for compatible features, and the major version for incompatible changes.
+
 ## Install and start
 
 1. For first-time setup, open ApplicantAlly once to prepare its app-folder store. It may then be closed.
@@ -10,6 +12,8 @@ This extension captures qualifying LinkedIn and Jobright jobs into ApplicantAlly
 4. Open the popup’s **Folder settings** and choose the extracted ApplicantAlly app folder or its `data/workspace` directory.
 5. On Windows, run `scripts/install-research-helper.cmd` once, reload the extension, and click **Start / reconnect research** in its popup. Keep Codex signed in. The helper can start the worker again after a PC reboot without editing source files. `scripts/start-research.ps1` remains available for manual startup.
 6. Open LinkedIn jobs or sign in to Jobright and open your job recommendations. Capture a job. Profiles, duplicate checks and saves use the selected folder directly.
+
+Chrome and SunBrowser use separate extension installations and browser-profile settings. If LinkedIn is in SunBrowser and Jobright is in Chrome, install or reload the updated extension in **both**, and choose the ApplicantAlly folder in each popup. Sign in to each site in the browser where it will collect. Signing in through Codex's in-app browser does not install or authorize the tracker in Chrome or SunBrowser. Each browser profile can run up to two collectors independently. Both installations can use the same local research worker; model/level choices and folder permission are stored per extension profile, and each queued job retains its own frozen settings.
 
 The popup’s **AI research model** and **Reasoning level** selectors load choices from the signed-in session’s catalog. Levels such as Medium, High, Extra high and Ultra appear only when the chosen model supports them. Choose a model or **Session default** and a level or **Automatic**, and use **Refresh models** after changing accounts or when choices change. Automatic retains the existing research default (Extra high when supported). Switching models keeps a supported level and resets an unsupported level to Automatic. These settings apply to new job sessions. Each queued capture freezes its model and level, and retries and recovered sessions retain both. Discovery uses the existing local research worker; profile reads and saves continue to use ApplicantAlly’s folder directly.
 
@@ -54,7 +58,11 @@ The search country dropdown takes priority over stale URL state, and committed U
 
 ## Collect a search automatically
 
-On LinkedIn job search results or Jobright recommendations, press **Ctrl+Shift+U** to start collecting active jobs from the top of the current results page. Collection continues when you switch tabs, use another app, or minimize SunBrowser. Keep the browser and job-results tab open. Press the same shortcut from any tab in that browser to stop, or press **Escape** on the collecting tab. Collection runs without a progress panel or per-job messages. Only start/stop/completion alerts, warnings and errors appear, and each disappears after five seconds. You can change the shortcut at `chrome://extensions/shortcuts`.
+On LinkedIn job search results or Jobright recommendations, press **Ctrl+Shift+U** to start collecting active jobs from the top of the current results page. Up to **two tabs** can collect automatically at the same time in one browser profile, including one LinkedIn tab and one Jobright tab. Start the first, switch to the second results tab, and press the shortcut again. A third start is rejected while both existing runs continue.
+
+On a collecting tab, **Ctrl+Shift+U** or **Escape** stops only that tab's run. On another eligible results tab, the shortcut starts that tab if a slot is available. From an unsupported page, **Ctrl+Shift+U** stops all collectors in that browser profile. Changing the ApplicantAlly destination in Folder settings also stops all collectors in that profile. Each run has separate search/filter context, attempted-job history, progress and cancellable waits; stopping one does not cancel the other's work or research already submitted.
+
+Collection continues when you switch tabs, use another app, or minimize Chrome or SunBrowser. Keep the browser and job-results tabs open. Collection runs without a progress panel or per-job messages. Only start/stop/completion alerts, warnings and errors appear, and each disappears after five seconds. You can change the shortcut at `chrome://extensions/shortcuts`.
 
 Jobright collection scrolls the recommendations feed to load more cards and continues until the feed ends. It uses the same duplicate/banned-company checks, per-job research sessions, model/reasoning settings, profile routing and failure reports. It waits for the selected card's exact job details before capture. Incomplete details, repeated cards or a loading failure cannot authorize a save. LinkedIn's native × dismissal behavior described below applies to LinkedIn only.
 
@@ -62,9 +70,9 @@ The collector skips duplicate/banned companies, jobs already processed in the ru
 
 On LinkedIn, the results column scrolls to discover more cards, then the collector uses **Next** until the last results page. Lazy-loaded cards are checked before pagination. Jobright scrolls its recommendations feed until no more results load and does not use LinkedIn's Next control. A repeated page, a blocked click, incomplete job details, or a failed loading transition cannot authorize a save. If the research worker is temporarily unavailable or busy, jobs remain durably queued and collection continues; submission retries about every 30 seconds while Chrome is running, using the same request IDs. A queued job is not a saved job: it still needs successful AI checks before writing to ApplicantAlly. Temporary local-store outages keep verified research queued; saves retry with the same request ID, so a lost response cannot duplicate a job. LinkedIn's native duplicate/banned X dismissal is suspended during collection so it cannot race the paced selections.
 
-Collection delays run in the extension worker in cancellable intervals of at most 20 seconds, so hidden-page timer throttling does not stretch every polling or review interval. Delays use elapsed time; each wake rechecks job identity and never catches up by firing a burst of clicks. An exclusive Web Lock gives the collector one tab owner and protects its active work from Chrome's automatic freezing. The collecting tab temporarily disables automatic discarding and restores its previous preference when the run ends. Background scrolling is immediate so hidden-page animations cannot block selection. All page-overlay and exact-job checks still apply; collection never activates a tab or brings the browser to the foreground.
+Collection delays run in the extension worker in cancellable intervals of at most 20 seconds, so hidden-page timer throttling does not stretch every polling or review interval. Delays use elapsed time; each wake rechecks job identity and never catches up by firing a burst of clicks. Each collecting tab holds its own Web Lock to protect its active work from Chrome's automatic freezing. Each tab temporarily disables automatic discarding and restores its previous preference when its run ends. Background scrolling is immediate so hidden-page animations cannot block selection. All page-overlay and exact-job checks still apply; collection never activates a tab or brings the browser to the foreground.
 
-Changing the search or manually operating a job/navigation control stops the run. Progress in Chrome session storage lets a normal LinkedIn Next-page navigation or worker restart continue without replaying attempted jobs; closing the tab ends the run, and Chrome clears [session storage](https://developer.chrome.com/docs/extensions/reference/api/storage#session) when the browser restarts or the extension reloads. Reloading the extension stops the current collection run. Research requests already submitted continue through the existing validation pipeline after collection stops. Closing the browser or putting the PC to sleep stops browser execution; it is not a background service outside SunBrowser.
+Changing a tab's search or manually operating its job/navigation controls stops that tab's run. Progress in Chrome session storage lets a normal LinkedIn Next-page navigation or worker restart continue each run without replaying attempted jobs; closing a tab ends only its run, and Chrome clears [session storage](https://developer.chrome.com/docs/extensions/reference/api/storage#session) when the browser restarts or the extension reloads. Reloading the extension stops its collection runs. Research requests already submitted continue through the existing validation pipeline after collection stops. Closing the browser or putting the PC to sleep stops browser execution; collection requires its browser to remain running.
 
 ## Duplicate and banned-company behavior
 
@@ -90,6 +98,8 @@ Each eligible result is written to its own file with the capture’s persistent 
 
 Writes from the popup and keyboard shortcut are serialized inside one extension service worker and across extension contexts with a Web Lock. The tracker checks current company records immediately before writing, commits the file through a writable stream, and reads it back to confirm the capture identity. ApplicantAlly uses its existing file-store writer lock when importing and editing jobs. Tracker captures never choose Google Sheet gaps or invoke the Google Sheets Values API.
 
+Separate browsers do not share Web Locks. Before saving, each installation obtains a durable claim from the existing local research worker for the destination ID and normalized company, then checks the actual folder records again. This prevents Chrome and SunBrowser from simultaneously adding the same company to a shared folder. Different companies can proceed independently. The worker stores ownership metadata only; the extension still reads profiles and writes job files directly. A busy or unavailable gate keeps the save pending. Claims do not expire while a browser could still resume a write; the original capture recovers its ownership after a restart. After the file operation finishes, the extension releases the claim and retries a lost acknowledgment separately.
+
 If a result is uncertain, check the job in ApplicantAlly before trying again. Capture receipts belong to the central store; different captures are also protected by its duplicate-company check.
 
 ## Network and permissions
@@ -97,7 +107,7 @@ If a result is uncertain, check the job in ApplicantAlly before trying again. Ca
 Runtime network access is limited to:
 
 - LinkedIn job pages for scraping and native card dismissal, and `https://jobright.ai` / `https://www.jobright.ai` job recommendations and details for scraping and collection. No other Jobright subdomains are granted.
-- `http://127.0.0.1:8787/job-research` for public captured job details and scoped research results. Google credentials and candidate profiles are not sent to this endpoint.
+- `http://127.0.0.1:8787/job-research` for public captured job details, scoped research results and save-claim ownership metadata. Google credentials, candidate profiles and ApplicantAlly folder paths are not sent to this endpoint.
 - Chrome’s granted folder handle for local profile choices, duplicate checks, company snapshots and saves. These operations perform no HTTP requests.
 - Chrome Native Messaging for the popup’s start/status-only research helper. The helper starts the fixed local research worker; it receives no profiles or job-store data.
 
@@ -106,6 +116,8 @@ The extension has no Google API or arbitrary research-site permissions. The isol
 ## Development and distribution
 
 Run `npm test` for offline tests with synthetic local-store and research responses; retained legacy Google client tests also use generated credentials and synthetic responses. Tests never access a live account or write live jobs or a live Sheet. The legacy Google client is neither imported by the tracker nor included in its packaged extension.
+
+Run `npm run check:version` to verify that the manifest, package and root lockfile versions match. Tests and the npm packaging command run this check automatically. Follow [CHANGELOG.md](CHANGELOG.md#versioning-policy) for release increments and record each distributed release there.
 
 Run `npm run preview:popup` for the synthetic popup fixture. Supported modes include `?mode=unconfigured`, `?mode=offline`, `?mode=duplicate`, and `?mode=uncertain`.
 

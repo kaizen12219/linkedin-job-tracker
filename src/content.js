@@ -507,12 +507,13 @@
     if (!response?.ok) throw new Error(response?.error?.message || "Collection timing is unavailable. Collection stopped.");
     return response.result?.stopped !== true;
   }
-  function acquireCollectionLease() {
+  function acquireCollectionLease(runId) {
     if (!window.navigator?.locks?.request) throw new Error("This browser cannot run background collection. Update SunBrowser.");
+    if (typeof runId !== "string" || !runId || runId.length > 128) throw new Error("The collection identity is invalid. Restart job collection.");
     return new Promise((resolve, reject) => {
-      // One tab owns collection at a time. The lock also keeps Chrome from
-      // freezing that owner while its authorized background work is pending.
-      window.navigator.locks.request("linkedin-job-tracker-collection", { ifAvailable: true }, (lock) => {
+      // Only one document owns this run, including across reloads. Holding its
+      // lock also keeps Chrome from freezing authorized background collection.
+      window.navigator.locks.request(`job-tracker-collection:${runId}`, { ifAvailable: true }, (lock) => {
         if (!lock) { reject(new Error("Another collection is still stopping. Try again shortly.")); return; }
         return new Promise((release) => resolve(release));
       }).catch(reject);
@@ -536,9 +537,10 @@
     }
     const readableCards = () => uniqueCards().map(readCard).filter((record) => record.captureId && record.company && record.title);
     collectionWaiting = { ...state, localVersion: version };
-    let releaseLease = () => {}, ready = false;
+    let releaseLease = () => {}, ready = false, leaseAcquired = false;
     try {
-      releaseLease = await acquireCollectionLease();
+      releaseLease = await acquireCollectionLease(state.id);
+      leaseAcquired = true;
       for (let elapsed = 0; !readableCards().length && elapsed < 15_000; elapsed += 200) {
         if (!await waitForCollection(200, state.id)) return;
         if (version !== collectionStartVersion) return;
@@ -547,7 +549,7 @@
       if (!readableCards().length) throw new Error("Results did not finish loading. Job collection stopped.");
       ready = true;
     } catch (error) {
-      await collectionMessage({ type: "KAI_TRACKER_RUN_END", runId: state.id });
+      if (leaseAcquired) await collectionMessage({ type: "KAI_TRACKER_RUN_END", runId: state.id });
       collectionStatus(error.message, state, true);
       throw error;
     } finally {

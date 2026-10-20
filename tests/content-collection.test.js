@@ -3,11 +3,12 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const { JSDOM } = require("jsdom");
+const collectionLocks = require("./fixtures/collection-locks.js");
 const root = path.resolve(__dirname, "..");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const item = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: `Engineer ${id}`, description: `Job ${id}. ` + "Build useful software for our customers. ".repeat(15), ...extra });
 function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, covered = false, restoredVisited = [], renderDelay = 0, holdCapture = false,
-  standaloneTitle = false, dismissRemovesCard = false, reportError = false } = {}) {
+  standaloneTitle = false, dismissRemovesCard = false, reportError = false, locks = collectionLocks(), runId = "authorized-run" } = {}) {
   const dom = new JSDOM("<html><body><div class='jobs-search-results-list' style='overflow-y:auto'><ul></ul><nav class='jobs-search-pagination'></nav></div><div class='jobs-details'></div></body></html>", { url: SEARCH, runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const window = dom.window, document = window.document;
@@ -20,21 +21,14 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   };
   const tracked = new Set();
   let releaseCapture;
-  let state = { id: "authorized-run", searchKey: window.location.href, visited: [...restoredVisited], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
+  let state = { id: runId, searchKey: window.location.href, visited: [...restoredVisited], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
   window.Date.now = () => time; window.Math.random = () => 0.5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
   window.clearTimeout = (id) => timers.delete(id); window.setInterval = () => 0;
   window.MutationObserver = class { observe() {} };
   Object.defineProperty(document, "hidden", { get: () => hidden });
-  const leases = { held: false, acquired: 0, released: 0 };
-  Object.defineProperty(window.navigator, "locks", { value: {
-    async request(_name, _options, callback) {
-      if (leases.held) return callback(null);
-      leases.held = true; leases.acquired++;
-      try { return await callback({}); }
-      finally { leases.held = false; leases.released++; }
-    }
-  } });
+  const leases = locks;
+  Object.defineProperty(window.navigator, "locks", { value: locks });
   const scroller = document.querySelector(".jobs-search-results-list");
   Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop, set: (value) => { scrollTop = value; } }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => 700 } });
   scroller.scrollTo = ({ top }) => {
@@ -133,8 +127,8 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   for (const file of ["scraper.js", "job-collector.js", "content.js"]) window.eval(fs.readFileSync(path.join(root, "src", file), "utf8"));
   return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases,
     releaseCapture() { releaseCapture(); },
-    restart() {
-      state = { id: "new-run", searchKey: SEARCH, visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
+    restart(id = "new-run") {
+      state = { id, searchKey: SEARCH, visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
       return new Promise((resolve) => listeners[0]({ type: "KAI_TRACKER_RUN_START", state }, {}, resolve));
     },
     hide(value) { hidden = value; },
@@ -246,6 +240,36 @@ test("hidden LinkedIn results still select, dismiss and capture once across page
   assert.equal(stopped.captures.length, 0);
   assert.deepEqual(stopped.selections.map((entry) => entry.id), ["3"]);
   assert.equal(stopped.leases.held, false);
+});
+
+test("independent LinkedIn runs share an origin without blocking each other's background collection", async (t) => {
+  const locks = collectionLocks();
+  const first = fixture(t, [[item(1)]], { locks, runId: "first-run" });
+  const second = fixture(t, [[item(2)]], { locks, runId: "second-run" });
+  first.hide(true); second.hide(true);
+  await first.advance(1000); await second.advance(1000);
+  assert.deepEqual(locks.heldNames.sort(), ["job-tracker-collection:first-run", "job-tracker-collection:second-run"]);
+  assert.ok(locks.requests.every((request) => request.ifAvailable === true));
+  await first.advance(300_000); await second.advance(300_000);
+  assert.deepEqual(first.captures.map((capture) => capture.job.jobId), ["1"]);
+  assert.deepEqual(second.captures.map((capture) => capture.job.jobId), ["2"]);
+  assert.equal(locks.acquired, 2); assert.equal(locks.released, 2); assert.equal(locks.held, false);
+});
+
+test("a replacement LinkedIn document cannot collect or end an owned run and can resume after its lock releases", async (t) => {
+  const locks = collectionLocks();
+  const first = fixture(t, [[item(1)]], { locks, runId: "same-run" });
+  await first.advance(1000);
+  const replacement = fixture(t, [[item(2)]], { locks, runId: "same-run" });
+  await replacement.advance(1000);
+  assert.equal(replacement.captures.length, 0); assert.equal(replacement.selections.length, 0);
+  assert.equal(replacement.messages.some((message) => message.type === "KAI_TRACKER_RUN_END"), false);
+  assert.deepEqual(locks.heldNames, ["job-tracker-collection:same-run"]);
+  await first.advance(300_000); assert.equal(locks.held, false);
+  const resumed = replacement.restart("same-run"); await replacement.advance(0); await resumed;
+  await replacement.advance(300_000);
+  assert.deepEqual(replacement.captures.map((capture) => capture.job.jobId), ["2"]);
+  assert.equal(locks.acquired, 2); assert.equal(locks.released, 2); assert.equal(locks.held, false);
 });
 
 test("collection reports attempted banned and duplicate cards with card identity and no unrelated description", async (t) => {

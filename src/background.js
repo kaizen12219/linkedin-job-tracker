@@ -41,7 +41,9 @@ let companySnapshotRefresh = null;
 let companySnapshotLastAttemptAt = 0;
 let companySnapshotGeneration = 0;
 let companySnapshotNeedsRefresh = false;
-const COLLECTION_STORAGE_KEY = "jobTrackerCollectionV1";
+const COLLECTION_STORAGE_KEY = "jobTrackerCollectionsV2";
+const LEGACY_COLLECTION_STORAGE_KEY = "jobTrackerCollectionV1";
+const MAX_COLLECTIONS = 2;
 let collectionQueue = Promise.resolve();
 const collectionWaits = new Map();
 const COLLECTION_MESSAGES = new Set(["KAI_TRACKER_RUN_STATE", "KAI_TRACKER_RUN_CHECKPOINT", "KAI_TRACKER_RUN_END", "KAI_TRACKER_RUN_WAIT"]);
@@ -64,14 +66,19 @@ async function initialize() {
   try {
     await Promise.all([sheetClient.init(), bannedCompanies.list(), loadCompanySnapshot()]);
     void failureReports.flush().catch(() => {});
-    await withCollectionState(async (state, save) => {
-      if (!state) return;
-      try {
-        const tab = await chrome.tabs.get(state.tabId);
-        if (LinkedInJobCollector.searchKey(tab.url) !== state.searchKey) { await save(null); return; }
-        await chrome.tabs.update(state.tabId, { autoDiscardable: false });
-      } catch { await save(null); }
+    await withCollections(async (states, save) => {
+      const current = [];
+      for (const state of states) {
+        try {
+          const tab = await chrome.tabs.get(state.tabId);
+          if (LinkedInJobCollector.searchKey(tab.url) !== state.searchKey) continue;
+          await chrome.tabs.update(state.tabId, { autoDiscardable: false });
+          current.push(state);
+        } catch { /* Only the missing or changed tab loses its run. */ }
+      }
+      await save(current);
     });
+    await refreshCollectionBadge();
     void researchClient.poll().catch(() => {});
     const status = await sheetClient.getStatus();
     if (!status.configured) {
@@ -151,7 +158,7 @@ async function handleTrackerMessage(message, sender = {}) {
     if (!reasons[message.reasonCode] || !matchesJobSource(message.job, sender)) throw new Error("The failed job snapshot is invalid.");
     if (message.runId) await withCollectionState(state => {
       if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped."), { code: "TRACKER_RUN_STOPPED" });
-    });
+    }, sender.tab?.id);
     const reason = reasons[message.reasonCode] + (typeof message.reasonDetail === "string" && !["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode)
       ? " " + message.reasonDetail.slice(0, 2000) : "");
     return logNotSaved(message.job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode) ? "skipped" : "failed",
@@ -217,7 +224,7 @@ async function handleTrackerMessage(message, sender = {}) {
       state.visited.push(jobId);
       await save(state);
       return true;
-    });
+    }, sender.tab?.id);
     if (!claimed) return { status: "skipped", reason: "This job was already processed in this run." };
   }
   const result = await captureJob(message.job, { profile, tabId: sender.tab?.id });
@@ -226,18 +233,24 @@ async function handleTrackerMessage(message, sender = {}) {
     const field = result.status === "inserted" ? "saved" : result.status === "researching" ? "researching" : "skipped";
     state.counts[field]++;
     await save(state);
-  });
+  }, sender.tab?.id);
   return result;
 }
 
-function withCollectionState(action) {
+function withCollections(action) {
   const operation = collectionQueue.catch(() => {}).then(async () => {
     const storage = chrome.storage.session;
     if (!storage) throw new Error("Session storage is unavailable. Reload the extension.");
-    const state = (await storage.get(COLLECTION_STORAGE_KEY))[COLLECTION_STORAGE_KEY] || null;
-    return action(state, async (value) => {
+    const saved = await storage.get([COLLECTION_STORAGE_KEY, LEGACY_COLLECTION_STORAGE_KEY]);
+    let states = saved[COLLECTION_STORAGE_KEY];
+    if (states === undefined) {
+      states = saved[LEGACY_COLLECTION_STORAGE_KEY] ? [saved[LEGACY_COLLECTION_STORAGE_KEY]] : [];
+      await storage.set({ [COLLECTION_STORAGE_KEY]: states, [LEGACY_COLLECTION_STORAGE_KEY]: null });
+    }
+    if (!Array.isArray(states) || states.length > MAX_COLLECTIONS) throw new Error("Collection state is invalid. Reload the extension.");
+    return action(states, async (value) => {
       await storage.set({ [COLLECTION_STORAGE_KEY]: value });
-      if (state && state.id !== value?.id) {
+      for (const state of states.filter(previous => !value.some(next => next.id === previous.id && next.tabId === previous.tabId))) {
         const wait = collectionWaits.get(state.id);
         if (wait) { clearTimeout(wait.timer); collectionWaits.delete(state.id); wait.resolve({ stopped: true }); }
         if (typeof state.originalAutoDiscardable === "boolean") {
@@ -245,10 +258,19 @@ function withCollectionState(action) {
           catch { /* Closed tabs need no restoration. */ }
         }
       }
+      states = value;
     });
   });
   collectionQueue = operation.catch(() => {});
   return operation;
+}
+function withCollectionState(action, tabId) {
+  return withCollections((states, save) => action(states.find(state => state.tabId === tabId) || null,
+    value => save(value ? [...states.filter(state => state.tabId !== tabId), value] : states.filter(state => state.tabId !== tabId))));
+}
+async function refreshCollectionBadge() {
+  const count = await withCollections(states => states.length);
+  await setBadge(count ? count === 1 ? "RUN" : "RUN2" : "", count ? "#1f7a3f" : "#56687a");
 }
 function collectionMatches(state, sender, id = state?.id) {
   return !!state && state.id === id && state.tabId === sender.tab?.id &&
@@ -279,22 +301,22 @@ async function waitForCollectionRun(message, sender) {
     waiting = new Promise((resolve) => {
       const timer = setTimeout(() => {
         collectionWaits.delete(state.id);
-        withCollectionState((latest) => ({ stopped: !collectionMatches(latest, sender, message.runId) }))
+        withCollectionState((latest) => ({ stopped: !collectionMatches(latest, sender, message.runId) }), sender.tab?.id)
           .then(resolve, () => resolve({ stopped: true }));
       }, delay);
       collectionWaits.set(state.id, { timer, resolve, documentId: sender.documentId });
     });
-  });
+  }, sender.tab?.id);
   return waiting || { stopped: true };
 }
 async function handleCollectionMessage(message, sender) {
   return withCollectionState(async (state, save) => {
     if (message.type === "KAI_TRACKER_RUN_STATE") {
-      if (state?.tabId === sender.tab?.id && !collectionMatches(state, sender)) { await save(null); await setBadge("", "#56687a"); }
+      if (state && !collectionMatches(state, sender)) { await save(null); return { state: null }; }
       return { state: collectionMatches(state, sender) ? publicCollection(state) : null };
     }
     if (message.type === "KAI_TRACKER_RUN_END" && state?.id === message.runId && state.tabId === sender.tab?.id) {
-      await save(null); await setBadge("", "#56687a"); return { stopped: true };
+      await save(null); return { stopped: true };
     }
     if (!collectionMatches(state, sender, message.runId)) return { stopped: true };
     const visited = message.state?.visited;
@@ -310,12 +332,16 @@ async function handleCollectionMessage(message, sender) {
     }
     await save(state);
     return { state: publicCollection(state) };
-  });
+  }, sender.tab?.id).then(async result => { await refreshCollectionBadge(); return result; });
 }
-async function stopActiveCollection() {
-  const previous = await withCollectionState(async (state, save) => { await save(null); return state; });
-  if (previous) await setBadge("", "#56687a");
-  if (previous) try { await chrome.tabs.sendMessage(previous.tabId, { type: "KAI_TRACKER_RUN_STOP" }); } catch { /* Navigated or closed tab. */ }
+async function stopActiveCollection(tabId) {
+  const previous = await withCollections(async (states, save) => {
+    const stopped = states.filter(state => tabId === undefined || state.tabId === tabId);
+    await save(states.filter(state => !stopped.includes(state)));
+    return stopped;
+  });
+  await refreshCollectionBadge();
+  await Promise.allSettled(previous.map(state => chrome.tabs.sendMessage(state.tabId, { type: "KAI_TRACKER_RUN_STOP" })));
 }
 
 async function captureJob(job, { profile = "", tabId = null } = {}) {
@@ -530,18 +556,21 @@ chrome.commands.onCommand.addListener((command, commandTab) => {
   if (command === "toggle-job-collection") void toggleJobCollection(commandTab);
 });
 chrome.tabs.onRemoved?.addListener((tabId) => {
-  void withCollectionState(async (state, save) => { if (state?.tabId === tabId) { await save(null); await setBadge("", "#56687a"); } }).catch(() => {});
+  void stopActiveCollection(tabId).catch(() => {});
 });
 
 async function toggleJobCollection(commandTab) {
   let tab = commandTab;
   let startedId = "";
   try {
-    const running = await withCollectionState((state) => !!state);
-    if (running) { await stopActiveCollection(); return; }
     tab = tab?.id ? tab : await getActiveTab();
+    const ownRun = await withCollectionState(state => !!state, tab?.id);
+    if (ownRun) { await stopActiveCollection(tab.id); return; }
     const searchKey = LinkedInJobCollector.searchKey(tab?.url);
-    if (!tab?.id || !searchKey) throw new Error("Open LinkedIn or Jobright job search results before starting job collection.");
+    if (!tab?.id || !searchKey) {
+      if (await withCollections(states => states.length)) { await stopActiveCollection(); return; }
+      throw new Error("Open LinkedIn or Jobright job search results before starting job collection.");
+    }
     let filterKey = "";
     if (JobCapturePolicy.sourceSite(tab.url) === "jobright") {
       const response = await requestContent(tab.id, tab.url, { type: "KAI_TRACKER_SEARCH_CONTEXT" });
@@ -550,8 +579,10 @@ async function toggleJobCollection(commandTab) {
         response.result.selectedRegion !== "us" || response.result.selectedRegionSource !== "search-control")
         throw new Error("Select United States in Jobright's search country filter, then refresh the page before collecting.");
     }
-    const toggle = await withCollectionState(async (state, save) => {
-      if (state) { await save(null); return { stop: state }; }
+    const toggle = await withCollections(async (states, save) => {
+      const state = states.find(current => current.tabId === tab.id);
+      if (state) { await save(states.filter(current => current !== state)); return { stop: state }; }
+      if (states.length >= MAX_COLLECTIONS) throw new Error("Two collectors are already running. Stop one before starting another.");
       const status = await sheetClient.getStatus();
       if (!status.configured) throw new Error("Choose your ApplicantAlly data folder before starting job collection.");
       await classifyCompanies([], { refresh: false });
@@ -559,19 +590,20 @@ async function toggleJobCollection(commandTab) {
       const next = { id: crypto.randomUUID(), tabId: tab.id, searchKey, originalAutoDiscardable: currentTab.autoDiscardable,
         visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 }, ...(filterKey ? { filterKey } : {}) };
       startedId = next.id;
-      await save(next);
+      await save([...states, next]);
       await chrome.tabs.update(tab.id, { autoDiscardable: false });
       return { state: next, stop: state };
     });
     if (toggle.stop) try { await chrome.tabs.sendMessage(toggle.stop.tabId, { type: "KAI_TRACKER_RUN_STOP" }); } catch { /* The previous tab may have closed. */ }
-    if (!toggle.state) { await withCollectionState(async (state) => { if (!state) await setBadge("", "#56687a"); }); return; }
+    if (!toggle.state) { await refreshCollectionBadge(); return; }
     startedId = toggle.state.id;
     const message = { type: "KAI_TRACKER_RUN_START", state: publicCollection(toggle.state) };
     const response = await requestContent(tab.id, tab.url, message);
     if (!response?.ok) throw new Error(response?.error || "The collection controls could not be started. Reload the job search tab.");
-    await withCollectionState(async (state) => { if (state?.id === startedId) await setBadge("RUN", "#1f7a3f"); });
+    await refreshCollectionBadge();
   } catch (error) {
-    if (startedId) await withCollectionState(async (state, save) => { if (state?.id === startedId) await save(null); });
+    if (startedId) await withCollectionState(async (state, save) => { if (state?.id === startedId) await save(null); }, tab?.id);
+    await refreshCollectionBadge();
     await notify(tab?.id, error.message, "error");
   }
 }
@@ -607,7 +639,7 @@ async function runScrapeAndSaveShortcut(commandTab) {
       await notify(tab?.id, error.message, "error", job);
     }
   } finally {
-    setTimeout(() => chrome.action.setBadgeText({ text: "" }), BADGE_TIMEOUT_MS);
+    setTimeout(() => void refreshCollectionBadge().catch(() => {}), BADGE_TIMEOUT_MS);
   }
 }
 

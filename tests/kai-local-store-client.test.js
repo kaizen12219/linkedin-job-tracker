@@ -54,6 +54,27 @@ test('tracker reads app-folder profiles and saves files with ApplicantAlly close
   assert.equal(saved.job.captureRequestId, requestId); assert.equal(saved.kind, 'capture');
 });
 
+test('a captured destination must match the resolved folder before any job file can be written', async t => {
+  const f = await fixture(t);
+  const status = await f.client.getStatus();
+  const other = `applicantally-file:${randomUUID()}`;
+  await assert.rejects(f.client.saveJob(job('Wrong destination'), { profile: 'kevin', sheetUrl: other }), error => error.code === 'SAVE_DESTINATION_CHANGED');
+  assert.deepEqual(await fs.readdir(f.jobs), []);
+  const saved = await f.client.saveJob(job('Correct destination'), { profile: 'kevin', sheetUrl: status.sheetUrl });
+  assert.equal(saved.inserted, true);
+});
+
+test('expired research can reconcile an existing capture but cannot create a new job file', async t => {
+  const f = await fixture(t), requestId = randomUUID();
+  await assert.rejects(f.client.saveJob(job('Expired'), { requestId, replayOnly: true }), error => error.code === 'RESEARCH_RESULT_EXPIRED');
+  assert.deepEqual(await fs.readdir(f.jobs), []);
+  await f.client.saveJob(job('Already saved'), { requestId, profile: 'kevin' });
+  const replayed = await f.client.saveJob(job('Changed stale input'), { requestId, profile: 'jagjeet', replayOnly: true });
+  assert.equal(replayed.replayed, true);
+  assert.equal(replayed.job.company, 'Already saved');
+  assert.equal(replayed.job.profile, 'kevin');
+});
+
 test('Kevin and Jagjeet file saves discard every retired Trash flag and enter Pending', async t => {
   const f = await fixture(t);
   for (const profile of ['kevin', 'jagjeet']) {

@@ -13,10 +13,11 @@ const modelCatalog = { models: [{ id: "session-model-alpha", name: "Research Alp
 function harness({ stored = {}, saveError = null, failPostOnce = false, networkError = null, postStatus = 202,
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
   catalog = modelCatalog, catalogError = null, nativeMessaging, acceptedSettings = {}, reportError = null, afterSaveError = null,
+  destination = "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1", coordinator = null, saveImpl = null,
   profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
   const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [], reports = [];
   let researchWrites = 0;
-  let state = { configured: true, sheetUrl: "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1" };
+  let state = { configured: true, sheetUrl: destination };
   let response = { state: "completed", completedAt: new Date().toISOString(), result };
   let banned = false;
   const storage = { async get(key) { return Object.fromEntries((Array.isArray(key) ? key : [key]).map(name => [name, clone(stored[name])])); }, async set(values) {
@@ -28,6 +29,10 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   const fetchImpl = async (url, options) => {
     calls.push({ url, options: { ...options, signal: undefined } });
     if (networkError) throw networkError;
+    if (url.endsWith("/save-claim")) {
+      if (!coordinator) return { ok: false, status: 404, json: async () => ({ error: "Save coordination route unavailable." }) };
+      return { ok: true, json: async () => coordinator(url, clone(options), clone(response)) };
+    }
     if (url.endsWith("/models")) {
       if (catalogError) throw catalogError;
       return { ok: true, json: async () => clone(catalog) };
@@ -42,7 +47,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
     }
     return { ok: true, json: async () => clone(response) };
   };
-  const sheetClient = { async getStatus() { return clone(state); }, async getOptions() { return { profiles: clone(profiles) }; }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return { status: "inserted" }; } };
+  const sheetClient = { async getStatus() { return clone(state); }, async getOptions() { return { profiles: clone(profiles) }; }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return saveImpl ? saveImpl(data, options, stored) : { status: "inserted" }; } };
   const context = vm.createContext({ URL, AbortSignal, Uint8Array, Date, fetch: fetchImpl, crypto, chrome: { storage: { local: storage }, alarms, runtime: { id: "stable-id" } } });
   for (const name of ["capture-policy", "profile-routing", "research-client"]) vm.runInContext(fs.readFileSync(require.resolve(`../src/${name}.js`), "utf8"), context);
   const client = context.JobResearchClient.create({ storage, fetchImpl, cryptoImpl: crypto, alarms, extensionId: "stable-id", sheetClient, nativeMessaging,
@@ -52,6 +57,185 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   return { client, stored, calls, saves, outcomes, remembered, alarmCalls, reports, setResponse(value) { response = value; },
     setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
 }
+
+const FILE_DESTINATION = "applicantally-file:00000000-0000-0000-0000-000000000001";
+function saveCoordinator() {
+  const claims = new Map(), calls = [];
+  const service = async (url, options, response) => {
+    const body = JSON.parse(options.body), requestId = url.split("/").at(-2), owner = options.headers["X-Job-Tracker-Client"];
+    calls.push({ ...body, requestId, owner });
+    if (body.action === "settle") {
+      if (service.failSettle) throw new Error("The worker stopped before acknowledging settlement.");
+      for (const [key, claim] of claims) if (claim.requestId === requestId && claim.owner === owner && claim.destination === body.destination && claim.token === body.token) claims.delete(key);
+      return { settled: true };
+    }
+    if (service.failAcquire) throw new Error("Save coordination is offline.");
+    if (service.busy) return { acquired: false, code: "SAVE_COORDINATION_BUSY", message: "Another browser is saving this company." };
+    const key = JSON.stringify([body.destination, response.result.company.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US")]);
+    const claim = claims.get(key);
+    if (claim && (claim.requestId !== requestId || claim.owner !== owner)) return { acquired: false, code: "SAVE_COORDINATION_BUSY", message: "Another browser is saving this company." };
+    if (!claim) claims.set(key, { requestId, owner, destination: body.destination, token: crypto.randomUUID() });
+    return { acquired: true, token: claims.get(key).token };
+  };
+  return Object.assign(service, { claims, calls, failAcquire: false, failSettle: false, busy: false });
+}
+
+test("independent browser clients serialize the same company, retain each profile and let different companies save", async () => {
+  const coordinator = saveCoordinator(), inserted = new Map();
+  let entered, release;
+  const writing = new Promise(resolve => { entered = resolve; });
+  const save = async (data, options, stored) => {
+    const record = stored.jobTrackerResearchV1.find(item => item.requestId === options.requestId);
+    assert.equal(record.terminal, false); assert.equal(record.state, "waiting-save"); assert.equal(record.saveClaim.phase, "writing");
+    assert.equal(record.saveClaim.destination, FILE_DESTINATION); assert.equal(options.sheetUrl, FILE_DESTINATION);
+    assert.equal(record.saveResearch.result.decision, "save");
+    if (inserted.has(data.company)) throw Object.assign(new Error("This company already has a recorded job."), { code: "DUPLICATE_COMPANY" });
+    inserted.set(data.company, { profile: options.profile, requestId: options.requestId });
+    return { inserted: true };
+  };
+  const first = harness({ destination: FILE_DESTINATION, coordinator, saveImpl: async (...args) => { entered(); await new Promise(resolve => { release = resolve; }); return save(...args); } });
+  const second = harness({ destination: FILE_DESTINATION, coordinator, saveImpl: save });
+  await first.client.start(job, { profile: "kevin" }); await second.client.start(job, { profile: "jagjeet" });
+  const firstPoll = first.client.poll(); await writing;
+  await second.client.poll();
+  assert.equal(second.saves.length, 0); assert.equal(second.stored.jobTrackerResearchV1[0].state, "waiting-save");
+  assert.equal(second.reports.at(-1).details.error.code, "SAVE_COORDINATION_BUSY"); assert.equal(second.reports.at(-1).details.willRetry, true);
+  const other = harness({ destination: FILE_DESTINATION, coordinator, saveImpl: save });
+  const otherJob = { ...job, company: "Another Company", jobId: "456" };
+  other.setResponse({ state: "completed", completedAt: new Date().toISOString(), result: { ...result, company: otherJob.company, application: { ...result.application, company: otherJob.company } } });
+  await other.client.start(otherJob, { profile: "jagjeet" }); await other.client.poll();
+  assert.equal(other.stored.jobTrackerResearchV1[0].state, "saved"); assert.equal(coordinator.claims.size, 1);
+  release(); await firstPoll; await second.client.poll();
+  assert.equal(first.stored.jobTrackerResearchV1[0].state, "saved"); assert.equal(second.stored.jobTrackerResearchV1[0].state, "failed");
+  assert.equal(second.reports.at(-1).details.error.code, "DUPLICATE_COMPANY");
+  assert.deepEqual([...inserted].map(([company, entry]) => [company, entry.profile]).sort(), [["Another Company", "jagjeet"], ["Mews", "kevin"]]);
+  assert.equal(coordinator.claims.size, 0);
+});
+
+test("busy, unavailable and missing save coordinators fail closed with pending failure reports", async () => {
+  for (const scenario of ["busy", "offline", "missing"]) {
+    const coordinator = scenario === "missing" ? null : saveCoordinator();
+    if (coordinator) coordinator[scenario === "busy" ? "busy" : "failAcquire"] = true;
+    const h = harness({ destination: FILE_DESTINATION, coordinator });
+    await h.client.start(job); await h.client.poll();
+    assert.equal(h.saves.length, 0, scenario); assert.equal(h.stored.jobTrackerResearchV1[0].terminal, false, scenario);
+    assert.equal(h.stored.jobTrackerResearchV1[0].state, "waiting-save", scenario); assert.equal(h.reports.at(-1).details.willRetry, true, scenario);
+    assert.equal(h.reports.at(-1).details.stage, "save-coordination", scenario);
+    assert.equal(h.alarmCalls.at(-1).cleared, undefined, scenario);
+  }
+});
+
+test("a confirmed save survives settlement outage and a restart only retries its ACK", async () => {
+  const coordinator = saveCoordinator(); coordinator.failSettle = true;
+  const first = harness({ destination: FILE_DESTINATION, coordinator });
+  await first.client.start(job); await first.client.poll();
+  const record = first.stored.jobTrackerResearchV1[0];
+  assert.equal(record.state, "saved"); assert.equal(record.terminal, true); assert.equal(record.saveClaim.phase, "settle");
+  assert.equal(first.reports.length, 0); assert.equal(coordinator.claims.size, 1);
+  coordinator.failSettle = false;
+  const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored }); await resumed.client.poll();
+  assert.equal(resumed.saves.length, 0); assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "saved");
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].saveClaim, undefined); assert.equal(coordinator.claims.size, 0);
+  assert.ok(resumed.calls.every(call => call.url.endsWith("/save-claim"))); assert.equal(resumed.alarmCalls.at(-1).cleared, true);
+});
+
+test("a crash after file close replays the same UUID and durable writing claim without fresh research", async () => {
+  const coordinator = saveCoordinator(), files = new Map();
+  const save = async (data, options) => { const replayed = files.has(options.requestId); if (!replayed) files.set(options.requestId, clone(data)); return { replayed }; };
+  const first = harness({ destination: FILE_DESTINATION, coordinator, failResearchWriteAt: 6, saveImpl: save });
+  const started = await first.client.start(job, { profile: "kevin" });
+  await assert.rejects(first.client.poll(), /Research storage write failed/);
+  const record = first.stored.jobTrackerResearchV1[0];
+  assert.equal(record.state, "waiting-save"); assert.equal(record.terminal, false); assert.equal(record.saveClaim.phase, "writing");
+  assert.equal(files.size, 1); assert.equal(coordinator.claims.size, 1);
+  const originalToken = record.saveClaim.token;
+  record.createdAt = Date.now() - 48 * 60 * 60 * 1000;
+  record.saveResearch.completedAt = new Date(Date.now() - 48 * 60 * 60 * 1000).toISOString();
+  const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored, saveImpl: save });
+  await resumed.client.poll();
+  assert.equal(resumed.saves[0].options.requestId, started.requestId); assert.equal(resumed.saves[0].options.profile, "kevin");
+  assert.equal(resumed.saves[0].options.replayOnly, true);
+  assert.equal(files.size, 1); assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "saved");
+  assert.equal(coordinator.calls.filter(call => call.action === "settle").at(-1).token, originalToken);
+  assert.ok(resumed.calls.every(call => call.url.endsWith("/save-claim")), "cached verified findings recover even after worker research pruning");
+  assert.equal(coordinator.claims.size, 0);
+});
+
+test("a claim is never used before its writing intent is durably stored", async () => {
+  const coordinator = saveCoordinator();
+  const first = harness({ destination: FILE_DESTINATION, coordinator, failResearchWriteAt: 5 });
+  await first.client.start(job); await assert.rejects(first.client.poll(), /Research storage write failed/);
+  assert.equal(first.saves.length, 0); assert.equal(coordinator.claims.size, 1); assert.equal(first.stored.jobTrackerResearchV1[0].terminal, false);
+  const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored }); await resumed.client.poll();
+  assert.equal(resumed.saves.length, 1); assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "saved"); assert.equal(coordinator.claims.size, 0);
+});
+
+test("filesystem rejection is settled and released after abort before another browser can proceed", async () => {
+  const coordinator = saveCoordinator(); let aborted = false;
+  const h = harness({ destination: FILE_DESTINATION, coordinator, saveImpl: async () => {
+    aborted = true; throw Object.assign(new Error("The job file could not be saved."), { code: "LOCAL_STORE_UNAVAILABLE" });
+  } });
+  await h.client.start(job); await h.client.poll();
+  assert.equal(aborted, true); assert.equal(h.stored.jobTrackerResearchV1[0].state, "waiting-save"); assert.equal(h.stored.jobTrackerResearchV1[0].saveClaim, undefined);
+  assert.equal(coordinator.claims.size, 0); assert.equal(coordinator.calls.at(-1).action, "settle"); assert.equal(h.reports.at(-1).details.willRetry, true);
+});
+
+test("history trimming retains unacknowledged claims and clearing cancels an interrupted writer without creating files", async () => {
+  const coordinator = saveCoordinator(); coordinator.failSettle = true;
+  const first = harness({ destination: FILE_DESTINATION, coordinator }); await first.client.start(job); await first.client.poll();
+  const saved = clone(first.stored.jobTrackerResearchV1[0]); saved.createdAt = Date.now() - 48 * 60 * 60 * 1000;
+  first.stored.jobTrackerResearchV1 = [saved, ...Array.from({ length: 205 }, (_, index) => ({ terminal: true, createdAt: Date.now(), requestId: `old-${index}` }))];
+  await first.client.start({ ...job, company: "New Company", jobId: "456" });
+  assert.ok(first.stored.jobTrackerResearchV1.some(record => record.requestId === saved.requestId && record.saveClaim));
+  await first.client.clear();
+  assert.equal(first.stored.jobTrackerResearchV1.length, 1); assert.equal(first.stored.jobTrackerResearchV1[0].state, "saved"); assert.equal(coordinator.claims.size, 1);
+  const record = first.stored.jobTrackerResearchV1[0]; record.terminal = false; record.state = "waiting-save"; record.saveClaim.phase = "writing";
+  const before = coordinator.calls.length; await first.client.clear();
+  assert.equal(coordinator.calls.length, before + 1); assert.equal(first.stored.jobTrackerResearchV1[0].saveClaim.phase, "settle");
+  assert.equal(first.stored.jobTrackerResearchV1[0].saveCancelled, true); assert.equal(first.stored.jobTrackerResearchV1[0].state, "cancelled");
+  coordinator.failSettle = false;
+  await first.client.clear(); assert.equal(first.stored.jobTrackerResearchV1, undefined); assert.equal(coordinator.claims.size, 0);
+  assert.equal(first.saves.length, 1, "clear did not retry the interrupted filesystem operation");
+});
+
+test("an ambiguous acquired grant survives token-persistence failure and clear recovers its owner only to release it", async () => {
+  const coordinator = saveCoordinator();
+  const first = harness({ destination: FILE_DESTINATION, coordinator, failResearchWriteAt: 5 });
+  await first.client.start(job); await assert.rejects(first.client.poll(), /Research storage write failed/);
+  assert.equal(first.stored.jobTrackerResearchV1[0].saveClaim.phase, "acquiring"); assert.equal(coordinator.claims.size, 1);
+  const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored });
+  await resumed.client.clear(); await resumed.client.poll();
+  assert.equal(resumed.saves.length, 0); assert.equal(coordinator.claims.size, 0); assert.deepEqual(resumed.stored.jobTrackerResearchV1, []);
+});
+
+test("cancelled ownership recovery retries after an outage without saving and changed folders release interrupted claims", async () => {
+  for (const cancellation of ["clear", "folder"]) {
+    const coordinator = saveCoordinator();
+    const first = harness({ destination: FILE_DESTINATION, coordinator, failResearchWriteAt: 5 });
+    await first.client.start(job); await assert.rejects(first.client.poll(), /Research storage write failed/);
+    coordinator.failAcquire = true;
+    const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored });
+    if (cancellation === "clear") await resumed.client.clear();
+    else { resumed.changeSheet(); await resumed.client.poll(); }
+    const record = resumed.stored.jobTrackerResearchV1[0];
+    assert.equal(record.terminal, true); assert.equal(record.saveCancelled, true); assert.equal(record.saveClaim.phase, "acquiring");
+    coordinator.failAcquire = false; await resumed.client.poll();
+    assert.equal(resumed.saves.length, 0); assert.equal(coordinator.claims.size, 0); assert.equal(resumed.stored.jobTrackerResearchV1[0].saveClaim, undefined);
+  }
+});
+
+test("aged interrupted research can replay an existing receipt but cannot create a fresh stale capture", async () => {
+  const coordinator = saveCoordinator();
+  const first = harness({ destination: FILE_DESTINATION, coordinator, failResearchWriteAt: 5 });
+  await first.client.start(job); await assert.rejects(first.client.poll(), /Research storage write failed/);
+  first.stored.jobTrackerResearchV1[0].saveResearch.completedAt = new Date(Date.now() - 3600001).toISOString();
+  const resumed = harness({ destination: FILE_DESTINATION, coordinator, stored: first.stored, saveImpl: async (_data, options) => {
+    assert.equal(options.replayOnly, true); throw Object.assign(new Error("Verified research expired before any file was created."), { code: "RESEARCH_RESULT_EXPIRED" });
+  } });
+  await resumed.client.poll();
+  assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "failed"); assert.equal(resumed.reports.at(-1).details.error.code, "RESEARCH_RESULT_EXPIRED");
+  assert.equal(coordinator.claims.size, 0);
+});
 
 test("Jobright research uses a distinct provider identity, preserves US routing and requires an external route", async () => {
   const h = harness();
