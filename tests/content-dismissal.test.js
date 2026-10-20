@@ -135,7 +135,7 @@ test("a user card selection waits for the matching detail identity and captures 
   details = { ...details, jobId: "123", jobIdSource: "query" }; await app.advance(200);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
   details = { ...details, jobIdSource: "details", description: "Current description" }; await app.advance(200);
-  await app.advance(200);
+  await app.advance(1000);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
   app.click(target, { isTrusted: true }); await app.advance(200);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
@@ -143,7 +143,7 @@ test("a user card selection waits for the matching detail identity and captures 
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
 });
 
-test("manual identical-role selection waits for a fresh description render through the shared collector check", async () => {
+test("manual selection waits for changed description text even if the header and body DOM render first", async () => {
   const target = card("BigID", "102"); target.title = "Senior Software Engineer";
   let details = { jobId: "101", jobIdSource: "details", company: "BigID", title: target.title,
     description: "Design and build production data services and maintain automated tests.", descriptionRenderId: "previous-render" };
@@ -153,7 +153,11 @@ test("manual identical-role selection waits for a fresh description render throu
   await app.advance(1000);
   assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE").length, 0, "a header-only transition retains the previous body");
   details = { ...details, descriptionRenderId: "new-body-render" };
-  await app.advance(400);
+  await app.advance(30000);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE").length, 0, "replacing only the body node cannot authorize old text");
+  assert.equal(target.clicks, 0, "native dismissal waits for the job description to load");
+  details = { ...details, description: "The selected role builds new production services and independently owns their release." };
+  await app.advance(1500);
   const captures = app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE");
   assert.equal(captures.length, 1);
   assert.equal(captures[0].job.jobId, "102");
@@ -167,7 +171,7 @@ test("an intended manual selection reports an expired details check once without
   const target = card("Mews", "123");
   const app = harness([target], { scrape: () => ({ jobId: "999", company: "Other company", title: "Other role", description: "Unrelated private job description" }) });
   app.states.delete("Mews"); app.click(target, { isTrusted: true });
-  await app.advance(15_000);
+  await app.advance(95_000);
   const reports = app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED");
   assert.equal(reports.length, 1);
   assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED"); assert.equal(reports[0].runId, undefined);
@@ -177,6 +181,29 @@ test("an intended manual selection reports an expired details check once without
   await app.advance(15_000);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 1);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 0);
+});
+
+test("a slow manual description can load while hidden and Escape cancels another pending capture", async () => {
+  const target = card("Mews", "123");
+  let details = { jobId: "999", jobIdSource: "details", company: target.company, title: target.title, description: "Previous description" };
+  const app = harness([target], { scrape: () => details });
+  app.states.delete("Mews"); app.click(target, { isTrusted: true });
+  app.document.hidden = true;
+  await app.advance(60000);
+  assert.equal(app.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  details = { ...details, jobId: "123", description: "The current selected job description arrived after a slow network response." };
+  await app.advance(1500);
+  assert.equal(app.messages.filter(message => message.type === "KAI_TRACKER_CAPTURE").length, 1);
+
+  const other = card("Other", "456");
+  let pending = { ...details, jobId: "999" };
+  const cancelled = harness([other], { scrape: () => pending });
+  cancelled.states.delete("Other"); cancelled.click(other, { isTrusted: true });
+  await cancelled.advance(20000);
+  cancelled.events.keydown({ key: "Escape" });
+  pending = { jobId: "456", jobIdSource: "details", company: other.company, title: other.title, description: "Correct late description" };
+  await cancelled.advance(100000);
+  assert.equal(cancelled.messages.some(message => message.type === "KAI_TRACKER_CAPTURE" || message.type === "KAI_TRACKER_NOT_SAVED"), false);
 });
 
 test("new job headers cannot capture the previous description or a recycled card identity", async () => {

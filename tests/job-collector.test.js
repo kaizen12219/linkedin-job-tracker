@@ -37,7 +37,7 @@ function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle 
     async finished(id, message, value) { finishes.push({ id, message, state: structuredClone(value) }); }
   };
   if (reportFailures) adapter.notSaved = async (record, outcome, runId) => {
-    reports.push({ id: record.id, ...structuredClone(outcome), runId });
+    reports.push({ id: record.id, ...structuredClone(outcome), runId, time });
     if (reportError) throw new Error("The report folder is unavailable.");
   };
   const workerWaits = [];
@@ -50,6 +50,7 @@ function harness(pages, { state = {}, random = () => 0.5, failure = null, cycle 
     unschedule(id) { timers.delete(id); } });
   app.start({ id: "run-1", searchKey: search, visited: [], pages: [], ...state });
   return { app, adapter, actions, captures, checkpoints, statuses, finishes, reports, timers, workerWaits,
+    get time() { return time; },
     hide(value) { hidden = value; }, changeSearch() { search += "&keywords=changed"; },
     async advance(amount) {
       const until = time + amount;
@@ -90,11 +91,11 @@ test("review time grows with description size and stays within variable bounded 
     assert.ok(delay >= 5_000 && delay <= 45_000);
   }
 });
-test("identical descriptions across postings require a fresh render of the same explicitly identified role", () => {
+test("a different job must load its own changed description even when a replacement DOM token is fresh", () => {
   const previous = { jobId: "101", jobIdSource: "details", company: "BigID", title: "Senior IT Operations Engineer",
     description: "Build and maintain production automation and identity systems.", descriptionRenderId: "description:1" };
   const current = { ...previous, jobId: "102", company: "BIGID", descriptionRenderId: "description:2" };
-  assert.equal(collector.descriptionIsCurrent(current, previous), true);
+  assert.equal(collector.descriptionIsCurrent(current, previous), false);
   for (const update of [
     { descriptionRenderId: previous.descriptionRenderId }, { descriptionRenderId: "" }, { descriptionRenderId: undefined },
     { company: "Another company" }, { title: "Another role" }, { jobIdSource: "query" }, { jobIdSource: "page" }
@@ -107,6 +108,123 @@ test("ordinary changed descriptions and the same selected job retain their exist
   assert.equal(collector.descriptionIsCurrent({ jobId: "101", description: previous.description }, previous), true);
   assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: "New description" }, previous), true);
   assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: previous.description }, previous), false);
+  assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: "  Previous\n description  " }, previous), false);
+});
+
+test("slow 25- and 60-second body responses wait for a changed description before review and keep collecting", async () => {
+  for (const delay of [25_000, 60_000]) {
+    const target = row(1, { description: "Previous job" });
+    const h = harness([[target, row(2)]], { reportFailures: true });
+    await h.advance(10_000);
+    const selectedAt = h.actions.find(action => action.type === "select").time;
+    assert.equal(h.captures.length, 0);
+    await h.advance(selectedAt + delay - h.time);
+    assert.equal(h.captures.length, 0);
+    target.description = "Build the newly selected production service and its automated tests.";
+    const changedAt = h.time;
+    await h.advance(300_000);
+    assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
+    assert.equal(h.captures[0].job.description, target.description);
+    assert.ok(h.captures[0].time >= changedAt + 500 + collector.reviewDelay(target.description, () => .5));
+    assert.equal(h.reports.length, 0);
+    assert.ok(h.statuses.some(entry => entry.message.startsWith("Waiting for") && /previous job's description/.test(entry.message)));
+  }
+});
+
+test("fresh replacement markers and new headers cannot authorize an unchanged previous body", async () => {
+  const first = row(1, { description: "Previous job" });
+  const h = harness([[first, row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  let token = 0;
+  h.adapter.scrape = () => ({ ...scrape(), descriptionRenderId: `replacement-${++token}` });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.equal(h.reports.length, 1);
+  assert.equal(h.reports[0].id, "1");
+  assert.match(h.reports[0].reason, /previous job's description/);
+  assert.match(h.reports[0].reason, /90-second/);
+  assert.equal(h.reports[0].job, undefined);
+});
+
+test("a permanently missing body times out by elapsed wall time and continues with the next job", async () => {
+  const h = harness([[row(1, { description: "" }), row(2)]], { reportFailures: true, workerLag: 4_000 });
+  await h.advance(400_000);
+  const selectedAt = h.actions.find(action => action.type === "select" && action.id === "1").time;
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.equal(h.reports.length, 1);
+  assert.match(h.reports[0].reason, /90-second/);
+  assert.ok(h.reports[0].time - selectedAt >= 90_000);
+  assert.ok(h.reports[0].time - selectedAt <= 95_000, "late wakes use one actual deadline rather than 180 nominal polls");
+  assert.ok(h.workerWaits.length < 50);
+});
+
+test("Stop and a changed search interrupt a slow readiness wait before any capture", async () => {
+  for (const stop of [true, false]) {
+    const h = harness([[row(1, { description: "Previous job" }), row(2)]], { reportFailures: true });
+    await h.advance(20_000);
+    assert.ok(h.statuses.some(entry => entry.message.startsWith("Waiting for")));
+    if (stop) h.app.stop(); else h.changeSearch();
+    await h.advance(501);
+    assert.equal(h.app.running(), false);
+    assert.equal(h.captures.length, 0);
+    assert.equal(h.actions.filter(action => action.type === "select").length, 1);
+    assert.match(h.finishes[0].message, stop ? /stopped/ : /search changed/);
+  }
+});
+
+test("continuously changing descriptions exhaust one 180-second review budget without writing or blocking the next job", async () => {
+  const target = row(1, { description: "Initial ".repeat(300) });
+  const h = harness([[target, row(2)]], { reportFailures: true });
+  for (let revision = 0; revision < 10; revision++) {
+    await h.advance(20_000);
+    target.description = `Revision ${revision} ` + "Changing production requirements ".repeat(300);
+  }
+  await h.advance(300_000);
+  const selectedAt = h.actions.find(action => action.type === "select" && action.id === "1").time;
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.equal(h.reports.length, 1);
+  assert.match(h.reports[0].reason, /180-second/);
+  assert.ok(h.reports[0].time - selectedAt <= 180_000);
+  assert.ok(h.statuses.filter(entry => entry.message.startsWith("Reviewing Company 1")).length > 1);
+});
+
+test("Jobright also waits for its own changed body and cannot accept identical stale text under a new ID", async () => {
+  const id = "68f01234567890abcdef1234", next = "68f01234567890abcdef1235";
+  const target = row(id, { description: "Previous job" });
+  const h = harness([[target, row(next)]], {
+    sourceUrl: "https://jobright.ai/jobs/recommend?location=United+States", changeSelectionUrl: true,
+    jobUrl: record => `https://jobright.ai/jobs/info/${record.id}?location=United+States`, reportFailures: true
+  });
+  await h.advance(60_000);
+  assert.equal(h.captures.length, 0);
+  target.description = "Build the newly selected Jobright service and its production integrations.";
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), [id, next]);
+  assert.equal(h.reports.length, 0);
+  assert.equal(h.captures[0].job.description, target.description);
+});
+
+test("lazy description preparation runs only for an exact selected header and at most once per second", async () => {
+  const target = row(1, { description: "Previous job" });
+  const h = harness([[target]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  h.adapter.scrape = () => {
+    const job = scrape();
+    return job?.jobId === "1" && h.time < 20_000 ? { ...job, jobId: "999" } : job;
+  };
+  const prepared = [];
+  h.adapter.prepareDetails = record => {
+    prepared.push({ id: record.id, time: h.time });
+    if (prepared.length === 3) target.description = "The selected job's newly mounted production engineering description.";
+  };
+  await h.advance(19_000);
+  assert.equal(prepared.length, 0, "a wrong rendered job header must never authorize moving its detail pane");
+  await h.advance(300_000);
+  assert.equal(prepared.length, 3);
+  assert.ok(prepared.every((entry, index) => entry.id === "1" && entry.time >= 20_000 && (!index || entry.time - prepared[index - 1].time >= 1000)));
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.captures[0].job.description, target.description);
+  assert.equal(h.reports.length, 0);
 });
 test("short-job pacing reaches research in under twelve seconds and continues to Next", async () => {
   for (const random of [() => 0, () => 1]) {
@@ -141,22 +259,26 @@ test("hidden tabs continue paced collection without waiting for visibility", asy
   assert.ok(h.captures[0].time - h.actions.find((entry) => entry.type === "select").time >= 5_000);
 });
 
-test("late worker wakes count elapsed review time and recheck changed details before saving", async () => {
+test("late worker wakes count elapsed review time and fully review changed details before saving", async () => {
   const target = row(1);
   const h = harness([[target]], { workerLag: 4000 });
   h.hide(true); await h.advance(35_000);
   assert.match(h.statuses.at(-1).message, /Reviewing/);
   target.description = "Different job details arrived while the background worker was waiting.";
   await h.advance(300_000);
-  assert.equal(h.captures.length, 0);
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.captures[0].job.description, target.description);
+  assert.equal(h.statuses.filter(entry => entry.message.startsWith("Reviewing")).length, 2);
   assert.ok(h.workerWaits.every((delay) => delay > 0 && delay <= 20_000));
   assert.ok(h.workerWaits.length < 20, "late wakes must not stretch review into hundreds of nominal polling ticks");
 });
-test("changed descriptions, query-only identities and recycled cards never submit stale details", async () => {
+test("changed descriptions are reviewed again while query-only identities and recycled cards never submit", async () => {
   const current = row(1);
   const h = harness([[current, row(2, { queryOnly: true })]]);
   await h.advance(12_000); current.description = "Changed description after the review began.";
-  await h.advance(300_000); assert.equal(h.captures.length, 0);
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1"]);
+  assert.equal(h.captures[0].job.description, current.description);
   const removed = row(3), k = harness([[removed]]);
   await k.advance(12_000); removed.active = false; await k.advance(300_000);
   assert.equal(k.captures.length, 0);
@@ -286,14 +408,18 @@ test("attempted filtered cards and unverified details are reported once without 
   assert.deepEqual(h.captures.map(({ job }) => job.jobId), ["4"]);
   assert.match(h.finishes[0].message, /last results page/);
 });
-test("a report of changed review details retains only the earlier verified job snapshot", async () => {
+test("a description arriving during review receives a complete second review before capture", async () => {
   const current = row(1), original = current.description;
   const h = harness([[current]], { reportFailures: true });
   await h.advance(12_000); current.description = "Changed details while this job was being reviewed.";
   await h.advance(300_000);
-  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].code, "DETAILS_NOT_CONFIRMED");
-  assert.equal(h.reports[0].job.description, original);
-  assert.equal(h.captures.length, 0);
+  assert.equal(h.reports.length, 0);
+  assert.equal(h.captures.length, 1);
+  assert.notEqual(h.captures[0].job.description, original);
+  assert.equal(h.captures[0].job.description, current.description);
+  const reviews = h.statuses.filter(entry => entry.message.startsWith("Reviewing"));
+  assert.equal(reviews.length, 2);
+  assert.ok(h.captures[0].time - reviews[1].time >= collector.reviewDelay(current.description, () => .5));
 });
 test("reporting failures cannot stop collection or retry a capture", async () => {
   const h = harness([[row(1, { filtered: true }), row(2)]], { reportFailures: true, reportError: true });

@@ -19,17 +19,10 @@
     return Math.round(0.5 * Math.min(90_000, Math.max(10_000, Math.min(80_000, words / (220 + random() * 100) * 60_000) * (0.85 + random() * 0.3))));
   }
   function descriptionIsCurrent(job, previous) {
-    if (!previous || String(previous.jobId) === String(job?.jobId) || !previous.description || job?.description !== previous.description) return true;
-    const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
-    // Separate postings of the same role can have identical text. Require a
-    // fresh description render as well as the exact rendered role identity;
-    // changing only the header must never authorize the previous job's body.
-    return job?.jobIdSource === "details" && previous.jobIdSource === "details" &&
-      !!key(job.company) && key(job.company) === key(previous.company) &&
-      !!key(job.title) && key(job.title) === key(previous.title) &&
-      typeof job.descriptionRenderId === "string" && !!job.descriptionRenderId &&
-      typeof previous.descriptionRenderId === "string" && !!previous.descriptionRenderId &&
-      job.descriptionRenderId !== previous.descriptionRenderId;
+    // A replacement node or new header does not prove that the selected
+    // posting's body has arrived. Wait for the actual description to change.
+    const description = (value) => String(value || "").replace(/\s+/gu, " ").trim();
+    return !previous || String(previous.jobId) === String(job?.jobId) || !description(previous.description) || description(job?.description) !== description(previous.description);
   }
   function create(adapter, { random = Math.random, now = () => Date.now(), schedule = setTimeout, unschedule = clearTimeout } = {}) {
     let current = null;
@@ -69,6 +62,13 @@
       }
       return false;
     }
+    function prepareDetails(run, record) {
+      if (typeof adapter.prepareDetails !== "function") return;
+      const previous = run.detailsPreparation;
+      if (previous?.id === record.id && now() - previous.at < 1000) return;
+      run.detailsPreparation = { id: record.id, at: now() };
+      try { adapter.prepareDetails(record); } catch { /* Preparation cannot replace exact readiness checks. */ }
+    }
     function matchingJob(run, record, previous) {
       if (!check(run)) return null;
       run.detailFailure = "The selected job card is missing, changed, or filtered.";
@@ -79,29 +79,51 @@
       const job = adapter.scrape();
       const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
       if (!job || job.jobIdSource === "query" || String(job.jobId) !== record.id ||
-        key(job.company) !== key(record.company) || key(job.title) !== key(record.title) || !job.description?.trim()) {
+        key(job.company) !== key(record.company) || key(job.title) !== key(record.title)) {
         run.detailFailure = adapter.detailFailure?.(record) || "The rendered details do not match the selected job's ID, title, and company.";
+        return null;
+      }
+      if (!job.description?.trim()) {
+        run.detailFailure = "The selected job's description is not readable yet.";
+        prepareDetails(run, record);
+        return null;
+      }
+      if (!descriptionIsCurrent(job, previous)) {
+        run.detailFailure = "The selected job still shows the previous job's description; waiting for its own description to load.";
+        prepareDetails(run, record);
         return null;
       }
       if (job.applicationsAvailable === false && !job.applicationsClosed) {
         run.detailFailure = "The selected job has no ready application control or verified external application link.";
         return null;
       }
-      if (!descriptionIsCurrent(job, previous)) {
-        run.detailFailure = "The selected job still shows the previous description without a fresh matching role render.";
-        return null;
-      }
       run.detailFailure = "The selected job's details did not remain stable long enough to verify.";
       return job;
     }
-    async function details(run, record, previous) {
-      let stable = "", stableAt = 0;
+    function readMatchingJob(run, record, previous) {
+      try { return matchingJob(run, record, previous); }
+      catch (error) {
+        if (!check(run)) return null;
+        run.detailFailure = String(error?.message || "The selected job details could not be read.").slice(0, 1000);
+        return null;
+      }
+    }
+    async function details(run, record, previous, jobDeadline) {
+      let stable = "", stableAt = 0, waitingReason = "";
+      const deadline = Math.min(now() + 90_000, jobDeadline);
       // Each poll rechecks the exact selected job, even after a late wake.
-      for (let elapsed = 0; elapsed < 15_000 && check(run); elapsed += 250) {
-        if (!await pause(run, 250)) return null;
-        let job;
-        try { job = matchingJob(run, record, previous); } catch { job = null; }
-        if (!job) { stable = ""; continue; }
+      while (check(run) && now() < deadline) {
+        if (!await pause(run, Math.min(500, deadline - now()))) return null;
+        if (!check(run) || now() >= deadline) return null;
+        const job = readMatchingJob(run, record, previous);
+        if (!job) {
+          stable = "";
+          if (run.detailFailure !== waitingReason) {
+            waitingReason = run.detailFailure;
+            adapter.status(`Waiting for ${record.company} — ${waitingReason}`, run.state);
+          }
+          continue;
+        }
         const value = fingerprint(job);
         if (value !== stable) { stable = value; stableAt = now(); continue; }
         if (now() - stableAt >= 500) return job;
@@ -124,47 +146,66 @@
       catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
       if (!await pause(run, actionDelay())) return;
       if (!adapter.activeCard(record)) { await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable before selection."); return; }
-      const previous = adapter.scrape();
+      let previous;
+      try { previous = adapter.scrape(); } catch { /* A previous unreadable panel cannot stop the new selection. */ }
+      const jobDeadline = now() + 180_000;
       try { adapter.select(record); }
       catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
-      let job = await details(run, record, previous);
-      // A Jobright SPA transition can fail before any write. Reopen the same
-      // verified card once; captures and uncertain saves are never retried.
-      if (!job && check(run) && typeof adapter.recoverDetails === "function") {
-        adapter.status(`Reopening details for ${record.company}…`, run.state);
-        try {
-          const reopened = await adapter.recoverDetails(record);
-          if (reopened !== false) job = await details(run, record, previous);
-        } catch (error) {
-          run.state.counts.skipped++;
-          await notSaved(run, record, "DETAILS_NOT_CONFIRMED", `${run.detailFailure} Reopening failed: ${error.message}`);
-          throw error;
+      let job, reviewedJob, recovered = false, ready = false, reviewLimitReached = false;
+      while (check(run) && now() < jobDeadline) {
+        job = await details(run, record, previous, jobDeadline);
+        if (!job) {
+          // Recovery is bounded and only happens before any capture attempt.
+          if (check(run) && now() < jobDeadline && !recovered && typeof adapter.recoverDetails === "function") {
+            recovered = true;
+            adapter.status(`Reopening details for ${record.company}…`, run.state);
+            try {
+              const reopened = await adapter.recoverDetails(record);
+              if (reopened !== false) continue;
+            } catch (error) {
+              run.state.counts.skipped++;
+              await notSaved(run, record, "DETAILS_NOT_CONFIRMED", `${run.detailFailure} Reopening failed: ${error.message}`, reviewedJob);
+              throw error;
+            }
+          }
+          break;
         }
+        reviewedJob = job;
+        const reviewing = fingerprint(job);
+        const delay = reviewDelay(job.description, random);
+        if (now() + delay > jobDeadline) {
+          run.detailFailure = "The selected details did not leave enough time for a complete review within the 180-second job limit.";
+          reviewLimitReached = true;
+          break;
+        }
+        adapter.status(`Reviewing ${job.company} — about ${Math.round(delay / 1000)} seconds.`, run.state);
+        if (!await pause(run, delay)) return;
+        if (now() >= jobDeadline) break;
+        job = readMatchingJob(run, record, previous);
+        if (!job || fingerprint(job) !== reviewing) {
+          adapter.status(`Waiting for ${record.company} — the details changed during review.`, run.state);
+          continue;
+        }
+        if (!await adapter.allowed(record) || !check(run)) {
+          run.state.counts.skipped++;
+          await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable or was filtered during review.", reviewedJob);
+          return;
+        }
+        if (now() >= jobDeadline) break;
+        job = readMatchingJob(run, record, previous);
+        if (!job || fingerprint(job) !== reviewing) {
+          adapter.status(`Waiting for ${record.company} — the details changed before capture.`, run.state);
+          continue;
+        }
+        ready = true;
+        break;
       }
-      if (!job) {
+      if (!check(run)) return;
+      if (!ready) {
         run.state.counts.skipped++;
-        const detailFailure = typeof run.detailFailure === "string" ? run.detailFailure.slice(0, 2000) : "Stable details matching the selected job could not be verified before the timeout.";
-        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", detailFailure);
-        return;
-      }
-      const reviewedJob = job;
-      const reviewing = fingerprint(job);
-      const delay = reviewDelay(job.description, random);
-      adapter.status(`Reviewing ${job.company} — about ${Math.round(delay / 1000)} seconds.`, run.state);
-      if (!await pause(run, delay)) return;
-      // Both the card and details must still describe the reviewed job. A new
-      // description needs another review; never submit the previous contents.
-      job = matchingJob(run, record, previous);
-      if (!job || fingerprint(job) !== reviewing) {
-        run.state.counts.skipped++;
-        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "The selected job or its details changed during review.", reviewedJob);
-        return;
-      }
-      if (!await adapter.allowed(record) || !check(run)) { await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable or was filtered during review.", reviewedJob); return; }
-      job = matchingJob(run, record, previous);
-      if (!job || fingerprint(job) !== reviewing) {
-        run.state.counts.skipped++;
-        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", "The selected job or its details changed before capture.", reviewedJob);
+        const limit = reviewLimitReached || now() >= jobDeadline ? " The 180-second verification and review limit was reached." : " The description did not become ready within the 90-second readiness window.";
+        const reason = (run.detailFailure || "The selected job details could not be verified.") + limit;
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", reason.slice(0, 2000), reviewedJob);
         return;
       }
       adapter.status(`Saving ${job.company}…`, run.state);

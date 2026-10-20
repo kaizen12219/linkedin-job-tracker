@@ -1,12 +1,12 @@
 (function exposeLinkedInJobScraper() {
   const ABOUT_HEADING_PATTERNS = [
-    /\babout the job\b/i,
-    /\bjob description\b/i,
-    /\babout this role\b/i,
-    /\babout the role\b/i,
-    /\bacerca del empleo\b/i,
-    /\bdescripci[oó]n del empleo\b/i,
-    /\bsobre el empleo\b/i
+    /^about the job\s*:?$/i,
+    /^job description\s*:?$/i,
+    /^about this role\s*:?$/i,
+    /^about the role\s*:?$/i,
+    /^acerca del empleo\s*:?$/i,
+    /^descripci[oó]n del empleo\s*:?$/i,
+    /^sobre el empleo\s*:?$/i
   ];
 
   const APPLY_PATTERNS = [
@@ -32,8 +32,6 @@
     /^(show|see|view|learn)\s+(more|less)(\s+about\s+(the\s+)?company)?\.?$/i,
     /^(follow|following|apply|save|share|search|results|job alert)$/i
   ];
-  const descriptionRenders = new WeakMap();
-  let descriptionRenderVersion = 0;
 
   function scrape(doc = document, sourceUrl = window.location.href) {
     const root = findJobDetailsRoot(doc);
@@ -48,7 +46,6 @@
       title: titleResult.value,
       company: companyResult.value,
       description: descriptionResult.value,
-      descriptionRenderId: descriptionResult.renderId || "",
       applyUrl: applyResult.value,
       ...metadata,
       selectedRegion: searchRegion.region,
@@ -84,15 +81,28 @@
   }
 
   function findJobDetailsRoot(doc) {
-    return queryFirst(doc, [
+    let recognized = false, pending = null;
+    for (const selector of [
       '[data-sdui-screen*="SemanticJobDetails"]',
       '[data-sdui-screen*="JobDetails"]',
       '.jobs-search__job-details--container',
       '.jobs-details',
-      '.job-view-layout',
-      'main[role="main"]',
-      "main"
-    ]) || doc.body || doc.documentElement;
+      '.job-view-layout'
+    ]) {
+      const candidates = queryAll(doc, selector);
+      recognized ||= candidates.length > 0;
+      const ready = candidates.find(node => descriptionVisible(node));
+      if (ready) return ready;
+      pending ||= candidates.find(node => descriptionVisible(node, true));
+    }
+    if (pending) return pending;
+    if (recognized) {
+      // A hidden previous panel is not a substitute for the current panel
+      // while LinkedIn replaces its details.
+      const unavailable = doc.createElement("div"); unavailable.hidden = true;
+      return unavailable;
+    }
+    return descriptionNodes(doc, ['main[role="main"]', 'main', 'body', 'html'])[0] || doc.documentElement;
   }
 
   function extractCaptureMetadata(root, description, sourceUrl, title) {
@@ -200,63 +210,129 @@
   }
 
   function extractDescription(doc, root) {
-    const aboutScope = queryFirst(doc, [
+    if (!descriptionVisible(root)) return result("", "not-ready", 0);
+    const aboutScopes = descriptionNodes(root, [
       '[componentkey^="JobDetails_AboutTheJob"]',
-      '[data-sdui-component*="aboutTheJob"]',
-      '[data-testid*="job-description"]',
-      '[id*="job-details"]'
+      '[data-sdui-component*="aboutTheJob" i]',
+      '[data-testid*="job-description" i]'
     ]);
+    for (const scope of aboutScopes) {
+      for (const node of descriptionNodes(scope, ['[data-testid="expandable-text-box"]', '.jobs-box__html-content', '.show-more-less-html__markup'])) {
+        const value = descriptionText(node);
+        if (value) return result(value, "about-section-body", 0.98);
+      }
+      const value = descriptionText(scope);
+      if (value) return result(value, "about-section-content", 0.96);
+    }
+    // A mounted About section that is still loading must not borrow another
+    // widget's text while the selected description finishes hydrating.
+    if (aboutScopes.length) return result("", "about-section-not-ready", 0);
 
-    const scopedTextBox = aboutScope ? queryFirst(aboutScope, ['[data-testid="expandable-text-box"]']) : null;
+    const legacyBodies = descriptionNodes(root, ['.jobs-box__html-content', '.jobs-description-content__text',
+      '.jobs-description__content', '.description__text', '.show-more-less-html__markup', '#job-details']);
+    for (const node of legacyBodies) {
+      const value = descriptionText(node);
+      if (value) return result(value, "selected-description-body", 0.94);
+    }
+    if (legacyBodies.length) return result("", "selected-description-not-ready", 0);
 
-    if (scopedTextBox) {
-      return descriptionResultForNode(root, scopedTextBox, "about-section-expandable-text-box", 0.98);
+    const heading = findHeading(root, ABOUT_HEADING_PATTERNS);
+    if (heading) {
+      const value = descriptionAfterHeading(heading, root);
+      return result(value, value ? "about-heading-content" : "about-heading-not-ready", value ? 0.9 : 0);
     }
 
-    const heading = findHeading(root || doc, ABOUT_HEADING_PATTERNS) || findHeading(doc, ABOUT_HEADING_PATTERNS);
-    const textBoxNearHeading = heading ? findTextBoxNearHeading(heading) : null;
-
-    if (textBoxNearHeading) {
-      return descriptionResultForNode(root, textBoxNearHeading, "heading-near-expandable-text-box", 0.9);
-    }
-
-    const longestExpandable = queryAll(doc, '[data-testid="expandable-text-box"]')
-      .map((element, index) => ({
-        element,
-        text: readRichText(element),
-        source: `expandable-text-box:${index}`
-      }))
-      .filter((candidate) => candidate.text.length > 120)
-      .sort((a, b) => b.text.length - a.text.length)[0];
-
-    if (longestExpandable) {
-      return descriptionResultForNode(root, longestExpandable.element, longestExpandable.source, 0.7, longestExpandable.text);
-    }
-
-    const linkedInDescription = queryFirst(doc, [
+    for (const node of descriptionNodes(root, ['[data-testid="expandable-text-box"]',
       '[data-test-id*="description"]',
       '[aria-label*="Job description" i]',
       '[aria-label*="Description" i]'
-    ]);
-
-    if (linkedInDescription) {
-      return descriptionResultForNode(root, linkedInDescription, "description-attribute", 0.6);
+    ])) {
+      const value = descriptionText(node);
+      if (value) return result(value, "selected-description-attribute", 0.7);
     }
-
     return result("", "not-found", 0);
   }
 
-  function descriptionResultForNode(root, element, source, confidence, value = readRichText(element)) {
-    if (!root?.contains(element)) return { ...result(value, source, confidence), renderId: "" };
-    // Identical descriptions can belong to distinct postings. Record whether
-    // the selected description itself rendered again, independently of its
-    // header and the SPA URL; exporting a token keeps DOM nodes private.
-    let rendered = descriptionRenders.get(element);
-    if (!rendered || rendered.text !== value) {
-      rendered = { text: value, id: `linkedin-description:${++descriptionRenderVersion}` };
-      descriptionRenders.set(element, rendered);
+  const DESCRIPTION_EXCLUDED = "li[data-occludable-job-id], .job-card-container, [data-view-name='job-card'], [componentkey^='job-card-component-ref-'], .job-details-jobs-unified-top-card, .jobs-unified-top-card, nav, aside, [componentkey*='AboutTheCompany'], [componentkey*='SimilarJobs'], [data-sdui-component*='aboutTheCompany' i]";
+  const AUTHORED_DESCRIPTION = '[componentkey^="JobDetails_AboutTheJob"], [data-sdui-component*="aboutTheJob" i], [data-testid*="job-description" i], .jobs-box__html-content, .jobs-description-content__text, .jobs-description__content, .description__text, .show-more-less-html__markup, #job-details';
+  const OTHER_SECTION = /^(?:about (?:the )?company|company (?:overview|insights)|meet (?:the )?hiring team|similar jobs|recommended jobs|people also viewed|how you match|how your profile|job match|promoted jobs)\b/iu;
+  const LOADING_TEXT = /^(?:(?:loading|please wait)(?:\s+(?:the|your|job|description|details|content|for))*\s*[.…!]*|(?:show|see)\s+(?:more|less))$/iu;
+  function descriptionVisible(node, allowBusy = false) {
+    if (!node || node.closest?.("[hidden], [aria-hidden='true'], [inert], template") || (!allowBusy && node.closest?.("[aria-busy='true']"))) return false;
+    const view = node.ownerDocument?.defaultView;
+    for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+      const style = view?.getComputedStyle(current);
+      if (style?.display === "none" || style?.visibility === "hidden" || style?.opacity === "0") return false;
     }
-    return { ...result(value, source, confidence), renderId: rendered.id };
+    return true;
+  }
+  function unrelatedDescription(node) {
+    if (node.closest?.(DESCRIPTION_EXCLUDED)) return true;
+    // An employer can include a company introduction inside the actual JD.
+    // Only separate widgets are excluded once an authored body is identified.
+    if (node.closest?.(AUTHORED_DESCRIPTION)) return false;
+    for (let current = node; current; current = current.parentElement) {
+      if (!current.matches?.("section, article")) continue;
+      const heading = queryFirst(current, ["h1, h2, h3, h4"]);
+      if (heading && OTHER_SECTION.test(readElementText(heading))) return true;
+    }
+    return false;
+  }
+  function descriptionNodes(root, selectors) {
+    const nodes = [];
+    for (const selector of selectors) {
+      for (const node of [...(root?.matches?.(selector) ? [root] : []), ...queryAll(root, selector)]) {
+        if (!nodes.includes(node) && descriptionVisible(node, true) && !unrelatedDescription(node)) nodes.push(node);
+      }
+    }
+    return nodes;
+  }
+  function descriptionText(node) {
+    if (!descriptionVisible(node) || unrelatedDescription(node)) return "";
+    const clone = node.cloneNode(true), originals = queryAll(node, "*"), copies = queryAll(clone, "*");
+    for (let index = originals.length - 1; index >= 0; index--) {
+      if (!descriptionVisible(originals[index]) || originals[index].matches?.(DESCRIPTION_EXCLUDED)) copies[index].remove();
+    }
+    queryAll(clone, "script, style, svg, button, nav, aside, [role='progressbar'], .artdeco-loader, [data-testid*='skeleton' i]").forEach(element => element.remove());
+    for (const heading of queryAll(clone, "h1, h2, h3, h4")) {
+      const label = readElementText(heading);
+      if (ABOUT_HEADING_PATTERNS.some(pattern => pattern.test(label))) { heading.remove(); continue; }
+      if (!OTHER_SECTION.test(label) || clone.matches?.(AUTHORED_DESCRIPTION) || heading.closest(AUTHORED_DESCRIPTION)) continue;
+      const section = heading.closest("section, article");
+      if (section && section !== clone) { section.remove(); continue; }
+      let current = heading;
+      while (current.parentElement && current.parentElement !== clone && current.parentElement.children.length === 1) current = current.parentElement;
+      while (current) { const next = current.nextElementSibling; current.remove(); current = next; }
+    }
+    queryAll(clone, "p, span").filter(element => LOADING_TEXT.test(readElementText(element))).forEach(element => element.remove());
+    const value = readRichText(clone);
+    return LOADING_TEXT.test(cleanText(value)) ? "" : value;
+  }
+  function descriptionAfterHeading(heading, root) {
+    for (let current = heading; current && current !== root; current = current.parentElement) {
+      const fragment = heading.ownerDocument.createElement("div");
+      for (let sibling = current.nextElementSibling; sibling; sibling = sibling.nextElementSibling) {
+        const firstHeading = sibling.matches?.("h1, h2, h3, h4") ? sibling : queryFirst(sibling, ["h1, h2, h3, h4"]);
+        if (unrelatedDescription(sibling) || (firstHeading && OTHER_SECTION.test(readElementText(firstHeading)))) break;
+        if (descriptionVisible(sibling)) fragment.append(sibling.cloneNode(true));
+      }
+      const value = descriptionText(fragment);
+      if (value) return value;
+      // A named About section with no ready body must not climb out into
+      // the next Premium, company, or recommendations section.
+      if (current.parentElement?.matches("section, article")) break;
+    }
+    return "";
+  }
+
+  function descriptionTarget(doc = document) {
+    const root = findJobDetailsRoot(doc);
+    if (!descriptionVisible(root, true)) return null;
+    const scopes = descriptionNodes(root, ['[componentkey^="JobDetails_AboutTheJob"]', '[data-sdui-component*="aboutTheJob" i]', '[data-testid*="job-description" i]']);
+    if (scopes[0]) return findHeading(scopes[0], ABOUT_HEADING_PATTERNS) || scopes[0];
+    const heading = findHeading(root, ABOUT_HEADING_PATTERNS);
+    if (heading && descriptionVisible(heading, true) && !unrelatedDescription(heading)) return heading;
+    return descriptionNodes(root, ['.jobs-box__html-content', '.jobs-description__content', '.description__text', '#job-details'])[0] || null;
   }
 
   function extractApplyUrl(doc, root, sourceUrl) {
@@ -343,46 +419,7 @@
 
   function findHeading(root, patterns) {
     return queryAll(root, "h1, h2, h3, h4")
-      .find((heading) => patterns.some((pattern) => pattern.test(readElementText(heading))));
-  }
-
-  function findTextBoxNearHeading(heading) {
-    let current = heading.parentElement;
-
-    for (let depth = 0; current && depth < 8; depth += 1) {
-      const textBox = queryFirst(current, ['[data-testid="expandable-text-box"]']);
-
-      if (textBox && textBox !== heading) {
-        return textBox;
-      }
-
-      const siblingTextBox = findFollowingTextBox(current);
-
-      if (siblingTextBox) {
-        return siblingTextBox;
-      }
-
-      current = current.parentElement;
-    }
-
-    return null;
-  }
-
-  function findFollowingTextBox(element) {
-    let sibling = element.nextElementSibling;
-
-    while (sibling) {
-      const direct = sibling.matches?.('[data-testid="expandable-text-box"]') ? sibling : null;
-      const nested = queryFirst(sibling, ['[data-testid="expandable-text-box"]']);
-
-      if (direct || nested) {
-        return direct || nested;
-      }
-
-      sibling = sibling.nextElementSibling;
-    }
-
-    return null;
+      .find((heading) => descriptionVisible(heading, true) && !unrelatedDescription(heading) && patterns.some((pattern) => pattern.test(readElementText(heading))));
   }
 
   function firstMeaningfulText(elements) {
@@ -617,6 +654,7 @@
 
   window.LinkedInJobScraper = {
     scrape,
+    descriptionTarget,
     _internals: {
       cleanCompany,
       cleanTitle,

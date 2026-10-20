@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.9 — 2026-10-21
+
+- Wait up to 90 seconds for slow job details and require the selected ID, company, title and changed description to settle. Recheck and review late description updates within a three-minute per-job budget; keep Stop and search-change cancellation responsive.
+- Read selected LinkedIn descriptions from modern plain About sections and legacy description containers. Ignore loading placeholders and descriptions outside the selected job.
+- Keep the selected LinkedIn card intact until capture is handed off or a bounded details failure is reported, then dismiss it. Remove the equal-description exception introduced in 0.8.8; a header or DOM replacement alone cannot authorize the previous job's text.
+
 ## 0.8.8 — 2026-10-21
 
 - Allow separate LinkedIn postings of the same role to share description text when the selected ID, company and title match and a fresh description render is observed. Keep unchanged old bodies and mismatched identities blocked.

@@ -197,14 +197,23 @@ for (const failure of ["wrong metadata", "stale job detail", "missing descriptio
       else if (failure === "stale job detail") details.innerHTML = fixture.details(fixture.job(fixture.B));
       else details.querySelector("#overview-1").remove();
     } });
-  await h.advance(180_000);
+  await h.advance(95_000);
   assert.equal(h.captures.length, 0);
-  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.deepEqual(h.selections, [fixture.A, fixture.A], "one readiness window permits only one pre-capture reopening");
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false, "the bounded second wait has not expired");
+  await h.advance(95_000);
+  assert.equal(h.captures.length, 0);
+  const reports = h.messages.filter(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(reports.length, 1);
+  const report = reports[0];
   assert.equal(report?.job.jobId, fixture.A);
   assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
   assert.equal(report?.job.trackerVersion, "0.8.6");
   assert.ok(report.job.verificationReason.length > 0 && report.job.verificationReason.length <= 2000);
+  assert.match(report.job.verificationReason, /180-second/);
+  assert.deepEqual(h.selections, [fixture.A, fixture.A], "readiness expiry never creates another retry");
   assert.deepEqual(h.actions, []);
+  assert.equal(h.state, null);
 });
 
 test("an unmounted selected Jobright card cannot bypass a committed country change", async (t) => {
@@ -293,9 +302,17 @@ test("a portal fallback with no Apply widget cannot reach downstream capture", a
     details.querySelector("#apply-now-button-id").remove();
     details.querySelector("a[href^='https://careers']").remove();
   } });
-  await h.advance(180_000);
+  await h.advance(95_000);
   assert.equal(h.captures.length, 0);
-  assert.equal(h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED")?.reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  assert.deepEqual(h.selections, [fixture.A, fixture.A]);
+  await h.advance(95_000);
+  assert.equal(h.captures.length, 0);
+  const reports = h.messages.filter(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.match(reports[0].job.verificationReason, /application control|Apply/);
+  assert.match(reports[0].job.verificationReason, /180-second/);
   assert.deepEqual(h.actions, []);
 });
 
@@ -312,13 +329,18 @@ test("a Jobright detail that fails to render initially can reopen once and queue
 
 test("a permanently missing Jobright detail is reported after bounded recovery and the next job can queue", async (t) => {
   const h = setup(t, { listLeaveOnSelect: true, resultsNavigation: true, stale: value => value.id === fixture.A });
-  await h.advance(180_000);
+  await h.advance(95_000);
+  assert.deepEqual(h.selections, [fixture.A, fixture.A]);
+  assert.equal(h.captures.length, 0);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  await h.advance(130_000);
   assert.deepEqual(h.selections, [fixture.A, fixture.A, fixture.B]);
   assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.B]);
   const reports = h.messages.filter(message => message.type === "KAI_TRACKER_NOT_SAVED");
   assert.equal(reports.length, 1);
   assert.equal(reports[0].job.jobId, fixture.A);
   assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED");
+  assert.match(reports[0].job.verificationReason, /180-second/);
   assert.deepEqual(h.resultNavigations, [`/jobs/info/${fixture.A}`, `/jobs/info/${fixture.A}`]);
   assert.deepEqual(h.actions, []);
   assert.equal(h.state, null);
@@ -438,11 +460,15 @@ test("changing committed filters stops before capture", async (t) => {
 test("unconfirmed stale details are reported and never saved", async (t) => {
   const h = setup(t, { stale: true, jobs: [fixture.job()] }); await h.advance(80_000);
   assert.equal(h.captures.length, 0);
+  assert.equal(h.messages.some(value => value.type === "KAI_TRACKER_NOT_SAVED"), false);
+  await h.advance(20_000);
   const report = h.messages.find((value) => value.type === "KAI_TRACKER_NOT_SAVED");
   assert.equal(report.reasonCode, "DETAILS_NOT_CONFIRMED"); assert.equal(report.job.jobId, fixture.A);
   assert.match(report.reasonDetail, /details.*(?:not ready|changing|could not|unavailable)|detail view could not be closed/iu);
   assert.ok(report.reasonDetail.length <= 2000);
+  assert.match(report.reasonDetail, /90-second/);
   assert.equal(report.job.detailAvailability, "unavailable");
+  assert.deepEqual(h.selections, [fixture.A], "without a safe return control no second selection is attempted");
 });
 test("collector failure details preserve the actual cause and cap diagnostic text at 2000 characters", async (t) => {
   const reason = `The Jobright card could not be revealed: ${"x".repeat(2500)}`;

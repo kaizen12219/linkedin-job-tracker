@@ -8,13 +8,17 @@ const root = path.resolve(__dirname, "..");
 const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer";
 const item = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: `Engineer ${id}`, description: `Job ${id}. ` + "Build useful software for our customers. ".repeat(15), ...extra });
 function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, covered = false, restoredVisited = [], renderDelay = 0, holdCapture = false,
-  standaloneTitle = false, dismissRemovesCard = false, reportError = false, detailTransition = null, locks = collectionLocks(), runId = "authorized-run" } = {}) {
+  standaloneTitle = false, dismissRemovesCard = false, reportError = false, holdReport = false, detailTransition = null, detailRenderDelay = 450,
+  dismissCancelsDetails = false, lazyDescriptionDelay = null, locks = collectionLocks(), runId = "authorized-run" } = {}) {
   const dom = new JSDOM("<html><body><div class='jobs-search-results-list' style='overflow-y:auto'><ul></ul><nav class='jobs-search-pagination'></nav></div><div class='jobs-details'></div></body></html>", { url: SEARCH, runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const window = dom.window, document = window.document;
   let time = 0, timerId = 0, page = 0, scrollTop = 0, hidden = false;
   const timers = new Map(), captures = [], selections = [], dismissals = [], nextClicks = [], messages = [], listeners = [], notices = [];
   const detailRenders = [];
+  const detailReveals = [];
+  let pendingDescription = null;
+  const dismissedIds = new Set();
   const append = document.documentElement.append.bind(document.documentElement);
   document.documentElement.append = (...nodes) => {
     for (const node of nodes) if (node.dataset?.collectionNotice) notices.push({ text: node.textContent, tone: node.dataset.collectionNotice, time });
@@ -22,6 +26,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   };
   const tracked = new Set();
   let releaseCapture;
+  let releaseReport;
   let state = { id: runId, searchKey: window.location.href, visited: [...restoredVisited], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
   window.Date.now = () => time; window.Math.random = () => 0.5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
@@ -38,7 +43,17 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
       window.setTimeout(() => { pages[0].push(lazy); render(); }, 700);
     }
   };
-  window.HTMLElement.prototype.scrollIntoView = function () { scrollTop = this.matches("[data-job-id], [componentkey]") ? 0 : 400; };
+  window.HTMLElement.prototype.scrollIntoView = function () {
+    if (this.closest(".jobs-details")) {
+      detailReveals.push({ time });
+      if (pendingDescription && !pendingDescription.started) {
+        const pending = pendingDescription; pending.started = true;
+        window.setTimeout(() => { if (pending.body.isConnected) pending.body.textContent = pending.job.description; }, lazyDescriptionDelay);
+      }
+      return;
+    }
+    scrollTop = this.matches("[data-job-id], [componentkey]") ? 0 : 400;
+  };
   const rect = (left, top, width, height) => ({ left, right: left + width, top, bottom: top + height, width, height, x: left, y: top });
   window.HTMLElement.prototype.getBoundingClientRect = function () {
     if (this.matches("[data-job-id], [componentkey]")) return rect(20, 100 + Number(this.dataset.index) * 80 - scrollTop, 320, 75);
@@ -57,9 +72,11 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   function details(job) {
     const target = document.querySelector(".jobs-details");
     const heading = standaloneTitle ? "p" : "h1";
-    target.innerHTML = `<div class='job-details-jobs-unified-top-card'><${heading}><a href='/jobs/view/${job.id}/'>${job.title}</a></${heading}><a href='/company/${job.id}/'>${job.company}</a><button>${job.workplace || "Remote"}</button><button>${job.easy ? "Easy Apply" : "Apply"}</button></div><div class='jobs-description__content'><div class='jobs-box__html-content'></div></div>`;
+    target.innerHTML = `<div class='job-details-jobs-unified-top-card'><${heading}><a href='/jobs/view/${job.id}/'>${job.title}</a></${heading}><a href='/company/${job.id}/'>${job.company}</a><button>${job.workplace || "Remote"}</button><button>${job.easy ? "Easy Apply" : "Apply"}</button></div><section componentkey='JobDetails_AboutTheJob'><h2>About the job</h2><div class='jobs-description__content'><div class='jobs-box__html-content'></div></div></section>`;
     target.querySelector(".jobs-box__html-content").setAttribute("data-testid", "expandable-text-box");
-    target.querySelector(".jobs-box__html-content").textContent = job.description;
+    const body = target.querySelector(".jobs-box__html-content");
+    body.textContent = lazyDescriptionDelay === null ? job.description : "";
+    pendingDescription = lazyDescriptionDelay === null ? null : { body, job, started: false };
     detailRenders.push({ id: job.id, time });
   }
   function render() {
@@ -80,6 +97,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
         event.stopPropagation(); dismissals.push(job.id);
         assert.equal(button.textContent, "×", "collection must never click Undo");
         job.dismissed = true;
+        dismissedIds.add(job.id);
         button.textContent = "Undo"; button.setAttribute("aria-label", `Undo dismissal of ${job.title} job`);
         card.setAttribute("aria-disabled", "true"); card.style.opacity = "0.5";
         const hint = document.createElement("span"); hint.textContent = "We won’t recommend this job anymore."; card.append(hint);
@@ -90,9 +108,10 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
         event.preventDefault(); selections.push({ id: job.id, time, target: event.target.tagName });
         window.history.replaceState({}, "", `${SEARCH}&start=${page * 25}&currentJobId=${job.id}`);
         window.setTimeout(() => {
+          if (dismissCancelsDetails && dismissedIds.has(job.id)) return;
           if (detailTransition) detailTransition(job, { document, window, renderDetails: details });
           else details(job);
-        }, 450);
+        }, detailRenderDelay);
       }); list.append(card);
     });
     const pagination = document.querySelector("nav"); pagination.innerHTML = `<button aria-current='page'>${page + 1}</button><button aria-label='View next page'>Next</button>`;
@@ -110,6 +129,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
       messages.push(structuredClone(message));
       if (message.type === "KAI_TRACKER_NOT_SAVED") {
         if (reportError) throw new Error("The report folder is unavailable.");
+        if (holdReport) { holdReport = false; await new Promise(resolve => { releaseReport = resolve; }); }
         return { ok: true, result: { reported: true } };
       }
       if (message.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: structuredClone(state) } };
@@ -130,8 +150,9 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
     }
   } };
   for (const file of ["scraper.js", "job-collector.js", "content.js"]) window.eval(fs.readFileSync(path.join(root, "src", file), "utf8"));
-  return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases, detailRenders,
+  return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases, detailRenders, detailReveals,
     releaseCapture() { releaseCapture(); },
+    releaseReport() { releaseReport(); },
     restart(id = "new-run") {
       state = { id, searchKey: SEARCH, visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
       return new Promise((resolve) => listeners[0]({ type: "KAI_TRACKER_RUN_START", state }, {}, resolve));
@@ -159,17 +180,16 @@ function changeDetailHeader(document, job) {
 const identicalBigId = { company: "BigID", title: "Senior Software Engineer", easy: true,
   description: "Design and build production data services, maintain automated tests, and improve service reliability. ".repeat(2) };
 
-test("distinct BigID postings with identical descriptions queue after each fresh detail render and collection continues", async (t) => {
+test("an unchanged previous description is never captured under a different job ID even after a new DOM render", async (t) => {
   const h = fixture(t, [[item(101, identicalBigId), item(102, { ...identicalBigId, company: "BIGID", title: "SENIOR SOFTWARE ENGINEER" }), item(103)]],
     { modern: true, standaloneTitle: true, dismissRemovesCard: true });
   await h.advance(300_000);
-  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101", "102", "103"]);
-  assert.equal(h.captures[0].job.description, h.captures[1].job.description);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101", "103"]);
   assert.equal(h.captures[0].job.jobIdSource, "details");
-  assert.equal(h.captures[1].job.jobIdSource, "details");
-  assert.notEqual(h.captures[0].job.descriptionRenderId, h.captures[1].job.descriptionRenderId);
   assert.deepEqual(h.dismissals, ["101", "102", "103"]);
-  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "102");
+  assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
 });
 
 test("a new LinkedIn header cannot authorize an identical description retained in the previous body node", async (t) => {
@@ -181,7 +201,7 @@ test("a new LinkedIn header cannot authorize an identical description retained i
   assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101"]);
   const current = h.window.LinkedInJobScraper.scrape(h.document, h.window.location.href);
   assert.equal(current.jobId, "102"); assert.equal(current.jobIdSource, "details");
-  assert.equal(current.descriptionRenderId, h.captures[0].job.descriptionRenderId);
+  assert.equal(current.description, h.captures[0].job.description);
   const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
   assert.equal(report?.job.jobId, "102"); assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
 });
@@ -193,21 +213,68 @@ for (const changed of [{ id: "999" }, { company: "Different Employer" }, { title
   await h.advance(300_000);
   assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101"]);
   const current = h.window.LinkedInJobScraper.scrape(h.document, h.window.location.href);
-  assert.notEqual(current.descriptionRenderId, h.captures[0].job.descriptionRenderId);
   const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
   assert.equal(report?.job.jobId, "102"); assert.equal(report?.reasonCode, "DETAILS_NOT_CONFIRMED");
 });
 
-test("a delayed LinkedIn body replacement must settle and receive a full review before capture", async (t) => {
-  const h = fixture(t, [[item(101, identicalBigId), item(102, identicalBigId)]], { detailTransition(job, context) {
+test("a slow LinkedIn body replacement must change, settle and receive a full review before capture", async (t) => {
+  const next = item(102, { ...identicalBigId, description: "Build different production software for the selected job. ".repeat(3) });
+  const h = fixture(t, [[item(101, identicalBigId), next]], { detailTransition(job, context) {
     if (job.id !== "102") { context.renderDetails(job); return; }
     changeDetailHeader(context.document, job);
-    context.window.setTimeout(() => context.renderDetails(job), 8000);
+    context.window.setTimeout(() => context.renderDetails(job), 60000);
   } });
   await h.advance(300_000);
   assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["101", "102"]);
   const committed = h.detailRenders.find(render => render.id === "102");
   assert.ok(h.captures[1].time >= committed.time + 5000, "the newly rendered body receives its own review delay");
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
+test("slow selected descriptions finish loading before native dismissal can cancel their request", async (t) => {
+  const h = fixture(t, [[item(1), item(2, { easy: true })]], { modern: true, standaloneTitle: true,
+    detailRenderDelay: 60000, dismissCancelsDetails: true, dismissRemovesCard: true });
+  await h.advance(50000);
+  assert.deepEqual(h.dismissals, [], "the selected card stays intact throughout the network wait");
+  assert.equal(h.captures.length, 0);
+  await h.advance(250000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
+  assert.deepEqual(h.dismissals, ["1", "2"]);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
+test("a delayed capture acknowledgment cannot dismiss a card after Escape stops collection", async (t) => {
+  const h = fixture(t, [[item(1)]], { holdCapture: true });
+  await h.advance(35000);
+  assert.equal(h.captures.length, 1);
+  assert.deepEqual(h.dismissals, []);
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape" }));
+  h.releaseCapture(); await h.advance(10000);
+  assert.deepEqual(h.dismissals, []);
+  assert.equal(h.captures.length, 1, "the accepted capture is never retried after cancellation");
+  assert.match(h.notices.at(-1).text, /stopped/);
+});
+
+test("a delayed failure report cannot dismiss a card after Escape stops collection", async (t) => {
+  const h = fixture(t, [[item(1, { description: "" })]], { holdReport: true });
+  await h.advance(100000);
+  assert.equal(h.messages.filter(message => message.type === "KAI_TRACKER_NOT_SAVED").length, 1);
+  assert.deepEqual(h.dismissals, []);
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape" }));
+  h.releaseReport(); await h.advance(10000);
+  assert.deepEqual(h.dismissals, []);
+  assert.equal(h.captures.length, 0);
+  assert.match(h.notices.at(-1).text, /stopped/);
+});
+
+test("lazy descriptions below the viewport load when their selected About section is revealed", async (t) => {
+  const h = fixture(t, [[item(1), item(2, { easy: true })]], { modern: true, standaloneTitle: true, lazyDescriptionDelay: 25000 });
+  await h.advance(20000);
+  assert.equal(h.captures.length, 0);
+  assert.equal(h.dismissals.length, 0);
+  assert.ok(h.detailReveals.length > 0, "the selected details pane is revealed without selecting another card");
+  await h.advance(200000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
   assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
 });
 
@@ -357,7 +424,7 @@ test("classification alone and restored visited cards do not produce failure rep
   assert.ok(h.messages.some((message) => message.type === "KAI_TRACKER_CLASSIFY_COMPANIES"));
   assert.equal(h.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
 });
-test("changed details during review report the verified original description for the exact attempted job", async (t) => {
+test("changed descriptions during review settle and receive a new full review before capture", async (t) => {
   const current = item(1), original = current.description;
   const h = fixture(t, [[current]]);
   await h.advance(12_000);
@@ -365,9 +432,10 @@ test("changed details during review report the verified original description for
   h.document.querySelector(".jobs-box__html-content").textContent = "Different description arrived while reviewing the selected job.";
   await h.advance(300_000);
   const reports = h.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED");
-  assert.equal(reports.length, 1); assert.equal(reports[0].reasonCode, "DETAILS_NOT_CONFIRMED");
-  assert.equal(reports[0].job.jobId, "1"); assert.equal(reports[0].job.detailAvailability, "verified");
-  assert.equal(reports[0].job.description, original.trim()); assert.equal(h.captures.length, 0);
+  assert.equal(reports.length, 0); assert.equal(h.captures.length, 1);
+  assert.notEqual(h.captures[0].job.description, original.trim());
+  assert.equal(h.captures[0].job.description, "Different description arrived while reviewing the selected job.");
+  assert.ok(h.captures[0].time >= 12000 + 5000, "the new description receives a complete review");
 });
 test("a covered attempted card is reported and logging failure leaves collection behavior intact", async (t) => {
   const covered = fixture(t, [[item(1)]], { covered: true }); await covered.advance(300_000);

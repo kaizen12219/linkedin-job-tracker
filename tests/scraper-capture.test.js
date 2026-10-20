@@ -57,60 +57,106 @@ test("missing Apply controls cannot be mistaken for an ordinary external-apply j
   assert.equal(data.applicationsAvailable, false);
 });
 
-function descriptionRenderFixture(t) {
-  const description = "Design and build production data services, maintain automated tests, and improve service reliability. ".repeat(3);
-  const dom = new JSDOM(`<div class="jobs-details"><div class="job-details-jobs-unified-top-card"><h1><a href="/jobs/view/101/">Senior Software Engineer</a></h1>
-    <a href="/company/bigid/">BigID</a><button>Remote</button><button>Easy Apply</button></div>
-    <section componentkey="JobDetails_AboutTheJob"><div data-testid="expandable-text-box">${description}</div></section></div>`,
+function descriptionFixture(t, { body = '', rootClass = 'jobs-details', rootAttributes = '', outside = '' } = {}) {
+  const dom = new JSDOM(`<main><div class="${rootClass}" ${rootAttributes}><div class="job-details-jobs-unified-top-card"><h1><a href="/jobs/view/101/">Senior Software Engineer</a></h1>
+    <a href="/company/bigid/">BigID</a><button>Remote</button><button>Easy Apply</button></div>${body}</div>${outside}</main>`,
     { url: "https://www.linkedin.com/jobs/search/?currentJobId=101", runScripts: "outside-only" });
   t.after(() => dom.window.close()); dom.window.eval(source);
   return { api: dom.window.LinkedInJobScraper, document: dom.window.document, window: dom.window };
 }
 
-test("LinkedIn description render identity stays stable for an unchanged body despite header and URL updates", (t) => {
-  const { api, document, window } = descriptionRenderFixture(t);
-  const first = api.scrape();
-  assert.equal(typeof first.descriptionRenderId, "string");
-  assert.ok(first.descriptionRenderId.length > 0);
-  assert.equal(api.scrape().descriptionRenderId, first.descriptionRenderId);
-  const title = document.querySelector("h1 a"); title.href = "/jobs/view/102/";
-  title.textContent = "SENIOR SOFTWARE ENGINEER";
-  window.history.replaceState({}, "", "?currentJobId=102");
-  const headerChanged = api.scrape();
-  assert.equal(headerChanged.jobId, "102"); assert.equal(headerChanged.jobIdSource, "details");
-  assert.equal(headerChanged.descriptionRenderId, first.descriptionRenderId);
-  assert.equal(headerChanged.description, first.description);
-  assert.equal(JSON.parse(JSON.stringify(headerChanged)).descriptionRenderId, first.descriptionRenderId);
-  assert.ok(Object.values(headerChanged).every(value => !value || typeof value !== "object" || value.nodeType === undefined));
+test("modern plain About sections preserve full paragraphs and lists without an expandable wrapper", (t) => {
+  const { api } = descriptionFixture(t, { body: '<section componentkey="JobDetails_AboutTheJob"><h2>About the job</h2><p>Build production data services.</p><h3>Responsibilities</h3><ul><li>Design reliable APIs.</li><li>Maintain automated tests.</li></ul><button>Show more</button><section componentkey="JobDetails_AboutTheCompany"><h2>About the company</h2><p>PRIVATE_COMPANY_MARKETING</p></section></section>' });
+  const value = api.scrape();
+  assert.match(value.description, /Build production data services\./u);
+  assert.match(value.description, /Responsibilities\n- Design reliable APIs\.\n- Maintain automated tests\./u);
+  assert.doesNotMatch(value.description, /About the job|Show more|PRIVATE_COMPANY|Senior Software Engineer|BigID/u);
+  assert.equal(value.descriptionRenderId, undefined);
+  assert.equal(value.jobId, '101'); assert.equal(value.jobIdSource, 'details');
 });
 
-test("LinkedIn gives fresh description render identities to equal-text replacement nodes and text revisions", (t) => {
-  const { api, document } = descriptionRenderFixture(t);
-  const first = api.scrape();
-  const original = document.querySelector("[data-testid='expandable-text-box']");
-  const replacement = original.cloneNode(true); original.replaceWith(replacement);
-  const replaced = api.scrape();
-  assert.equal(original.isConnected, false);
-  assert.equal(replaced.description, first.description);
-  assert.notEqual(replaced.descriptionRenderId, first.descriptionRenderId);
-  assert.equal(api.scrape().descriptionRenderId, replaced.descriptionRenderId);
-  replacement.textContent += " Maintain newly introduced software services.";
-  const changed = api.scrape();
-  assert.notEqual(changed.descriptionRenderId, replaced.descriptionRenderId);
-  assert.equal(api.scrape().descriptionRenderId, changed.descriptionRenderId);
-  replacement.remove();
-  const missing = api.scrape();
-  assert.equal(missing.description, ""); assert.equal(missing.descriptionRenderId, "");
+for (const attributes of ['componentkey="JobDetails_AboutTheJob"', 'class="jobs-box__html-content"']) test(`an authored JD keeps its company introduction, responsibilities, and experience requirements: ${attributes}`, (t) => {
+  const { api } = descriptionFixture(t, { body: `<section ${attributes}><h2>About the company</h2><p>We build data security products for enterprise customers.</p><h2>Responsibilities</h2><p>Design, build, and test production software services.</p><h2>Qualifications</h2><p>5+ years of professional software engineering experience required.</p></section>` });
+  const value = api.scrape().description;
+  assert.match(value, /About the company\nWe build data security products/u);
+  assert.match(value, /Responsibilities\nDesign, build, and test production software services/u);
+  assert.match(value, /Qualifications\n5\+ years of professional software engineering experience required/u);
 });
 
-test("a global description fallback outside the selected details keeps its text without render authority", (t) => {
-  const { api, document } = descriptionRenderFixture(t);
-  const selected = api.scrape();
-  assert.ok(selected.descriptionRenderId);
-  const foreign = document.querySelector("[componentkey='JobDetails_AboutTheJob']");
-  document.body.append(foreign);
-  const fallback = api.scrape();
-  assert.equal(fallback.jobId, "101"); assert.equal(fallback.jobIdSource, "details");
-  assert.equal(fallback.description, selected.description, "existing fallback extraction still returns the same text");
-  assert.equal(fallback.descriptionRenderId, "", "a description from outside the selected detail cannot authorize a fresh render");
+test("a loading About placeholder remains empty until its plain job description hydrates", (t) => {
+  const { api, document } = descriptionFixture(t, { body: '<section componentkey="JobDetails_AboutTheJob" aria-busy="true"><h2>About the job</h2><div data-testid="expandable-text-box">Loading job description...</div></section>',
+    outside: '<section data-testid="job-description"><div data-testid="expandable-text-box">FOREIGN_JOB_DESCRIPTION must never substitute for a loading selected job.</div></section>' });
+  assert.equal(api.scrape().description, '');
+  const section = document.querySelector('[componentkey="JobDetails_AboutTheJob"]');
+  section.removeAttribute('aria-busy');
+  assert.equal(api.scrape().description, '');
+  section.innerHTML = '<h2>About the job</h2><p>Build and operate reliable software services.</p><p>Collaborate on production engineering changes.</p>';
+  assert.equal(api.scrape().description, 'Build and operate reliable software services.\nCollaborate on production engineering changes.');
+});
+
+for (const body of ['<div class="jobs-description__content"><div class="jobs-box__html-content"><p>Build SQL pipelines.</p></div></div>',
+  '<article id="job-details"><h2>Job description</h2><p>Build SQL pipelines.</p></article>',
+  '<div class="description__text"><div class="show-more-less-html__markup"><p>Build SQL pipelines.</p></div></div>']) test(`legacy job-view descriptions do not require test attributes or a length threshold: ${body.slice(0, 42)}`, (t) => {
+  const { api } = descriptionFixture(t, { rootClass: 'job-view-layout', body });
+  assert.equal(api.scrape().description, 'Build SQL pipelines.');
+});
+
+test("plain heading-following descriptions stop at unrelated company sections", (t) => {
+  const { api } = descriptionFixture(t, { body: '<div><header><h2>About this role</h2></header><div><p>Build production services.</p><ul><li>Test deployed software.</li></ul></div><section><h2>About the company</h2><p>COMPANY_MARKETING</p><div data-testid="expandable-text-box">UNRELATED_LONG_BODY should not be selected as the job description.</div></section></div>' });
+  assert.equal(api.scrape().description, 'Build production services.\n- Test deployed software.');
+});
+
+test("an unhydrated plain About section cannot borrow a later Premium or company body", (t) => {
+  const { api } = descriptionFixture(t, { body: '<section><header><h2>About the job</h2></header><p>Loading...</p></section><section><h2>Stand out with Premium</h2><p>UNRELATED_PREMIUM_TEXT</p><div data-testid="expandable-text-box">UNRELATED_EXPANDER_TEXT</div></section>' });
+  assert.equal(api.scrape().description, '');
+});
+
+test("foreign global bodies, list cards, and company expanders cannot fill a missing selected job description", (t) => {
+  const { api } = descriptionFixture(t, { body: '<section><h2>About the company</h2><div data-testid="expandable-text-box">COMPANY_DESCRIPTION with enough prose to exceed the previous global longest-expander threshold. We describe company history and corporate benefits rather than this position.</div></section><li data-occludable-job-id="999"><div data-testid="expandable-text-box">OTHER_CARD_DESCRIPTION</div></li>',
+    outside: '<section componentkey="JobDetails_AboutTheJob"><div data-testid="expandable-text-box">FOREIGN_JOB_DESCRIPTION</div></section>' });
+  assert.equal(api.scrape().description, '');
+  assert.equal(api.descriptionTarget(), null);
+});
+
+test("an About marker on the selected root itself is read without its selected-job header", (t) => {
+  const { api } = descriptionFixture(t, { rootAttributes: 'componentkey="JobDetails_AboutTheJob"', body: '<h2>About the job</h2><p>Build software from the selected root.</p>' });
+  assert.equal(api.scrape().description, 'Build software from the selected root.');
+});
+
+test("a busy selected detail waits for loading to finish even when old text is still mounted", (t) => {
+  const { api, document } = descriptionFixture(t, { rootAttributes: 'aria-busy="true"', body: '<div class="jobs-box__html-content"><p>Old mounted description must not be captured during loading.</p></div>' });
+  assert.equal(api.scrape().description, '');
+  document.querySelector('.jobs-details').removeAttribute('aria-busy');
+  assert.equal(api.scrape().description, 'Old mounted description must not be captured during loading.');
+});
+
+for (const oldAttributes of ['hidden aria-busy="true"', 'style="display:none"', 'aria-hidden="true"', 'aria-busy="true"']) test(`a retained unavailable panel cannot mask the visible current details: ${oldAttributes}`, (t) => {
+  const { api, document, window } = descriptionFixture(t, { rootAttributes: oldAttributes,
+    body: '<section componentkey="JobDetails_AboutTheJob"><h2>About the job</h2><p>OLD_JOB_DESCRIPTION</p></section>',
+    outside: '<div class="jobs-details"><div class="job-details-jobs-unified-top-card"><h1><a href="/jobs/view/202/">Current Software Engineer</a></h1><a href="/company/current/">Current Employer</a><button>Remote</button><button>Apply</button></div><section componentkey="JobDetails_AboutTheJob"><h2>About the job</h2><p>Build services for the current selected job.</p></section></div>' });
+  window.history.replaceState({}, '', '?currentJobId=202');
+  const value = api.scrape();
+  assert.equal(value.jobId, '202'); assert.equal(value.jobIdSource, 'details');
+  assert.equal(value.title, 'Current Software Engineer'); assert.equal(value.company, 'Current Employer');
+  assert.equal(value.description, 'Build services for the current selected job.');
+  assert.equal(api.descriptionTarget(), document.querySelectorAll('.jobs-details')[1].querySelector('h2'));
+});
+
+test("only hidden recognized panels produce no description or lazy-load target", (t) => {
+  const { api } = descriptionFixture(t, { rootAttributes: 'hidden', body: '<section componentkey="JobDetails_AboutTheJob"><h2>About the job</h2><p>HIDDEN_OLD_DESCRIPTION</p></section>' });
+  assert.equal(api.scrape().description, '');
+  assert.equal(api.descriptionTarget(), null);
+});
+
+test("descriptionTarget finds only the selected About heading or container for lazy loading", (t) => {
+  const { api, document } = descriptionFixture(t, { body: '<section componentkey="JobDetails_AboutTheJob" aria-busy="true"><h2>About the job</h2><p>Loading...</p></section>',
+    outside: '<section componentkey="JobDetails_AboutTheJob"><h2>About the job</h2><p>FOREIGN_JOB</p></section>' });
+  const section = document.querySelector('.jobs-details [componentkey]');
+  assert.equal(api.descriptionTarget(), section.querySelector('h2'));
+  assert.equal(api.scrape().description, '');
+  section.querySelector('h2').remove();
+  assert.equal(api.descriptionTarget(), section);
+  section.remove();
+  assert.equal(api.descriptionTarget(), null);
+  assert.ok(Object.values(api.scrape()).every(value => !value || typeof value !== 'object' || value.nodeType === undefined));
 });
