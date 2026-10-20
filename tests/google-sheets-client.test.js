@@ -140,7 +140,7 @@ async function configure(h, overrides = {}) {
   return h.client.configure({ credentials: CREDENTIALS, sheetUrl: SHEET_URL, sheetGid: String(GID), ...overrides });
 }
 
-test("manifest keeps its identity and allows only Google, LinkedIn and the fixed local research service", () => {
+test("manifest keeps its identity and bounds background connections to LinkedIn and the fixed research service", () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, "manifest.json")));
   const identity = createHash("sha256").update(Buffer.from(manifest.key, "base64")).digest("hex").slice(0, 32)
     .replace(/[0-9a-f]/gu, (hex) => String.fromCharCode(97 + parseInt(hex, 16)));
@@ -155,6 +155,8 @@ test("manifest keeps its identity and allows only Google, LinkedIn and the fixed
   assert.doesNotMatch(manifest.content_security_policy.extension_pages, /googleapis\.com/);
 
   assert.match(manifest.content_security_policy.extension_pages, /http:\/\/127\.0\.0\.1:8787/);
+  const connections = manifest.content_security_policy.extension_pages.split("connect-src ")[1].split(";")[0].trim().split(/\s+/u);
+  assert.deepEqual(connections, ["http://127.0.0.1:8787", "https://www.linkedin.com", "https://linkedin.com"]);
   assert.doesNotMatch(SOURCE + BACKGROUND, /WebSocket|\/api\/tracker|tracker-pair|ngrok/iu);
   assert.equal(fs.existsSync(path.join(ROOT, "src/kai-flow-client.js")), false);
   assert.equal(fs.existsSync(path.join(ROOT, "src/tracker-security.js")), false);

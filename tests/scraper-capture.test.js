@@ -227,3 +227,88 @@ test("description diagnostics bound heading counts, ancestry, attributes, and se
   assert.ok(JSON.stringify(value).length <= 3900);
   assert.ok(value.headings.some(heading => !heading.inSelectedRoot), 'outside-root evidence remains within the diagnostic budget');
 });
+
+const publicIdentity = { jobId: '4480734414', title: 'Sr Java Integration Engineer III', company: 'Mutual of Omaha',
+  sourceUrl: 'https://www.linkedin.com/jobs/view/sr-java-integration-engineer-iii-at-mutual-of-omaha-4480734414' };
+function publicJobHtml({ title = publicIdentity.title, company = publicIdentity.company, headerId = publicIdentity.jobId,
+  canonical = `https://www.linkedin.com/jobs/view/${publicIdentity.jobId}/`, ogUrl = canonical, body = '<p>Build production Java integration services.</p><ul><li>Maintain automated tests.</li></ul><p>5+ years of software engineering experience required.</p>',
+  after = '', header = true, description = true, closed = false } = {}) {
+  return `<html><head>${canonical === null ? '' : `<link rel="canonical" href="${canonical}">`}${ogUrl === null ? '' : `<meta property="og:url" content="${ogUrl}">`}</head><body><main>
+    ${header ? `<section class="top-card-layout" data-entity-urn="urn:li:jobPosting:${headerId}"><h1 class="top-card-layout__title">${title}</h1><a class="topcard__org-name-link" href="/company/mutual-of-omaha/">${company}</a>${closed ? '<span class="closed-job">No longer accepting applications</span>' : ''}</section>` : ''}
+    ${description ? `<section class="description"><div class="description__text"><div class="show-more-less-html__markup">${body}</div></div></section>` : ''}${after}</main></body></html>`;
+}
+
+test("the public-page parser reads only the exact selected public header and authored description inertly", (t) => {
+  const { api, window } = descriptionFixture(t);
+  let fetched = false;
+  window.fetch = () => { fetched = true; throw new Error('The parser must not fetch.'); };
+  const related = '<aside class="related-jobs"><section class="top-card-layout"><h1 class="top-card-layout__title">Other Engineer</h1><a class="topcard__org-name-link">Other Employer</a></section><div class="description__text"><div class="show-more-less-html__markup">RELATED_JOB_BODY</div></div></aside>';
+  const value = api.parsePublicDescription(publicJobHtml({ body: '<h2>About the company</h2><p>We build insurance software.</p><h2>Responsibilities</h2><p>Build production Java integration services.</p><ul><li>Maintain automated tests.</li></ul><p>5+ years of software engineering experience required.</p><p style="display:none">HIDDEN_STALE_BODY</p><form><p>PRIVATE_SIGN_IN_FORM</p><input value="PRIVATE_FORM_VALUE"></form><script>window.PUBLIC_SCRIPT_RAN=true;</script><script type="application/ld+json">{"description":"PRIVATE_APP_STATE"}</script><button>Show more</button>',
+    after: related }), publicIdentity);
+  assert.equal(value.jobId, publicIdentity.jobId);
+  assert.equal(value.title, publicIdentity.title);
+  assert.equal(value.company, publicIdentity.company);
+  assert.equal(value.sourceUrl, publicIdentity.sourceUrl);
+  assert.match(value.description, /About the company\nWe build insurance software\./u);
+  assert.match(value.description, /Responsibilities\nBuild production Java integration services\./u);
+  assert.match(value.description, /- Maintain automated tests\./u);
+  assert.match(value.description, /5\+ years of software engineering experience required\./u);
+  assert.doesNotMatch(value.description, /RELATED_|HIDDEN_|PRIVATE_|PUBLIC_SCRIPT_RAN|Show more/u);
+  assert.equal(window.PUBLIC_SCRIPT_RAN, undefined);
+  assert.equal(fetched, false);
+  assert.ok(Object.values(value).every(field => typeof field === 'string'));
+});
+
+test("public numeric and slug URLs preserve case/whitespace-normalized exact header identity", (t) => {
+  const { api } = descriptionFixture(t);
+  const value = api.parsePublicDescription(publicJobHtml({ title: '  SR JAVA\n INTEGRATION ENGINEER III ', company: ' MUTUAL OF OMAHA ', canonical: '/jobs/view/4480734414/', ogUrl: null }),
+    { ...publicIdentity, sourceUrl: 'https://www.linkedin.com/jobs/view/4480734414/' });
+  assert.equal(value.jobId, publicIdentity.jobId);
+  assert.equal(value.title, 'SR JAVA INTEGRATION ENGINEER III');
+  assert.equal(value.company, 'MUTUAL OF OMAHA');
+});
+
+for (const changed of [{ title: 'Senior Java Integration Engineer III' }, { company: 'Other Insurance Company' }, { headerId: '999' },
+  { canonical: 'https://www.linkedin.com/jobs/view/999/' }, { ogUrl: 'https://www.linkedin.com/jobs/view/different-role-999' },
+  { canonical: 'https://evil.example/jobs/view/4480734414/' }, { canonical: '' }]) test(`the public parser rejects conflicting selected identity: ${Object.keys(changed)[0]}=${Object.values(changed)[0]}`, (t) => {
+  const { api } = descriptionFixture(t);
+  assert.equal(api.parsePublicDescription(publicJobHtml(changed), publicIdentity), null);
+});
+
+for (const sourceUrl of ['https://www.linkedin.com/jobs/view/999/', 'https://www.linkedin.com/authwall', 'https://www.linkedin.com/login',
+  'https://evil.example/jobs/view/4480734414/', 'http://www.linkedin.com/jobs/view/4480734414/']) test(`public fallback rejects an unverified response URL: ${sourceUrl}`, (t) => {
+  const { api } = descriptionFixture(t);
+  assert.equal(api.parsePublicDescription(publicJobHtml(), { ...publicIdentity, sourceUrl }), null);
+});
+
+test("public login pages, empty descriptions, and related-only bodies cannot provide a fallback", (t) => {
+  const { api } = descriptionFixture(t);
+  for (const html of [publicJobHtml({ body: '' }), publicJobHtml({ body: '<p>Loading job description...</p>' }),
+    publicJobHtml({ header: false, body: 'Sign in to view this job.' }),
+    publicJobHtml({ description: false, after: '<aside class="related-jobs"><div class="description__text"><div class="show-more-less-html__markup">RELATED_ONLY_BODY</div></div></aside>' }),
+    publicJobHtml({ body: '<form><p>Sign in to LinkedIn</p></form><script type="application/ld+json">{"description":"APP_STATE_ONLY_BODY"}</script>' }),
+    '<main><h1>Sign in to LinkedIn</h1><form><input name="password"></form></main>']) {
+    assert.equal(api.parsePublicDescription(html, publicIdentity), null);
+  }
+});
+
+test("hidden or ambiguous public headers and job bodies are rejected rather than guessed", (t) => {
+  const { api } = descriptionFixture(t);
+  const html = publicJobHtml();
+  for (const changed of [html.replace('class="top-card-layout"', 'class="top-card-layout" hidden'),
+    html.replace('class="description__text"', 'class="description__text" style="display:none"'),
+    publicJobHtml({ after: '<section class="top-card-layout"><h1 class="top-card-layout__title">Other Engineer</h1><a class="topcard__org-name-link">Other Employer</a></section>' }),
+    publicJobHtml({ after: '<section class="description"><div class="show-more-less-html__markup">SECOND_JOB_BODY</div></section>' })]) {
+    assert.equal(api.parsePublicDescription(changed, publicIdentity), null);
+  }
+});
+
+test("a closed exact public posting is marked closed without treating a login CTA as an open application", (t) => {
+  const { api } = descriptionFixture(t);
+  const closed = api.parsePublicDescription(publicJobHtml({ closed: true }), publicIdentity);
+  assert.equal(closed.applicationsClosed, true);
+  assert.match(closed.description, /Build production Java integration services/u);
+  const ordinary = api.parsePublicDescription(publicJobHtml({ after: '<a href="/login">Sign in to apply</a><aside class="related-jobs"><span class="closed-job">No longer accepting applications</span></aside>' }), publicIdentity);
+  assert.equal(ordinary.applicationsClosed, undefined);
+  assert.equal(ordinary.applicationsAvailable, undefined);
+});

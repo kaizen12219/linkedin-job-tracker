@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.11 — 2026-10-21
+
+- Recover selected LinkedIn descriptions whose About section stays unhydrated in a hidden tab by reading that exact public job page in the extension worker. Verify job ID, title and company before using its description; recheck the live document and collector ownership before and after the credential-free request.
+- Bound each public request to 20 seconds and 750 KB, allow at most two attempts within the existing readiness window, and reject unrelated redirects, login pages, mismatched or ambiguous content. Preserve closed-posting status and all existing eligibility/profile checks.
+- Discard late description responses after Stop or a changed selection. Include bounded fallback status in failure diagnostics.
+
 ## 0.8.10 — 2026-10-21
 
 - Recognize selected LinkedIn About headings rendered as paragraphs, ARIA headings or plain divs for description extraction and lazy loading. Keep exact heading labels and selected-job boundaries.

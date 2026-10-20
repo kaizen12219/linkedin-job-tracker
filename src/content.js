@@ -213,7 +213,7 @@
     if (!collectionSelecting && event.isTrusted !== false && window.LinkedInJobScraper?.scrape && !capturedJobs.has(record.identity) &&
       !["duplicate", "banned"].includes(card.getAttribute("data-kai-flow-job-state"))) {
       let previous;
-      try { previous = window.LinkedInJobScraper.scrape(document, window.location.href); } catch { /* Wait for readable details. */ }
+      try { previous = scrapeCollectionJob(); } catch { /* Wait for readable details. */ }
       captureSelection = { record, version: manualCaptureVersion, previousId: previous?.jobId, previousDescription: previous?.description, previousJob: previous,
         expiresAt: Date.now() + 90000, stableValue: "", stableAt: 0,
         failureReason: "The selected LinkedIn job details have not loaded yet." };
@@ -250,7 +250,7 @@
       scheduleCapture(500);
     };
     let job;
-    try { job = window.LinkedInJobScraper.scrape(document, window.location.href); }
+    try { job = scrapeCollectionJob(); }
     catch { waitForDetails("The selected LinkedIn job details could not be read yet."); return; }
     const record = selection.record;
     // LinkedIn replaces the details asynchronously. Never capture the previous
@@ -302,7 +302,9 @@
       sourceUrl: `https://www.linkedin.com/jobs/view/${jobId}/`, detailAvailability: verified ? "verified" : "unavailable" };
     if (code === "DETAILS_NOT_CONFIRMED") {
       try {
-        const diagnostics = window.LinkedInJobScraper?.descriptionDiagnostics?.(document);
+        const diagnostics = window.LinkedInJobScraper?.descriptionDiagnostics?.(document) || {};
+        const fallback = publicDescriptions.get(jobId);
+        if (fallback) diagnostics.publicDescription = { state: fallback.state, attempts: fallback.attempts, ...(fallback.error ? { error: fallback.error } : {}) };
         if (diagnostics) snapshot.descriptionDiagnostics = JSON.stringify(diagnostics).slice(0, 6000);
       } catch { /* Optional bounded diagnostics cannot interfere with collection. */ }
     }
@@ -463,12 +465,58 @@
   }
   let collectionScrapeError = "";
   const descriptionRevealAt = new WeakMap();
+  const publicDescriptions = new Map();
+  const sameDescriptionIdentity = (left, right) => String(left?.jobId) === String(right?.jobId || right?.captureId) &&
+    companyKey(left?.company) === companyKey(right?.company) && companyKey(left?.title) === companyKey(right?.title);
+  function publicDescriptionOwner(record) {
+    const selected = ownCollectionSelection(record);
+    if (selected && collection?.running()) return { selection: selected, runId: collectionId };
+    return captureSelection?.record === record ? { selection: captureSelection } : null;
+  }
+  function publicDescriptionOwnerActive(owner) {
+    return owner.runId ? collectionSelection === owner.selection && collectionId === owner.runId : captureSelection === owner.selection;
+  }
+  function preparePublicDescription(record, job) {
+    if (typeof window.LinkedInJobScraper?.parsePublicDescription !== "function") return;
+    const owner = publicDescriptionOwner(record);
+    if (!owner) return;
+    const id = String(record.captureId);
+    let entry = publicDescriptions.get(id);
+    if (!entry || entry.owner !== owner.selection) {
+      entry = { owner: owner.selection, firstNeededAt: Date.now(), nextAt: 0, attempts: 0, state: "waiting" };
+      publicDescriptions.set(id, entry);
+      while (publicDescriptions.size > 12) publicDescriptions.delete(publicDescriptions.keys().next().value);
+    }
+    if (Date.now() - entry.firstNeededAt < 8000 || Date.now() < entry.nextAt || entry.state === "loading" || entry.state === "verified" || entry.attempts >= 2) return;
+    entry.state = "loading"; entry.attempts++;
+    void (async () => {
+      try {
+        const response = await collectionMessage({ type: "KAI_TRACKER_DESCRIPTION", job: {
+          jobId: id, company: record.company, title: record.title, sourceUrl: job.sourceUrl
+        }, ...(owner.runId ? { runId: owner.runId } : {}) });
+        if (!publicDescriptionOwnerActive(owner) || publicDescriptions.get(id) !== entry) return;
+        if (!response?.ok) throw new Error(response?.error?.message || "The public job description could not be loaded.");
+        if (String(response.result?.jobId) !== id) throw new Error("The public response identifies a different job.");
+        const verified = window.LinkedInJobScraper.parsePublicDescription(response.result.html, {
+          jobId: id, company: record.company, title: record.title, sourceUrl: response.result.sourceUrl
+        });
+        if (!verified?.description?.trim() || !sameDescriptionIdentity(verified, record)) throw new Error("The public job title, company or description could not be verified.");
+        entry.state = "verified"; entry.job = verified; entry.verifiedAt = Date.now(); entry.error = "";
+        if (!owner.runId) scheduleCapture(0);
+      } catch (error) {
+        if (!publicDescriptionOwnerActive(owner) || publicDescriptions.get(id) !== entry) return;
+        entry.state = "unavailable"; entry.error = String(error?.message || "Public description loading failed.").slice(0, 300);
+        entry.nextAt = Date.now() + 15000;
+      }
+    })();
+  }
   function prepareCollectionDetails(record) {
     const last = descriptionRevealAt.get(record.card);
     if (last !== undefined && Date.now() - last < 1000) return;
     const job = scrapeCollectionJob();
     if (!job || job.jobIdSource === "query" || String(job.jobId) !== String(record.captureId) ||
       companyKey(job.company) !== companyKey(record.company) || companyKey(job.title) !== companyKey(record.title)) return;
+    preparePublicDescription(record, job);
     const target = window.LinkedInJobScraper?.descriptionTarget?.(document);
     if (!target?.isConnected || target.closest?.(CARD_SELECTOR) || typeof target.scrollIntoView !== "function") return;
     descriptionRevealAt.set(record.card, Date.now());
@@ -478,6 +526,13 @@
     try {
       const job = window.LinkedInJobScraper?.scrape(document, window.location.href) || null;
       collectionScrapeError = job ? "" : "The LinkedIn scraper is not available.";
+      const fallback = publicDescriptions.get(String(job?.jobId));
+      if (job && fallback?.state === "verified" && Date.now() - fallback.verifiedAt < 300000 && sameDescriptionIdentity(fallback.job, job)) {
+        return { ...job, description: fallback.job.description,
+          ...(fallback.job.applicationsClosed ? { applicationsClosed: true } : {}),
+          selectorsUsed: { ...job.selectorsUsed, description: "verified-public-job-page" },
+          confidence: { ...job.confidence, description: 1 } };
+      }
       return job;
     } catch (error) {
       collectionScrapeError = String(error?.message || "The selected job details could not be read.").slice(0, 1000);

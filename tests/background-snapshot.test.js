@@ -18,7 +18,7 @@ const successfulResearch = async (_url, options) => ({ ok: true, json: async () 
 
 const clone = (value) => value === undefined ? undefined : structuredClone(value);
 
-function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, saveError = null, autoDiscardable = true, profiles = [],
+function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["Acme"], revision: "r1" }], banned = ["Blocked Co"], researchFetch = null, descriptionFetch = null, saveError = null, autoDiscardable = true, profiles = [],
   tabUrl = "https://www.linkedin.com/jobs/search-results/", searchContext = null, tabStates = {}, searchContexts = {}, injectionResults = {}, injectionError = null } = {}) {
   const calls = [];
   const timers = new Map();
@@ -102,7 +102,15 @@ function harness({ stored = {}, sessionStored = {}, snapshots = [{ companies: ["
     console,
     crypto: require("node:crypto").webcrypto,
     AbortSignal,
+    AbortController,
+    TextEncoder,
+    TextDecoder,
     fetch: async (url, options) => {
+      if (/^https:\/\/www\.linkedin\.com\/jobs\/view\//u.test(String(url))) {
+        calls.push({ action: "description-fetch", url, options });
+        if (descriptionFetch) return descriptionFetch(url, options);
+        throw new Error("Unexpected description request");
+      }
       if (/\/job-research\/[a-f0-9-]{36}\/save-claim$/u.test(String(url))) {
         const body = JSON.parse(options.body);
         calls.push({ action: "save-claim", operation: body.action, destination: body.destination });
@@ -1043,4 +1051,230 @@ test("an existing empty V2 state does not resurrect stale legacy collection data
   assert.deepEqual(collections(h), []);
   const state = await sendFromTab(h, linkedinTab, { type: "KAI_TRACKER_RUN_STATE" });
   assert.equal(state.response.result.state, null);
+});
+
+const descriptionUrl = "https://www.linkedin.com/jobs/search-results/?keywords=backend&location=United+States&currentJobId=123";
+const descriptionSender = { url: descriptionUrl, tab: { id: 9 }, frameId: 0, documentId: "description-document", documentLifecycle: "active" };
+const descriptionJob = { ...engineeringJob, sourceUrl: descriptionUrl };
+const descriptionHtml = `<html><head><title>New Company hiring Senior JavaScript Engineer | LinkedIn</title></head><body><h1>Senior JavaScript Engineer</h1><a>New Company</a><div class="show-more-less-html__markup">${duties}</div><a>Sign in</a></body></html>`;
+function publicHtmlResponse({ url = "https://www.linkedin.com/jobs/view/123/", html = descriptionHtml, status = 200,
+  contentType = "text/html; charset=utf-8", contentLength, chunks } = {}) {
+  let index = 0;
+  return { status, url, headers: { get(name) { return name === "content-type" ? contentType : name === "content-length" ? contentLength ?? null : null; } },
+    text: async () => html,
+    ...(chunks ? { body: { getReader() { return { read: async () => index < chunks.length ? { value: chunks[index++], done: false } : { done: true },
+      async cancel() {}, releaseLock() {} }; } } } : {}) };
+}
+function descriptionHarness(options = {}) {
+  return harness({ tabUrl: descriptionUrl, tabStates: { 9: { url: descriptionUrl, documentId: descriptionSender.documentId } },
+    descriptionFetch: async () => publicHtmlResponse(), ...options });
+}
+async function requestDescription(h, { job = descriptionJob, runId } = {}, sender = {}) {
+  return (await h.sendRaw({ type: "KAI_TRACKER_DESCRIPTION", job, ...(runId ? { runId } : {}) }, "linkedin", { ...descriptionSender, ...sender })).response;
+}
+function assertDescriptionReadOnly(h) {
+  assert.equal(h.calls.some(call => ["duplicate", "save", "save-claim", "failure-report"].includes(call.action)), false);
+  assert.equal(h.stored.jobTrackerResearchV1?.length || 0, 0);
+}
+
+test("public description fetch uses only the numeric LinkedIn public URL without credentials and returns bounded HTML", async () => {
+  const chunks = [descriptionHtml.slice(0, 82), descriptionHtml.slice(82)].map(text => new TextEncoder().encode(text));
+  const h = descriptionHarness({ descriptionFetch: async () => publicHtmlResponse({ chunks }) });
+  await settle();
+  const response = await requestDescription(h);
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.deepEqual(clone(response.result), { jobId: "123", sourceUrl: "https://www.linkedin.com/jobs/view/123/", html: descriptionHtml });
+  const request = h.calls.find(call => call.action === "description-fetch");
+  assert.equal(request.url, "https://www.linkedin.com/jobs/view/123/");
+  assert.equal(request.options.method, "GET");
+  assert.equal(request.options.credentials, "omit");
+  assert.equal(request.options.redirect, "follow");
+  assert.equal(request.options.cache, "no-store");
+  assert.equal(request.options.headers.Accept, "text/html");
+  assert.ok(request.options.signal instanceof AbortSignal);
+  assert.equal([...h.timers.values()].some(timer => timer.delay === 20_000), false);
+  assert.equal(h.calls.filter(call => call.target?.frameIds).length, 2, "live document is verified before and after fetching");
+  assertDescriptionReadOnly(h);
+});
+
+test("public description accepts a strict same-job slug redirect and omits its tracking parameters", async () => {
+  const h = descriptionHarness({ descriptionFetch: async () => publicHtmlResponse({ url: "https://www.linkedin.com/jobs/view/senior-engineer-at-new-company-123/?trackingId=public-tracking#details" }) });
+  await settle();
+  const response = await requestDescription(h, {}, { url: descriptionUrl.replace("currentJobId=123", "currentJobId=456") });
+  assert.equal(response.ok, true, JSON.stringify(response));
+  assert.equal(response.result.sourceUrl, "https://www.linkedin.com/jobs/view/senior-engineer-at-new-company-123/");
+  assertDescriptionReadOnly(h);
+});
+
+test("public description is unavailable to foreign, popup, Jobright, subframe and inactive or replaced documents", async () => {
+  const cases = [
+    { sender: { url: "https://example.test/jobs/123" } },
+    { sender: { url: "chrome-extension://extension-id/popup.html" } },
+    { sender: { url: jobrightUrl }, job: jobrightJob },
+    { sender: { id: "another-extension" } },
+    { sender: { frameId: 1 } },
+    { sender: { frameId: undefined } },
+    { sender: { documentId: "" } },
+    { sender: { documentId: "replaced-document" } },
+    { sender: { documentLifecycle: "cached" } },
+    { sender: { tab: undefined } }
+  ];
+  for (const item of cases) {
+    const h = descriptionHarness(); await settle();
+    const response = await requestDescription(h, { job: item.job || descriptionJob }, item.sender);
+    assert.equal(response.ok, false, JSON.stringify(item));
+    assert.ok(["TRACKER_FORBIDDEN", "TRACKER_IDENTITY_MISMATCH"].includes(response.error.code), JSON.stringify(response));
+    assert.equal(h.calls.some(call => call.action === "description-fetch"), false, JSON.stringify(item));
+    assertDescriptionReadOnly(h);
+  }
+});
+
+test("public description rechecks an explicit live selected ID even when the sender URL already matches", async () => {
+  const cases = [
+    { live: descriptionUrl.replace("currentJobId=123", "currentJobId=456") },
+    { live: "https://www.linkedin.com/jobs/search-results/?keywords=backend" },
+    { live: "https://www.linkedin.com/jobs/search-results/?currentJobId=123&currentJobId=456" },
+    { live: "https://example.test/jobs/view/123/" },
+    { live: "https://www.linkedin.com/jobs/view/not-a-numeric-id/" },
+    { job: { ...descriptionJob, sourceUrl: descriptionUrl.replace("currentJobId=123", "currentJobId=456") } },
+    { job: { ...descriptionJob, jobId: "123/external" } },
+    { injectionResults: { 9: [{ frameId: 0, documentId: descriptionSender.documentId, result: descriptionUrl }, { frameId: 0, documentId: descriptionSender.documentId, result: descriptionUrl }] } },
+    { injectionError: new Error("Tab replaced") }
+  ];
+  for (const item of cases) {
+    const h = descriptionHarness({ ...(item.live ? { tabStates: { 9: { url: item.live, documentId: descriptionSender.documentId } } } : {}),
+      ...(item.injectionResults ? { injectionResults: item.injectionResults } : {}), injectionError: item.injectionError });
+    await settle();
+    const response = await requestDescription(h, { job: item.job || descriptionJob });
+    assert.equal(response.error?.code, "TRACKER_IDENTITY_MISMATCH", JSON.stringify(item));
+    assert.equal(h.calls.some(call => call.action === "description-fetch"), false);
+    assertDescriptionReadOnly(h);
+  }
+});
+
+test("public description rejects sign-in, other-job, foreign and malformed redirects", async () => {
+  const urls = [
+    "https://www.linkedin.com/authwall?sessionRedirect=https%3A%2F%2Fwww.linkedin.com%2Fjobs%2Fview%2F123%2F",
+    "https://www.linkedin.com/login", "https://www.linkedin.com/jobs/view/456/",
+    "https://www.linkedin.com/jobs/view/senior-engineer-456/", "https://www.linkedin.com/jobs/view/123/apply/",
+    "https://www.linkedin.com/jobs/view/fake%2Fpath-123/", "https://www.linkedin.com/jobs/view/fake%5Cpath-123/",
+    "https://www.linkedin.com/jobs/view/123/?currentJobId=456", "https://careers.example.com/jobs/view/123/",
+    "https://www.linkedin.com.evil.test/jobs/view/123/", "http://www.linkedin.com/jobs/view/123/",
+    "https://user:secret@www.linkedin.com/jobs/view/123/", "https://www.linkedin.com:444/jobs/view/123/", "not a url"
+  ];
+  for (const url of urls) {
+    const h = descriptionHarness({ descriptionFetch: async () => publicHtmlResponse({ url }) }); await settle();
+    const response = await requestDescription(h);
+    assert.equal(response.error?.code, "TRACKER_DESCRIPTION_UNAVAILABLE", url);
+    assert.equal(response.result, undefined);
+    assert.match(response.error.message, /redirected/iu);
+    assertDescriptionReadOnly(h);
+  }
+});
+
+test("public description reports HTTP, non-HTML, authwall and request failures without exposing a response body", async () => {
+  const cases = [
+    { options: { status: 429 }, reason: /HTTP 429/u }, { options: { status: 404 }, reason: /HTTP 404/u },
+    { options: { status: 204 }, reason: /HTTP 204/u },
+    { options: { contentType: "application/json" }, reason: /did not return HTML/u },
+    { options: { contentType: "text/plain" }, reason: /did not return HTML/u },
+    { options: { html: "<html><title>Sign In | LinkedIn</title><body>Login required</body></html>" }, reason: /authwall/u },
+    { options: { html: '<html><title>LinkedIn</title><body class="authwall-v2">Join to see this job</body></html>' }, reason: /authwall/u },
+    { fail: true, reason: /request failed/u }, { bodyFail: true, reason: /could not be read/u }
+  ];
+  for (const item of cases) {
+    const h = descriptionHarness({ descriptionFetch: async () => {
+      if (item.fail) throw new Error("private network diagnostics must not escape");
+      const response = publicHtmlResponse(item.options);
+      if (item.bodyFail) response.text = async () => { throw new Error("private response diagnostics"); };
+      return response;
+    } }); await settle();
+    const response = await requestDescription(h);
+    assert.equal(response.error?.code, "TRACKER_DESCRIPTION_UNAVAILABLE", JSON.stringify(item));
+    assert.match(response.error.message, item.reason);
+    assert.equal(response.result, undefined);
+    assertDescriptionReadOnly(h);
+  }
+});
+
+test("public description bounds both declared length and actual UTF-8 stream bytes", async () => {
+  for (const options of [
+    { contentLength: "750001" }, { html: "a".repeat(750001) }, { html: "é".repeat(400000) },
+    { chunks: [new Uint8Array(400000), new Uint8Array(350001)] }
+  ]) {
+    const h = descriptionHarness({ descriptionFetch: async () => publicHtmlResponse(options) }); await settle();
+    const response = await requestDescription(h);
+    assert.equal(response.error?.code, "TRACKER_DESCRIPTION_UNAVAILABLE");
+    assert.match(response.error.message, /750,000-byte limit/u);
+    assert.equal(h.calls.find(call => call.action === "description-fetch").options.signal.aborted, true);
+    assert.equal(response.result, undefined);
+    assertDescriptionReadOnly(h);
+  }
+});
+
+test("public description aborts after 20 seconds even when the fetch ignores cancellation", async () => {
+  let finish;
+  const h = descriptionHarness({ descriptionFetch: () => new Promise(resolve => { finish = resolve; }) }); await settle();
+  const pending = requestDescription(h);
+  await settle();
+  const timer = [...h.timers.values()].find(item => item.delay === 20_000);
+  assert.ok(timer);
+  timer.callback();
+  const response = await pending;
+  assert.equal(response.error?.code, "TRACKER_DESCRIPTION_UNAVAILABLE");
+  assert.match(response.error.message, /within 20 seconds/u);
+  assert.equal(h.calls.find(call => call.action === "description-fetch").options.signal.aborted, true);
+  finish(publicHtmlResponse()); await settle();
+  assert.equal([...h.timers.values()].some(item => item.delay === 20_000), false);
+  assertDescriptionReadOnly(h);
+});
+
+test("public description also times out while an HTML body is stalled", async () => {
+  let finish;
+  const response = publicHtmlResponse();
+  response.body = { getReader() { return { read: () => new Promise(resolve => { finish = resolve; }), releaseLock() {} }; } };
+  const h = descriptionHarness({ descriptionFetch: async () => response }); await settle();
+  const pending = requestDescription(h);
+  await settle();
+  [...h.timers.values()].find(item => item.delay === 20_000).callback();
+  const result = await pending;
+  assert.equal(result.error?.code, "TRACKER_DESCRIPTION_UNAVAILABLE");
+  assert.match(result.error.message, /within 20 seconds/u);
+  finish({ done: true }); await settle();
+  assertDescriptionReadOnly(h);
+});
+
+test("public description requires an active matching run before fetching and does not claim the job", async () => {
+  const h = descriptionHarness(); await settle();
+  const stopped = await requestDescription(h, { runId: "stopped-run" });
+  assert.equal(stopped.error?.code, "TRACKER_RUN_STOPPED");
+  assert.equal(h.calls.some(call => call.action === "description-fetch"), false);
+  await h.context.toggleJobCollection({ id: 9, url: descriptionUrl });
+  const state = clone(collection(h));
+  const result = await requestDescription(h, { runId: state.id });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(collection(h), state, "loading public HTML never marks a job visited or saved");
+  assertDescriptionReadOnly(h);
+});
+
+test("a stopped run or a replaced document, selected job or search discards late public HTML", async () => {
+  for (const change of ["stop", "document", "job", "search", "closed-tab"]) {
+    let finish;
+    const h = descriptionHarness({ descriptionFetch: () => new Promise(resolve => { finish = resolve; }) }); await settle();
+    await h.context.toggleJobCollection({ id: 9, url: descriptionUrl });
+    const runId = collection(h).id;
+    const pending = requestDescription(h, { runId });
+    await settle(); assert.equal(typeof finish, "function");
+    if (change === "stop") await h.context.stopActiveCollection(9);
+    else if (change === "document") h.tabStates[9].documentId = "replacement-document";
+    else if (change === "job") h.tabStates[9].url = descriptionUrl.replace("currentJobId=123", "currentJobId=456");
+    else if (change === "search") h.tabStates[9].url = descriptionUrl.replace("keywords=backend", "keywords=python");
+    else { h.removeTab(9); await settle(); }
+    finish(publicHtmlResponse());
+    const result = await pending;
+    assert.equal(result.ok, false, change);
+    assert.ok(["TRACKER_RUN_STOPPED", "TRACKER_IDENTITY_MISMATCH"].includes(result.error.code), JSON.stringify(result));
+    assert.equal(result.result, undefined, change);
+    assertDescriptionReadOnly(h);
+  }
 });

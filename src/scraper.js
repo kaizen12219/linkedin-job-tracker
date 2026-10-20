@@ -392,6 +392,66 @@
     return summary;
   }
 
+  function parsePublicDescription(html, { jobId, title, company, sourceUrl } = {}) {
+    const expectedId = String(jobId || "");
+    const key = value => cleanText(value).toLocaleLowerCase("en-US");
+    if (typeof html !== "string" || !/^\d{1,24}$/u.test(expectedId) || typeof title !== "string" || typeof company !== "string" ||
+      !key(title) || !key(company) || typeof sourceUrl !== "string") return null;
+    const publicJobUrl = (value, base) => {
+      try {
+        if (typeof value !== "string" || !value.trim()) return null;
+        const url = new URL(value, base);
+        if (url.protocol !== "https:" || url.username || url.password || (url.port && url.port !== "443") ||
+          !(url.hostname === "linkedin.com" || url.hostname.endsWith(".linkedin.com"))) return null;
+        const id = url.pathname.match(/^\/jobs\/view\/(?:[^/]+-)?(\d+)\/?$/u)?.[1];
+        if (id !== expectedId) return null;
+        url.hash = "";
+        return url;
+      } catch { return null; }
+    };
+    const responseUrl = publicJobUrl(sourceUrl);
+    if (!responseUrl) return null;
+    // DOMParser creates an inert document. Never evaluate page scripts, read
+    // application state, or insert fetched nodes into the live LinkedIn page.
+    const doc = new DOMParser().parseFromString(html, "text/html");
+    for (const node of queryAll(doc, 'link[rel~="canonical"], meta[property="og:url" i]')) {
+      if (!publicJobUrl(node.getAttribute(node.tagName === "LINK" ? "href" : "content") || "", responseUrl.href)) return null;
+    }
+    const excluded = "script, style, template, noscript, form, nav, aside, footer, .similar-jobs, .related-jobs, .jobs-you-may-like, .base-card";
+    const visible = node => {
+      if (!node || node.closest(`[hidden], [aria-hidden='true'], [inert], ${excluded}`)) return false;
+      for (let current = node; current; current = current.parentElement) {
+        if (current.style?.display === "none" || current.style?.visibility === "hidden" || current.style?.opacity === "0") return false;
+      }
+      return true;
+    };
+    const mains = queryAll(doc, "main").filter(visible);
+    if (mains.length !== 1) return null;
+    const headings = queryAll(mains[0], "h1.top-card-layout__title, .top-card-layout h1").filter(visible);
+    if (headings.length !== 1) return null;
+    const heading = headings[0], header = heading.closest(".top-card-layout");
+    if (!header || !visible(header)) return null;
+    const actualTitle = readElementText(heading);
+    const companies = [...new Set(queryAll(header, ".topcard__org-name-link").filter(visible).map(readElementText).filter(Boolean))];
+    if (key(actualTitle) !== key(title) || companies.length !== 1 || key(companies[0]) !== key(company)) return null;
+    const headerId = header.getAttribute("data-job-id") || header.getAttribute("data-entity-urn")?.match(/jobPosting:(\d+)/u)?.[1];
+    if (headerId && headerId !== expectedId) return null;
+    for (const node of queryAll(heading, "a[href*='/jobs/view/']")) {
+      if (!publicJobUrl(node.getAttribute("href"), responseUrl.href)) return null;
+    }
+    const bodies = [...new Set(queryAll(mains[0], ".description__text .show-more-less-html__markup, section.description .show-more-less-html__markup"))].filter(visible);
+    if (bodies.length !== 1) return null;
+    const clone = bodies[0].cloneNode(true), originals = queryAll(bodies[0], "*"), copies = queryAll(clone, "*");
+    for (let index = originals.length - 1; index >= 0; index--) if (!visible(originals[index])) copies[index].remove();
+    queryAll(clone, `${excluded}, button, input, textarea, select, iframe, object, embed`).forEach(node => node.remove());
+    const description = readRichText(clone);
+    if (!description || LOADING_TEXT.test(cleanText(description))) return null;
+    const applicationsClosed = queryAll(mains[0], ".top-card-layout, .closed-job, .top-card-layout__cta-container").filter(visible)
+      .some(node => /(?:no longer accepting applications|applications (?:are )?closed|job (?:has )?expired)/iu.test(readElementText(node)));
+    return { jobId: expectedId, title: actualTitle, company: companies[0], description, sourceUrl: responseUrl.href,
+      ...(applicationsClosed ? { applicationsClosed: true } : {}) };
+  }
+
   function extractApplyUrl(doc, root, sourceUrl) {
     const applyCandidates = queryAll(root, "a[href]")
       .map((link, index) => {
@@ -719,6 +779,7 @@
     scrape,
     descriptionTarget,
     descriptionDiagnostics,
+    parsePublicDescription,
     _internals: {
       cleanCompany,
       cleanTitle,

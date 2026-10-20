@@ -9,7 +9,8 @@ const SEARCH = "https://www.linkedin.com/jobs/search-results/?keywords=developer
 const item = (id, extra = {}) => ({ id: String(id), company: `Company ${id}`, title: `Engineer ${id}`, description: `Job ${id}. ` + "Build useful software for our customers. ".repeat(15), ...extra });
 function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, covered = false, restoredVisited = [], renderDelay = 0, holdCapture = false,
   standaloneTitle = false, dismissRemovesCard = false, reportError = false, holdReport = false, detailTransition = null, detailRenderDelay = 450,
-  dismissCancelsDetails = false, lazyDescriptionDelay = null, locks = collectionLocks(), runId = "authorized-run" } = {}) {
+  dismissCancelsDetails = false, lazyDescriptionDelay = null, publicDescription = null, holdPublicDescription = false,
+  locks = collectionLocks(), runId = "authorized-run" } = {}) {
   const dom = new JSDOM("<html><body><div class='jobs-search-results-list' style='overflow-y:auto'><ul></ul><nav class='jobs-search-pagination'></nav></div><div class='jobs-details'></div></body></html>", { url: SEARCH, runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close());
   const window = dom.window, document = window.document;
@@ -27,6 +28,8 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   const tracked = new Set();
   let releaseCapture;
   let releaseReport;
+  let releasePublicDescription;
+  const publicAttempts = new Map();
   let state = { id: runId, searchKey: window.location.href, visited: [...restoredVisited], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
   window.Date.now = () => time; window.Math.random = () => 0.5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
@@ -132,6 +135,21 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
         if (holdReport) { holdReport = false; await new Promise(resolve => { releaseReport = resolve; }); }
         return { ok: true, result: { reported: true } };
       }
+      if (message.type === "KAI_TRACKER_DESCRIPTION") {
+        const selected = pages.flat().find(job => job.id === message.job.jobId);
+        const attempt = (publicAttempts.get(selected.id) || 0) + 1; publicAttempts.set(selected.id, attempt);
+        const reply = typeof publicDescription === "function" ? publicDescription(selected, attempt) : publicDescription;
+        if (!reply) return { ok: false, error: { message: "No public description is available in this fixture." } };
+        if (holdPublicDescription) { holdPublicDescription = false; await new Promise(resolve => { releasePublicDescription = resolve; }); }
+        if (reply.error) return { ok: false, error: { message: reply.error } };
+        const body = { ...selected, ...reply };
+        const html = reply.html || `<html><head><link rel='canonical' href='https://www.linkedin.com/jobs/view/${body.id}/'></head><body><main>
+          <section class='top-card-layout'><h1 class='top-card-layout__title'>${body.title}</h1><a class='topcard__org-name-link' href='/company/test/'>${body.company}</a></section>
+          ${reply.closed ? '<p>No longer accepting applications</p>' : ''}<section class='description'><div class='description__text'><div class='show-more-less-html__markup'>${body.description}</div></div></section>
+          </main></body></html>`;
+        return { ok: true, result: { jobId: reply.responseJobId || selected.id,
+          sourceUrl: reply.sourceUrl || `https://www.linkedin.com/jobs/view/${selected.id}/`, html } };
+      }
       if (message.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: structuredClone(state) } };
       if (message.type === "KAI_TRACKER_RUN_WAIT") return new Promise((resolve) => {
         timers.set(++timerId, { at: time + message.milliseconds,
@@ -153,6 +171,7 @@ function fixture(t, pages, { modern = false, nextLoads = true, lazy = null, cove
   return { document, window, captures, selections, dismissals, nextClicks, messages, listeners, timers, notices, leases, detailRenders, detailReveals,
     releaseCapture() { releaseCapture(); },
     releaseReport() { releaseReport(); },
+    releasePublicDescription() { releasePublicDescription(); },
     restart(id = "new-run") {
       state = { id, searchKey: SEARCH, visited: [], pages: [], counts: { saved: 0, researching: 0, skipped: 0 } };
       return new Promise((resolve) => listeners[0]({ type: "KAI_TRACKER_RUN_START", state }, {}, resolve));
@@ -279,6 +298,51 @@ test("unreadable selected descriptions report bounded layout diagnostics and con
   assert.ok(diagnostics.root);
   assert.equal(report.job.description, undefined);
   assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+});
+
+test("hidden LinkedIn About skeletons use an exact public description and continue collecting", async (t) => {
+  const description = "Design and build Java integration services. Requires five years of professional software engineering experience. ".repeat(3);
+  const h = fixture(t, [[item(1, { description: "" }), item(2)]], { publicDescription: { description } });
+  h.hide(true);
+  await h.advance(7000);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_DESCRIPTION"), false, "normal hydration receives an initial wait");
+  assert.equal(h.dismissals.length, 0);
+  await h.advance(100000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
+  assert.equal(h.captures[0].job.description, description.trim());
+  assert.equal(h.captures[0].job.selectorsUsed.description, "verified-public-job-page");
+  assert.equal(h.messages.filter(message => message.type === "KAI_TRACKER_DESCRIPTION").length, 1);
+  assert.equal(h.messages.some(message => message.type === "KAI_TRACKER_NOT_SAVED"), false);
+});
+
+for (const wrong of [{ responseJobId: "777" }, { company: "Unrelated Company" }, { title: "Another Vacancy" },
+  { sourceUrl: "https://www.linkedin.com/jobs/view/777/" }]) test(`public fallback cannot authorize mismatched ${Object.keys(wrong)[0]}`, async (t) => {
+  const h = fixture(t, [[item(1, { description: "" }), item(2)]], { publicDescription: { description: "Build the software for the selected role.", ...wrong } });
+  await h.advance(180000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.equal(h.messages.filter(message => message.type === "KAI_TRACKER_DESCRIPTION").length, 2, "pre-write description attempts remain bounded");
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "1");
+  assert.equal(JSON.parse(report.job.descriptionDiagnostics).publicDescription.state, "unavailable");
+});
+
+test("a public description response arriving after Stop cannot capture or dismiss a job", async (t) => {
+  const h = fixture(t, [[item(1, { description: "" })]], { publicDescription: { description: "Build selected production software services." }, holdPublicDescription: true });
+  await h.advance(15000);
+  assert.equal(h.messages.filter(message => message.type === "KAI_TRACKER_DESCRIPTION").length, 1);
+  h.document.dispatchEvent(new h.window.KeyboardEvent("keydown", { key: "Escape" }));
+  h.releasePublicDescription(); await h.advance(100000);
+  assert.equal(h.captures.length, 0); assert.deepEqual(h.dismissals, []);
+});
+
+test("the previous description remains stale even when an exact public fallback returns it for a different ID", async (t) => {
+  const first = item(1);
+  const h = fixture(t, [[first, item(2, { description: "" }), item(3)]], { publicDescription: { description: first.description } });
+  await h.advance(220000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "3"]);
+  const report = h.messages.find(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(report?.job.jobId, "2");
+  assert.match(report?.job.verificationReason, /previous job/);
 });
 
 test("lazy descriptions below the viewport load when their selected About section is revealed", async (t) => {

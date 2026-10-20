@@ -44,6 +44,8 @@ let companySnapshotNeedsRefresh = false;
 const COLLECTION_STORAGE_KEY = "jobTrackerCollectionsV2";
 const LEGACY_COLLECTION_STORAGE_KEY = "jobTrackerCollectionV1";
 const MAX_COLLECTIONS = 2;
+const DESCRIPTION_TIMEOUT_MS = 20_000;
+const DESCRIPTION_MAX_BYTES = 750_000;
 let collectionQueue = Promise.resolve();
 const collectionWaits = new Map();
 const COLLECTION_MESSAGES = new Set(["KAI_TRACKER_RUN_STATE", "KAI_TRACKER_RUN_CHECKPOINT", "KAI_TRACKER_RUN_END", "KAI_TRACKER_RUN_WAIT"]);
@@ -106,7 +108,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const captureMessage = message?.type === "KAI_TRACKER_CAPTURE";
   const collectionMessage = COLLECTION_MESSAGES.has(message?.type);
   const reportMessage = message?.type === "KAI_TRACKER_NOT_SAVED";
-  if (!popupMessage && !classifyMessage && !captureMessage && !collectionMessage && !reportMessage) return undefined;
+  const descriptionMessage = message?.type === "KAI_TRACKER_DESCRIPTION";
+  if (!popupMessage && !classifyMessage && !captureMessage && !collectionMessage && !reportMessage && !descriptionMessage) return undefined;
 
   if (popupMessage && !isPopupSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open the tracker popup to change or save data." } });
@@ -114,6 +117,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if ((classifyMessage || captureMessage || collectionMessage || reportMessage) && !isJobPageSender(sender)) {
     sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open a supported LinkedIn or Jobright job page." } });
+    return false;
+  }
+  if (descriptionMessage && (!isJobPageSender(sender) || JobCapturePolicy.sourceSite(sender.url) !== "linkedin")) {
+    sendResponse({ ok: false, error: { code: "TRACKER_FORBIDDEN", message: "Open the selected LinkedIn job page to load its public description." } });
     return false;
   }
 
@@ -173,7 +180,121 @@ async function verifyCaptureIdentity(job, sender) {
     JobCapturePolicy.jobIdFromUrl(frame.result) !== jobId || !JobCapturePolicy.validJobId(jobId, frame.result)) throw mismatch(`${provider} is no longer showing the captured job. Nothing was saved.`);
 }
 
+function descriptionUnavailable(reason) {
+  return Object.assign(new Error(`LinkedIn's public job description could not be loaded. ${reason}`), { code: "TRACKER_DESCRIPTION_UNAVAILABLE" });
+}
+async function verifyDescriptionContext(job, sender, runId) {
+  const mismatch = () => Object.assign(new Error("The LinkedIn description request no longer matches the selected job and active page."), { code: "TRACKER_IDENTITY_MISMATCH" });
+  const jobId = String(job?.jobId || "");
+  if (!/^\d{1,32}$/u.test(jobId) || JobCapturePolicy.sourceSite(job?.sourceUrl) !== "linkedin" ||
+    !Number.isInteger(sender.tab?.id) || sender.frameId !== 0 || typeof sender.documentId !== "string" || !sender.documentId ||
+    (sender.documentLifecycle && sender.documentLifecycle !== "active")) throw mismatch();
+  await verifyCaptureIdentity(job, sender);
+  // Even the capture fast path must recheck this read-only fetch: a stale
+  // document must never supply HTML to a replacement page or another job.
+  let frames;
+  try {
+    frames = await chrome.scripting.executeScript({ target: { tabId: sender.tab.id, frameIds: [0] }, func: () => window.location.href });
+  } catch { throw mismatch(); }
+  const frame = Array.isArray(frames) && frames.length === 1 ? frames[0] : null;
+  if (frame?.frameId !== 0 || frame.documentId !== sender.documentId ||
+    JobCapturePolicy.sourceSite(frame.result) !== "linkedin" || JobCapturePolicy.jobIdFromUrl(frame.result) !== jobId ||
+    !JobCapturePolicy.validJobId(jobId, frame.result)) throw mismatch();
+  if (runId) await withCollectionState(state => {
+    if (!collectionMatches(state, sender, runId) || !collectionMatches(state, { ...sender, url: frame.result }, runId))
+      throw Object.assign(new Error("Job collection stopped or its search changed before the description was ready."), { code: "TRACKER_RUN_STOPPED" });
+  }, sender.tab.id);
+  return jobId;
+}
+function publicDescriptionUrl(value, jobId) {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" || !["www.linkedin.com", "linkedin.com"].includes(url.hostname) ||
+      url.username || url.password || (url.port && url.port !== "443")) return "";
+    if (url.searchParams.getAll("currentJobId").some(value => value !== jobId)) return "";
+    const segment = /^\/jobs\/view\/([^/]+)\/?$/u.exec(url.pathname)?.[1];
+    if (!segment || /%(?:2f|5c|00)/iu.test(segment)) return "";
+    const decoded = decodeURIComponent(segment);
+    const id = /^\d+$/u.test(decoded) ? decoded : /^[^/\\?#\s]+-(\d+)$/u.exec(decoded)?.[1];
+    if (id !== jobId) return "";
+    url.search = "";
+    url.hash = "";
+    return url.href;
+  } catch { return ""; }
+}
+async function readDescriptionHtml(response, controller) {
+  const length = response.headers?.get?.("content-length");
+  if (length && /^\d+$/u.test(length) && Number(length) > DESCRIPTION_MAX_BYTES)
+    throw descriptionUnavailable("The public page exceeds the 750,000-byte limit.");
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    const html = await response.text();
+    if (typeof html !== "string" || html.length > DESCRIPTION_MAX_BYTES || new TextEncoder().encode(html).byteLength > DESCRIPTION_MAX_BYTES)
+      throw descriptionUnavailable("The public page exceeds the 750,000-byte limit.");
+    return html;
+  }
+  const decoder = new TextDecoder();
+  const parts = [];
+  let bytes = 0;
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      bytes += chunk.value.byteLength;
+      if (bytes > DESCRIPTION_MAX_BYTES) {
+        controller.abort();
+        void Promise.resolve(reader.cancel()).catch(() => {});
+        throw descriptionUnavailable("The public page exceeds the 750,000-byte limit.");
+      }
+      parts.push(decoder.decode(chunk.value, { stream: true }));
+    }
+    parts.push(decoder.decode());
+    return parts.join("");
+  } finally { reader.releaseLock?.(); }
+}
+async function loadLinkedInDescription(message, sender) {
+  const jobId = await verifyDescriptionContext(message.job, sender, message.runId);
+  const controller = new AbortController();
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(descriptionUnavailable("The public page did not respond within 20 seconds."));
+    }, DESCRIPTION_TIMEOUT_MS);
+  });
+  try {
+    const result = await Promise.race([timeout, (async () => {
+      let response;
+      try {
+        response = await fetch(`https://www.linkedin.com/jobs/view/${jobId}/`, {
+          method: "GET", credentials: "omit", redirect: "follow", cache: "no-store", signal: controller.signal,
+          headers: { Accept: "text/html" }
+        });
+      } catch { throw descriptionUnavailable("The public page request failed."); }
+      if (response.status !== 200) throw descriptionUnavailable(`The public page returned HTTP ${Number(response.status) || "unknown"}.`);
+      const sourceUrl = publicDescriptionUrl(response.url, jobId);
+      if (!sourceUrl) throw descriptionUnavailable("The public page redirected to a sign-in page, another job, or an unsupported URL.");
+      if (!/^text\/html(?:\s*;|\s*$)/iu.test(response.headers?.get?.("content-type") || ""))
+        throw descriptionUnavailable("The public page did not return HTML.");
+      const html = await readDescriptionHtml(response, controller);
+      // Public job pages also have sign-in prompts. Only reject a document
+      // identifying itself as the login/authwall, not those ordinary prompts.
+      if (/<title\b[^>]*>\s*(?:sign\s*in|log\s*in|linkedin\s+(?:login|sign\s*in)|join\s+linkedin)(?:\s|[<|—–-])/iu.test(html) ||
+        /<(?:body|main)\b[^>]*(?:class|id)\s*=\s*["'][^"']*\bauthwall\b/iu.test(html))
+        throw descriptionUnavailable("LinkedIn returned a sign-in or authwall page instead of the public job.");
+      return { jobId, sourceUrl, html };
+    })()]);
+    await verifyDescriptionContext(message.job, sender, message.runId);
+    return result;
+  } catch (error) {
+    controller.abort();
+    if (error?.code) throw error;
+    throw descriptionUnavailable("The public HTML response could not be read.");
+  } finally { clearTimeout(timer); }
+}
+
 async function handleTrackerMessage(message, sender = {}) {
+  if (message.type === "KAI_TRACKER_DESCRIPTION") return loadLinkedInDescription(message, sender);
   if (message.type === "KAI_TRACKER_NOT_SAVED") {
     const reasons = { BANNED_COMPANY: "Skipped: company is in the banned-company list.",
       DUPLICATE_COMPANY: "Skipped: company already has a recorded job.",
