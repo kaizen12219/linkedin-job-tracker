@@ -33,6 +33,11 @@
     /^(follow|following|apply|save|share|search|results|job alert)$/i
   ];
 
+  function identityTitle(value) {
+    return cleanText(value).replace(/^remote\s*[-:\u2010-\u2015\u2212]\s*/iu, "")
+      .replace(/\bSr\.?(?=\b|\s|$)/giu, "Senior").toLocaleLowerCase("en-US");
+  }
+
   function scrape(doc = document, sourceUrl = window.location.href) {
     const root = findJobDetailsRoot(doc);
     const titleResult = extractTitle(doc, root);
@@ -373,6 +378,7 @@
       .filter(value => /^\d{1,24}$/u.test(value || "")))].slice(0, 3);
     const summary = {
       root: { ...nodeSummary(root), renderedJobIds }, readySource: description.source, descriptionLength: description.value.length,
+      scrapedTitle: extractTitle(doc, root).value.slice(0, 200), scrapedCompany: extractCompany(doc, root).value.slice(0, 200),
       counts: { aboutHeadings: selected.length, outsideAboutHeadings: outside.length,
         aboutScopes: descriptionNodes(root, ['[componentkey^="JobDetails_AboutTheJob"]', '[data-sdui-component*="aboutTheJob" i]', '[data-testid*="job-description" i]']).length,
         legacyBodies: descriptionNodes(root, ['.jobs-box__html-content', '.jobs-description-content__text', '.jobs-description__content', '.description__text', '.show-more-less-html__markup', '#job-details']).length,
@@ -396,7 +402,7 @@
     const expectedId = String(jobId || "");
     const key = value => cleanText(value).toLocaleLowerCase("en-US");
     if (typeof html !== "string" || !/^\d{1,24}$/u.test(expectedId) || typeof title !== "string" || typeof company !== "string" ||
-      !key(title) || !key(company) || typeof sourceUrl !== "string") return null;
+      !identityTitle(title) || !key(company) || typeof sourceUrl !== "string") return null;
     const publicJobUrl = (value, base) => {
       try {
         if (typeof value !== "string" || !value.trim()) return null;
@@ -433,7 +439,7 @@
     if (!header || !visible(header)) return null;
     const actualTitle = readElementText(heading);
     const companies = [...new Set(queryAll(header, ".topcard__org-name-link").filter(visible).map(readElementText).filter(Boolean))];
-    if (key(actualTitle) !== key(title) || companies.length !== 1 || key(companies[0]) !== key(company)) return null;
+    if (identityTitle(actualTitle) !== identityTitle(title) || companies.length !== 1 || key(companies[0]) !== key(company)) return null;
     const headerId = header.getAttribute("data-job-id") || header.getAttribute("data-entity-urn")?.match(/jobPosting:(\d+)/u)?.[1];
     if (headerId && headerId !== expectedId) return null;
     for (const node of queryAll(heading, "a[href*='/jobs/view/']")) {
@@ -777,6 +783,7 @@
 
   window.LinkedInJobScraper = {
     scrape,
+    identityTitle,
     descriptionTarget,
     descriptionDiagnostics,
     parsePublicDescription,

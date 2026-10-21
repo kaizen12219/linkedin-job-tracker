@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.12 — 2026-10-21
+
+- Retry and serialize research-worker file replacements when Windows temporarily locks the destination. Keep exhausted storage failures queued under the same request ID, and require durable decisions before publishing results or authorizing a save.
+- Recover retained failed research requests only when the worker explicitly identifies a repaired storage failure. Preserve their original destination, model, job and profile rules; cancellation, expired requests and uncertain saves remain excluded.
+- Bring the exact selected Jobright qualifications section into view while waiting for lazy content. Retain strict job identity and complete-description checks, and include bounded layout diagnostics with unreadable-detail reports.
+- Match LinkedIn's `Sr`/`Senior` title spelling and explicitly separated leading `Remote` labels for the same verified job. Keep the remaining title, employer, ID and changed-description checks, and retain actual rendered title/company in bounded failure diagnostics.
+
 ## 0.8.11 — 2026-10-21
 
 - Recover selected LinkedIn descriptions whose About section stays unhydrated in a hidden tab by reading that exact public job page in the extension worker. Verify job ID, title and company before using its description; recheck the live document and collector ownership before and after the credential-free request.

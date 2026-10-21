@@ -111,6 +111,39 @@ test("ordinary changed descriptions and the same selected job retain their exist
   assert.equal(collector.descriptionIsCurrent({ jobId: "102", description: "  Previous\n description  " }, previous), false);
 });
 
+test("only an adapter explicitly opting into a title equivalence can collect a narrow alias", async () => {
+  const h = harness([[row(1, { title: 'Senior Engineer' }), row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  h.adapter.scrape = () => { const job = scrape(); return job.jobId === '1' ? { ...job, title: 'Remote-Sr Engineer' } : job; };
+  h.adapter.titleMatches = (actual, expected) => actual === expected || (actual === 'Remote-Sr Engineer' && expected === 'Senior Engineer');
+  await h.advance(300000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), ['1', '2']);
+  assert.equal(h.captures[0].job.title, 'Remote-Sr Engineer');
+  assert.equal(h.reports.length, 0);
+});
+
+test("Jobright retains exact title matching when its adapter has no equivalence opt-in", async () => {
+  const first = '68c123456789abcdef012301', second = '68c123456789abcdef012302';
+  const h = harness([[row(first, { title: 'Senior Engineer' }), row(second)]], { reportFailures: true,
+    sourceUrl: 'https://jobright.ai/jobs/recommend', jobUrl: record => `https://jobright.ai/jobs/info/${record.id}` });
+  const scrape = h.adapter.scrape;
+  h.adapter.scrape = () => { const job = scrape(); return job.jobId === first ? { ...job, title: 'Remote-Sr Engineer' } : job; };
+  await h.advance(300000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [second]);
+  assert.equal(h.reports[0].id, first);
+  assert.equal(h.reports[0].code, 'DETAILS_NOT_CONFIRMED');
+});
+
+test("a permitted title alias cannot authorize the previous job's unchanged description", async () => {
+  const h = harness([[row(1, { title: 'Senior Engineer', description: 'Previous job' }), row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape;
+  h.adapter.scrape = () => { const job = scrape(); return job.jobId === '1' ? { ...job, title: 'Remote-Sr Engineer' } : job; };
+  h.adapter.titleMatches = (actual, expected) => actual === expected || (actual === 'Remote-Sr Engineer' && expected === 'Senior Engineer');
+  await h.advance(300000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), ['2']);
+  assert.match(h.reports[0].reason, /previous job/u);
+});
+
 test("slow 25- and 60-second body responses wait for a changed description before review and keep collecting", async () => {
   for (const delay of [25_000, 60_000]) {
     const target = row(1, { description: "Previous job" });

@@ -108,14 +108,8 @@
     }
     return pieces.join("\n\n");
   }
-  function scrape(doc = document, sourceUrl = root.location?.href) {
-    const id = jobId(sourceUrl);
-    if (!id) throw new Error("Open a Jobright job's details before saving it.");
-    const context = searchContext(doc, sourceUrl);
-    if (context.selectedRegion !== "us" || context.selectedRegionSource !== "search-control") throw new Error("Select United States in Jobright's country filter before saving or collecting jobs.");
-    const headings = [...doc.querySelectorAll("h1[class*='index_job-title__']")].filter(visible);
-    if (!headings.length) throw new Error("Jobright's selected job details are not ready.");
-    const candidates = headings.map((heading) => {
+  function detailCandidates(doc) {
+    return [...doc.querySelectorAll("h1[class*='index_job-title__']")].filter(visible).map((heading) => {
       const companyJob = heading.closest("[class*='index_company-job__']");
       const detail = heading.closest("[class*='index_jobDetailContent__']");
       const panel = heading.closest("[class*='index_jobMainContentInfo']") || heading.closest("[class*='index_jobSimpleIntroduction']")?.parentElement || companyJob?.parentElement;
@@ -123,6 +117,69 @@
       const ids = [...new Set([...panel.querySelectorAll("[data-time-filter-job]")].map((node) => node.getAttribute("data-time-filter-job")).filter((value) => ID.test(value || "")))];
       return { heading, companyJob, detail, panel, ids };
     }).filter(Boolean);
+  }
+  function descriptionTarget(doc = document, sourceUrl = root.location?.href, expected) {
+    const id = jobId(sourceUrl);
+    if (!id || expected?.id !== id || searchContext(doc, sourceUrl).selectedRegion !== "us") return null;
+    const selected = detailCandidates(doc).filter(candidate => candidate.ids.length === 1 && candidate.ids[0] === id);
+    if (selected.length !== 1) return null;
+    const { heading, companyJob, detail } = selected[0];
+    const company = text(companyJob?.querySelector("h2")).replace(/\s*[·•]\s*.*$/u, "").trim();
+    if (identityText(text(heading)) !== identityText(expected.title) || identityText(company) !== identityText(expected.company)) return null;
+    const overviews = [...detail.querySelectorAll("#overview-1")].filter(visible);
+    if (overviews.length !== 1 || overviews[0].closest("[class*='index_jobDetailContent__']") !== detail) return null;
+    const overview = overviews[0];
+    const sectionHeading = [...overview.querySelectorAll("h1,h2,h3,h4,h5,h6,[role='heading'],p")].find(node => visible(node) &&
+      /^(?:Responsibilities|Key Responsibilities|Qualifications?|Required(?: Qualifications)?|Requirements|Preferred(?: Qualifications)?)\s*:?$/iu.test(text(node)));
+    const section = sectionHeading?.closest("section[class*='index_sectionContent__']");
+    return section && overview.contains(section) ? section : sectionHeading || overview;
+  }
+  function descriptionDiagnostics(doc = document, sourceUrl = root.location?.href) {
+    const id = jobId(sourceUrl), candidates = detailCandidates(doc);
+    const selected = candidates.filter(candidate => candidate.ids.length === 1 && candidate.ids[0] === id);
+    const detail = selected.length === 1 ? selected[0].detail : null;
+    const overviews = detail ? [...detail.querySelectorAll("#overview-1")].filter(visible) : [];
+    const overview = overviews.length === 1 && overviews[0].closest("[class*='index_jobDetailContent__']") === detail ? overviews[0] : null;
+    const metadata = (node) => {
+      if (!node) return null;
+      const value = { tag: node.tagName.toLowerCase(), childCount: node.children.length, textLength: text(node).length };
+      for (const [name, attribute] of [["id", "id"], ["class", "class"], ["role", "role"], ["ariaBusy", "aria-busy"], ["ariaHidden", "aria-hidden"]]) {
+        const attributeValue = node.getAttribute(attribute);
+        if (attributeValue) value[name] = clean(attributeValue).slice(0, name === "class" ? 120 : 64);
+      }
+      value.hidden = !!node.hidden;
+      return value;
+    };
+    const count = (scope, selector, readable = false) => scope ? [...scope.querySelectorAll(selector)].filter(node => !readable || visible(node)).length : 0;
+    const diagnosticHeading = /^(?:responsibilities|key responsibilities|required(?: qualifications)?|requirements|qualifications?|preferred(?: qualifications)?|benefits|job description|about (?:the job|this role)|skills)$/iu;
+    const headingSelector = "h1,h2,h3,h4,h5,h6,[role='heading'],p,div";
+    const headings = detail ? [...detail.querySelectorAll(headingSelector)].filter(node => {
+      if (!diagnosticHeading.test(text(node).replace(/:$/u, "")) || !visible(node)) return false;
+      return !node.matches("div:not([role='heading'])") || !node.querySelector(headingSelector);
+    }).slice(0, 8).map(node => ({ ...metadata(node), label: text(node).slice(0, 120), inOverview: !!overview?.contains(node), parent: metadata(node.parentElement) })) : [];
+    const description = overview ? sectionText(overview) : "";
+    const view = doc.defaultView, bounds = overview?.getBoundingClientRect?.();
+    const coordinate = value => Number.isFinite(value) ? Math.round(value) : 0;
+    const summary = { sourceJobId: id, renderedPanels: candidates.slice(0, 3).map(candidate => ({ ids: candidate.ids.slice(0, 3), panel: metadata(candidate.panel) })),
+      selectedPanelCount: selected.length, detail: metadata(detail), overview: metadata(overview),
+      readySource: description ? "jobright-overview-sections" : overview ? "overview-sections-unreadable" : "selected-overview-not-ready", descriptionLength: description.length,
+      counts: { visibleOverviews: overviews.length, semanticHeadings: count(overview, "h1,h2,h3,h4,h5,h6", true),
+        listTextSpans: count(overview, "span[class*='index_listText__']", true), listTextElements: count(overview, "[class*='index_listText__']", true),
+        listItems: count(overview, "li", true), paragraphs: count(overview, "p", true), busy: count(detail, "[aria-busy='true']"),
+        skeletons: count(detail, "[class*='skeleton' i], [data-testid*='skeleton' i]"), indeterminateProgress: count(detail, "[role='progressbar']:not([aria-valuenow])", true) },
+      viewport: { width: coordinate(view?.innerWidth), height: coordinate(view?.innerHeight), documentHidden: !!doc.hidden,
+        overview: bounds ? { top: coordinate(bounds.top), bottom: coordinate(bounds.bottom), height: coordinate(bounds.height) } : null }, headings };
+    while (JSON.stringify(summary).length > 3900 && headings.length) headings.pop();
+    return summary;
+  }
+  function scrape(doc = document, sourceUrl = root.location?.href) {
+    const id = jobId(sourceUrl);
+    if (!id) throw new Error("Open a Jobright job's details before saving it.");
+    const context = searchContext(doc, sourceUrl);
+    if (context.selectedRegion !== "us" || context.selectedRegionSource !== "search-control") throw new Error("Select United States in Jobright's country filter before saving or collecting jobs.");
+    const headings = [...doc.querySelectorAll("h1[class*='index_job-title__']")].filter(visible);
+    if (!headings.length) throw new Error("Jobright's selected job details are not ready.");
+    const candidates = detailCandidates(doc);
     // The URL changes before the SPA finishes rendering. Select only one
     // visible detail panel whose own rendered metadata proves its job ID.
     // An old panel for another ID cannot mask the new job or lend it a JD.
@@ -168,7 +225,7 @@
       scrapedAt: new Date().toISOString(), confidence: { title: "high", company: "high", description: "high", applyUrl: original ? "high" : "low" },
       selectorsUsed: { title: "jobright-detail-heading", company: "jobright-detail-company", description: "jobright-overview-sections", applyUrl: original ? "jobright-original-post" : "jobright-reference" }, warnings: [] };
   }
-  const api = Object.freeze({ scrape, cards, searchContext, jobId });
+  const api = Object.freeze({ scrape, cards, searchContext, jobId, descriptionDiagnostics, descriptionTarget });
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.JobrightJobScraper = api;
 })(typeof globalThis === "undefined" ? this : globalThis);

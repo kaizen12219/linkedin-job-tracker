@@ -79,7 +79,8 @@
       const job = adapter.scrape();
       const key = (value) => String(value || "").replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
       if (!job || job.jobIdSource === "query" || String(job.jobId) !== record.id ||
-        key(job.company) !== key(record.company) || key(job.title) !== key(record.title)) {
+        key(job.company) !== key(record.company) || (typeof adapter.titleMatches === "function"
+          ? adapter.titleMatches(job.title, record.title) !== true : key(job.title) !== key(record.title))) {
         run.detailFailure = adapter.detailFailure?.(record) || "The rendered details do not match the selected job's ID, title, and company.";
         return null;
       }

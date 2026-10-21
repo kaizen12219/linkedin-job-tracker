@@ -70,10 +70,27 @@
       if (currentContext.filterKey !== selectedAuthorization.filterKey || currentContext.selectedRegion !== "us") return "The selected Jobright search changed after the job was selected.";
     }
     const job = safeScrape();
-    if (!job) return scrapeFailure;
+    if (!job) {
+      // Jobright rejects an unreadable body instead of returning partial
+      // details, so its readiness error also prepares the authorized section.
+      prepareDetails(record);
+      return scrapeFailure;
+    }
     if (!matches(job, record)) return "The rendered Jobright details do not match the selected job ID, company, and title.";
     if (job.applicationsAvailable === false && !job.applicationsClosed) return "The selected Jobright job has no available Apply control or verified external Original Job Post.";
     return "The selected Jobright details did not remain stable before capture.";
+  }
+  let detailsPrepared = null;
+  function prepareDetails(record) {
+    if (!authorizationMatches(record) || selectedAuthorization.blocked || captured.has(identity(record))) return;
+    const currentContext = context();
+    if (!selectedAuthorization.filterKey || currentContext.filterKey !== selectedAuthorization.filterKey || currentContext.selectedRegion !== "us" ||
+      currentContext.selectedRegionSource !== "search-control" || (!currentRecord(record) && !authorizedMissingCard(record))) return;
+    if (detailsPrepared?.id === record.id && Date.now() - detailsPrepared.at < 1000) return;
+    const target = scraper()?.descriptionTarget?.(document, window.location.href, record);
+    if (!target?.isConnected || target.closest(".job-card-flag-classname[id]") || typeof target.scrollIntoView !== "function") return;
+    detailsPrepared = { id: record.id, at: Date.now() };
+    target.scrollIntoView({ block: "center", behavior: "instant" });
   }
   function scheduleClassification(delay = 300) {
     clearTimeout(classificationTimer);
@@ -114,8 +131,13 @@
     const reasonDetail = (typeof reason === "string" && reason.trim() ? reason.trim() : code === "DETAILS_NOT_CONFIRMED" ? detailFailure(record) : "").slice(0, 2000);
     let trackerVersion = "";
     try { trackerVersion = String(chrome.runtime.getManifest?.()?.version || "").slice(0, 64); } catch { /* Diagnostic metadata is optional. */ }
+    let descriptionDiagnostics = "";
+    if (code === "DETAILS_NOT_CONFIRMED") {
+      try { descriptionDiagnostics = JSON.stringify(scraper()?.descriptionDiagnostics?.(document, window.location.href) || "").slice(0, 6000); } catch { /* Diagnostics cannot interrupt collection. */ }
+    }
     const snapshot = { jobId: record.id, title: record.title, company: record.company, sourceUrl: `https://jobright.ai/jobs/info/${record.id}`,
       ...(reasonDetail ? { verificationReason: reasonDetail } : {}), ...(trackerVersion ? { trackerVersion } : {}),
+      ...(descriptionDiagnostics ? { descriptionDiagnostics } : {}),
       detailAvailability: matches(job, record) ? "verified" : "unavailable" };
     if (matches(job, record)) for (const name of ["description", "workplaceType", "isEasyApply", "applicationsAvailable", "applicationsClosed", "selectedRegion", "selectedRegionSource", "searchContextKey"]) {
       if (job[name] !== undefined) snapshot[name] = job[name];
@@ -149,7 +171,7 @@
       selection = null; void notSaved(pending.record, { code: "DETAILS_NOT_CONFIRMED" }); return;
     }
     const job = safeScrape();
-    if (!matches(job, pending.record) || (pending.previousId !== job.jobId && pending.previousDescription && job.description === pending.previousDescription)) { scheduleManual(200); return; }
+    if (!matches(job, pending.record) || (pending.previousId !== job.jobId && pending.previousDescription && job.description === pending.previousDescription)) { prepareDetails(pending.record); scheduleManual(200); return; }
     if (job.applicationsAvailable === false && !job.applicationsClosed) { scheduleManual(200); return; }
     const value = JSON.stringify([job.jobId, job.company, job.title, job.description, job.applyUrl, job.workplaceType, job.applicationsClosed, job.searchContextKey]);
     if (value !== pending.stable) { pending.stable = value; pending.stableAt = Date.now(); scheduleManual(200); return; }
@@ -260,7 +282,7 @@
       if (!records().length) throw new Error("Results did not finish loading. Job collection stopped.");
       selection = null; selectedAuthorization = null; clearTimeout(manualTimer); collectionId = state.id; lastScrollAt = 0;
       collection = window.LinkedInJobCollector.create({
-        searchKey, wait, cards: records, activeCard: active, scrape: safeScrape, detailFailure, notSaved,
+        searchKey, wait, cards: records, activeCard: active, scrape: safeScrape, detailFailure, notSaved, prepareDetails,
         async allowed(record) {
           if (!active(record)) return false;
           const check = await message({ type: "KAI_TRACKER_CLASSIFY_COMPANIES", companies: [record.company], refresh: false });

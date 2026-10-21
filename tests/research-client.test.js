@@ -14,7 +14,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
   postJsonError = null, failClientKeyWrite = false, failResearchWriteAt = null,
   catalog = modelCatalog, catalogError = null, nativeMessaging, acceptedSettings = {}, reportError = null, afterSaveError = null,
   destination = "https://docs.google.com/spreadsheets/d/aaa/edit#gid=1", coordinator = null, saveImpl = null,
-  profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"] } = {}) {
+  profiles = ["kevin", "jagjeet", "jose-ibero-2page", "michal-stefanow-2page"], getResponse = null } = {}) {
   const calls = [], saves = [], outcomes = [], remembered = [], alarmCalls = [], reports = [];
   let researchWrites = 0;
   let state = { configured: true, sheetUrl: destination };
@@ -45,7 +45,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
       } };
       return { ok: true, json: async () => ({ state: "researching", ...acceptedSettings }) };
     }
-    return { ok: true, json: async () => clone(response) };
+    return { ok: true, json: async () => clone(getResponse ? await getResponse(url, options) : response) };
   };
   const sheetClient = { async getStatus() { return clone(state); }, async getOptions() { return { profiles: clone(profiles) }; }, async saveJob(data, options) { saves.push(clone({ data, options })); if (saveError) throw saveError; return saveImpl ? saveImpl(data, options, stored) : { status: "inserted" }; } };
   const context = vm.createContext({ URL, AbortSignal, Uint8Array, Date, fetch: fetchImpl, crypto, chrome: { storage: { local: storage }, alarms, runtime: { id: "stable-id" } } });
@@ -55,7 +55,7 @@ function harness({ stored = {}, saveError = null, failPostOnce = false, networkE
     onNotSaved: async (record, details) => { reports.push(clone({ record, details })); if (reportError) throw reportError; },
     onOutcome: async (_record, message) => outcomes.push(message) });
   return { client, stored, calls, saves, outcomes, remembered, alarmCalls, reports, setResponse(value) { response = value; },
-    setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, ban() { banned = true; } };
+    setNetworkError(value) { networkError = value; }, changeSheet() { state.sheetUrl += "different"; }, disconnect() { state.configured = false; }, ban() { banned = true; } };
 }
 
 const FILE_DESTINATION = "applicantally-file:00000000-0000-0000-0000-000000000001";
@@ -604,6 +604,162 @@ test("a local outage retries the same capture after worker recovery without dupl
   assert.equal(resumed.saves.length, 1); assert.equal(resumed.saves[0].options.requestId, started.requestId);
   assert.equal(resumed.stored.jobTrackerResearchV1[0].state, "saved");
 });
+
+async function terminalResearchFailure(target = job, options = {}) {
+  const h = harness(options);
+  await h.client.start(target, { profile: "Candidate" });
+  h.setResponse({ state: "failed", error: "Research storage could not replace its durable record." });
+  await h.client.poll();
+  assert.equal(h.stored.jobTrackerResearchV1[0].notSaved.error.code, "RESEARCH_FAILED");
+  return h;
+}
+
+test("terminal research failures only reopen for an explicit same-request storage-recovery marker", async () => {
+  const first = await terminalResearchFailure(), original = clone(first.stored.jobTrackerResearchV1[0]);
+  for (const response of [
+    { state: "researching" },
+    { state: "queued", recoverableStorageFailure: false },
+    { state: "queued", recoverableStorageFailure: "true" },
+    { state: "failed", recoverableStorageFailure: true },
+    { state: "unknown", recoverableStorageFailure: true },
+    { state: "researching", requestId: crypto.randomUUID(), recoverableStorageFailure: true }
+  ]) {
+    const h = harness({ stored: clone(first.stored) });
+    h.setResponse({ requestId: original.requestId, ...response });
+    await h.client.poll(); await h.client.poll();
+    assert.deepEqual(h.stored.jobTrackerResearchV1[0], original, JSON.stringify(response));
+    assert.equal(h.saves.length, 0); assert.equal(h.reports.length, 0);
+    assert.equal(h.calls.length, 1, "ordinary terminal history is probed at most once per cooldown");
+    assert.equal(h.calls[0].options.method, "GET");
+    assert.equal(h.calls[0].url, `http://127.0.0.1:8787/job-research/${original.requestId}`);
+    assert.equal(h.calls[0].options.headers["X-Job-Tracker-Client"], first.stored.jobTrackerResearchClientV1);
+    assert.equal(h.alarmCalls.at(-1).cleared, true, "terminal history does not create an endless polling alarm");
+  }
+});
+
+test("storage reconciliation excludes stopped, expired, changed-destination and any save-related records", async () => {
+  const first = await terminalResearchFailure(), original = clone(first.stored.jobTrackerResearchV1[0]);
+  for (const scenario of ["cleared", "disconnected", "destination", "expired", "future", "cancelled", "skipped", "saved", "save-unconfirmed",
+    "saveCancelled", "saveClaim", "saveResearch", "save-report", "other-failure", "missing-client"]) {
+    const stored = clone(first.stored), record = stored.jobTrackerResearchV1[0];
+    if (["cancelled", "skipped", "saved", "save-unconfirmed"].includes(scenario)) record.state = scenario;
+    if (scenario === "expired") record.createdAt = Date.now() - 24 * 60 * 60 * 1000;
+    if (scenario === "future") record.createdAt = Date.now() + 60_000;
+    if (scenario === "saveCancelled") record.saveCancelled = true;
+    if (scenario === "saveClaim") record.saveClaim = { phase: "writing", destination: record.sheetUrl };
+    if (scenario === "saveResearch") record.saveResearch = { state: "completed", result };
+    if (scenario === "save-report") record.notSaved.stage = "save";
+    if (scenario === "other-failure") record.notSaved.error.code = "RESEARCH_IDENTITY_MISMATCH";
+    if (scenario === "missing-client") delete stored.jobTrackerResearchClientV1;
+    const h = harness({ stored });
+    h.setResponse({ requestId: original.requestId, state: "completed", completedAt: new Date().toISOString(), result, recoverableStorageFailure: true });
+    if (scenario === "cleared") await h.client.clear();
+    if (scenario === "disconnected") h.disconnect();
+    if (scenario === "destination") h.changeSheet();
+    await h.client.poll();
+    assert.equal(h.calls.length, 0, scenario); assert.equal(h.saves.length, 0, scenario);
+    if (scenario === "missing-client") assert.equal(h.stored.jobTrackerResearchClientV1, undefined, "a probe cannot invent a new client identity");
+    if (scenario !== "cleared") assert.equal(h.stored.jobTrackerResearchV1[0].terminal, true, scenario);
+  }
+});
+
+test("clearing during a recovery GET cancels the probe before it can reopen or save", async () => {
+  const first = await terminalResearchFailure(), requestId = first.stored.jobTrackerResearchV1[0].requestId;
+  let enter, release;
+  const entered = new Promise(resolve => { enter = resolve; });
+  const h = harness({ stored: clone(first.stored), getResponse: async () => {
+    enter(); await new Promise(resolve => { release = resolve; });
+    return { requestId, state: "completed", completedAt: new Date().toISOString(), result, recoverableStorageFailure: true };
+  } });
+  const poll = h.client.poll(); await entered;
+  const clear = h.client.clear(); release(); await poll; await clear;
+  assert.equal(h.calls.length, 1); assert.equal(h.calls[0].options.method, "GET");
+  assert.equal(h.saves.length, 0); assert.equal(h.reports.length, 0);
+  assert.equal(h.stored.jobTrackerResearchV1, undefined);
+  const beforeProbe = harness({ stored: clone(first.stored) });
+  beforeProbe.setResponse({ requestId, state: "completed", completedAt: new Date().toISOString(), result, recoverableStorageFailure: true });
+  await Promise.all([beforeProbe.client.poll(), beforeProbe.client.clear()]);
+  assert.equal(beforeProbe.calls.length, 0, "a clear already queued before the probe starts also wins");
+  assert.equal(beforeProbe.saves.length, 0); assert.equal(beforeProbe.stored.jobTrackerResearchV1, undefined);
+});
+
+test("a folder changed during recovery is checked again before the terminal failure can reopen", async () => {
+  const first = await terminalResearchFailure(), original = clone(first.stored.jobTrackerResearchV1[0]);
+  let h;
+  h = harness({ stored: clone(first.stored), getResponse: async () => {
+    h.changeSheet();
+    return { requestId: original.requestId, state: "completed", completedAt: new Date().toISOString(), result, recoverableStorageFailure: true };
+  } });
+  await h.client.poll();
+  assert.deepEqual(h.stored.jobTrackerResearchV1[0], original);
+  assert.equal(h.calls.length, 1); assert.equal(h.saves.length, 0); assert.equal(h.reports.length, 0);
+});
+
+test("repaired queued or already-completed research keeps its frozen routing, model and UUID and saves once", async () => {
+  for (const [minimumYears, expected, recoveredState] of [[3, "jagjeet", "queued"], [5, "kevin", "completed"]]) {
+    const evidence = `${minimumYears}+ years of professional software engineering experience required.`;
+    const target = { ...job, isEasyApply: false, applyUrl: "https://mews.com/careers/jobs/123", selectedRegion: "us",
+      selectedRegionSource: "search-control", description: `${job.description} ${evidence}` };
+    const first = await terminalResearchFailure(target, { destination: FILE_DESTINATION, coordinator: saveCoordinator(), stored: {
+      jobTrackerResearchModelV1: "session-model-alpha", jobTrackerResearchEffortV1: "ultra"
+    } });
+    const original = clone(first.stored.jobTrackerResearchV1[0]), coordinator = saveCoordinator();
+    first.stored.jobTrackerResearchModelV1 = "session-model-beta";
+    first.stored.jobTrackerResearchEffortV1 = "medium";
+    const findings = { decision: "save", company: target.company, title: target.title, role, experience: { minimumYears, scope: "ordinary", evidence } };
+    const completed = { requestId: original.requestId, state: "completed", completedAt: new Date().toISOString(), result: findings, recoverableStorageFailure: true,
+      model: "session-model-beta", reasoningEffort: "medium" };
+    const h = harness({ stored: first.stored, destination: FILE_DESTINATION, coordinator, profiles: ["new-profile"] });
+    h.setResponse(recoveredState === "queued" ? { requestId: original.requestId, state: "queued", recoverableStorageFailure: true, retryAt: Date.now() + 30_000 } : completed);
+    await h.client.poll();
+    assert.equal(h.reports[0].record.requestId, original.requestId);
+    assert.equal(h.reports[0].details.status, "pending"); assert.equal(h.reports[0].details.willRetry, true);
+    if (recoveredState === "queued") {
+      assert.equal(h.stored.jobTrackerResearchV1[0].terminal, false); assert.equal(h.saves.length, 0);
+      assert.equal(h.alarmCalls.at(-1).options.periodInMinutes, 0.5);
+      h.setResponse(completed);
+    }
+    await h.client.poll(); await h.client.poll();
+    const saved = h.stored.jobTrackerResearchV1[0];
+    assert.equal(saved.state, "saved"); assert.equal(saved.terminal, true); assert.equal(h.saves.length, 1);
+    assert.equal(h.saves[0].options.requestId, original.requestId); assert.equal(h.saves[0].options.profile, expected);
+    assert.equal(h.saves[0].options.sheetUrl, original.sheetUrl); assert.equal(h.saves[0].options.trashed, undefined);
+    for (const field of ["requestId", "identity", "job", "model", "reasoningEffort", "profileRouting", "sheetUrl", "createdAt"]) assert.deepEqual(saved[field], original[field], field);
+    assert.ok(h.calls.every(call => call.options.method === "GET" || call.url.endsWith("/save-claim")), "recovery never resubmits research");
+    assert.equal(coordinator.calls.filter(call => call.action === "acquire").length, 1);
+    assert.equal(coordinator.calls.filter(call => call.action === "settle").length, 1);
+    assert.equal(coordinator.claims.size, 0);
+  }
+});
+
+test("a storage recovery marker does not bypass research identity and evidence verification", async () => {
+  const first = await terminalResearchFailure(), original = first.stored.jobTrackerResearchV1[0];
+  const h = harness({ stored: first.stored });
+  h.setResponse({ requestId: original.requestId, state: "completed", completedAt: new Date().toISOString(), recoverableStorageFailure: true,
+    result: { ...result, company: "Different Company" } });
+  await h.client.poll();
+  assert.equal(h.saves.length, 0); assert.equal(h.stored.jobTrackerResearchV1[0].terminal, true);
+  assert.equal(h.reports.at(-1).details.error.code, "RESEARCH_IDENTITY_MISMATCH");
+});
+
+test("terminal reconciliation is bounded, rotates recent history and shares its outage result with pending work", async () => {
+  const first = await terminalResearchFailure(), original = first.stored.jobTrackerResearchV1[0];
+  const stored = clone(first.stored);
+  stored.jobTrackerResearchV1 = Array.from({ length: 8 }, (_, index) => ({ ...clone(original), requestId: crypto.randomUUID(), createdAt: original.createdAt - index }));
+  const h = harness({ stored, getResponse: async url => ({ requestId: url.split("/").at(-1), state: "failed" }) });
+  await h.client.poll(); assert.equal(h.calls.length, 3);
+  await h.client.poll(); assert.equal(h.calls.length, 6);
+  await h.client.poll(); assert.equal(h.calls.length, 8);
+  await h.client.poll(); assert.equal(h.calls.length, 8);
+  assert.equal(h.saves.length, 0); assert.equal(new Set(h.calls.map(call => call.url)).size, 8);
+  const outage = harness({ stored: clone(first.stored), networkError: new Error("offline") });
+  outage.stored.jobTrackerResearchV1.push({ ...clone(original), requestId: crypto.randomUUID(), terminal: false, state: "researching", notSaved: undefined });
+  await outage.client.poll();
+  assert.equal(outage.calls.length, 1, "an offline worker is not retried separately for every history or active record");
+  assert.equal(outage.stored.jobTrackerResearchV1[0].terminal, true); assert.equal(outage.stored.jobTrackerResearchV1[1].terminal, false);
+  assert.equal(outage.reports[0].details.willRetry, true); assert.equal(outage.saves.length, 0);
+});
+
 test("research persists first, sends only public job fields, then writes verified URL and Info once", async () => {
   const h = harness();
   const started = await h.client.start(job, { profile: "Candidate", tabId: 42 });

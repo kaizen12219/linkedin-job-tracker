@@ -5,6 +5,9 @@ const test = require("node:test");
 const vm = require("node:vm");
 
 const CONTENT = fs.readFileSync(path.join(__dirname, "../src/content.js"), "utf8");
+const scraperContext = { window: {} };
+vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/scraper.js'), 'utf8'), scraperContext);
+const identityTitle = scraperContext.window.LinkedInJobScraper.identityTitle;
 
 function card(company, id) {
   const attributes = new Map([["data-job-id", id]]);
@@ -79,7 +82,7 @@ function harness(cards, options = {}) {
     document,
     window: { innerWidth: 1000, innerHeight: 800, location: { href: "https://www.linkedin.com/jobs/search/" },
       ...(options.collector ? { LinkedInJobCollector: options.collector } : {}),
-      ...(options.scrape ? { LinkedInJobScraper: { scrape: options.scrape } } : {}) },
+      ...(options.scrape ? { LinkedInJobScraper: { scrape: options.scrape, ...(options.identityTitle ? { identityTitle: options.identityTitle } : {}) } } : {}) },
     MutationObserver: class { observe() {} },
     clearTimeout: (id) => timers.delete(id),
     setTimeout(callback, delay) {
@@ -141,6 +144,23 @@ test("a user card selection waits for the matching detail identity and captures 
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_CAPTURE").length, 1);
   await app.advance(15_000);
   assert.equal(app.messages.filter((message) => message.type === "KAI_TRACKER_NOT_SAVED").length, 0);
+});
+
+test("manual LinkedIn capture accepts only the narrow same-job Senior/Remote-Sr title alias without changing its displayed title", async () => {
+  const target = card('Beacon Hill', '4480735630');
+  target.title = 'Senior Authentication / Identity Security Engineer';
+  let details = { jobId: '999', jobIdSource: 'details', company: 'Beacon Hill', title: target.title, description: 'Previous description' };
+  const app = harness([target], { identityTitle, scrape: () => details, onSelect() {
+    details = { ...details, jobId: '4480735630', title: 'Remote-Sr Authentication / Identity Security Engineer', description: 'Build secure production authentication and identity integrations.' };
+  } });
+  app.states.delete('Beacon Hill');
+  app.click(target, { isTrusted: true });
+  await app.advance(1500);
+  const captures = app.messages.filter(message => message.type === 'KAI_TRACKER_CAPTURE');
+  assert.equal(captures.length, 1);
+  assert.equal(captures[0].job.jobId, '4480735630');
+  assert.equal(captures[0].job.title, 'Remote-Sr Authentication / Identity Security Engineer');
+  assert.equal(target.title, 'Senior Authentication / Identity Security Engineer');
 });
 
 test("manual selection waits for changed description text even if the header and body DOM render first", async () => {

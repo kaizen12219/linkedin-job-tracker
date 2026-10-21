@@ -36,6 +36,88 @@ test("Jobright details extract observed JD sections and exclude private/AI/compa
   assert.equal(value.applyUrl, `https://careers.example.com/${fixture.A}`);
   assert.equal(value.sourceUrl, `https://jobright.ai/jobs/info/${fixture.A}`);
 });
+
+test("Jobright description diagnostics describe only the exact selected panel without copying JD or private material", (t) => {
+  const { api } = setup(t);
+  const diagnostic = api.descriptionDiagnostics();
+  assert.equal(diagnostic.sourceJobId, fixture.A);
+  assert.equal(diagnostic.selectedPanelCount, 1);
+  assert.deepEqual(Array.from(diagnostic.renderedPanels[0].ids), [fixture.A]);
+  assert.equal(diagnostic.overview.id, 'overview-1');
+  assert.equal(diagnostic.readySource, 'jobright-overview-sections');
+  assert.equal(diagnostic.descriptionLength, api.scrape().description.length);
+  assert.ok(diagnostic.counts.listTextSpans >= 4);
+  assert.ok(diagnostic.headings.some(heading => heading.label === 'Responsibilities' && heading.tag === 'h2' && heading.inOverview));
+  assert.doesNotMatch(JSON.stringify(diagnostic), /AI generated|private@example|Jane Doe|Build production|worldwide strategy|Excellent fit/u);
+  assert.ok(JSON.stringify(diagnostic).length <= 3900);
+});
+
+test("Jobright diagnostics distinguish unsupported section markup from loading and skills-only content", (t) => {
+  const { api, document } = setup(t);
+  const overview = document.querySelector('#overview-1');
+  overview.innerHTML = '<section class="index_sectionContent__test"><div role="heading">Responsibilities</div><div class="index_listText__test">Build production services.</div></section><section><p>Required Qualifications</p><div class="index_listText__test">Five years of engineering experience.</div></section><p>Skills</p><p>Java, React, SQL.</p>';
+  assert.throws(() => api.scrape(), /not readable/u);
+  const diagnostic = api.descriptionDiagnostics();
+  assert.equal(diagnostic.readySource, 'overview-sections-unreadable');
+  assert.equal(diagnostic.counts.semanticHeadings, 0);
+  assert.equal(diagnostic.counts.listTextSpans, 0);
+  assert.equal(diagnostic.counts.listTextElements, 2);
+  assert.ok(diagnostic.headings.some(heading => heading.label === 'Responsibilities' && heading.role === 'heading'));
+  assert.ok(diagnostic.headings.some(heading => heading.label === 'Required Qualifications' && heading.tag === 'p'));
+  overview.innerHTML = '<div aria-busy="true" class="ant-skeleton"><div role="progressbar"></div></div>';
+  const loading = api.descriptionDiagnostics();
+  assert.equal(loading.descriptionLength, 0);
+  assert.equal(loading.counts.busy, 1);
+  assert.equal(loading.counts.skeletons, 1);
+  assert.equal(loading.counts.indeterminateProgress, 1);
+  assert.throws(() => api.scrape(), /not readable/u);
+});
+
+test("Jobright diagnostics do not use a stale or ambiguous panel to describe the selected job", (t) => {
+  const { api, document } = setup(t);
+  for (const node of document.querySelectorAll('[data-time-filter-job]')) node.setAttribute('data-time-filter-job', fixture.B);
+  const diagnostic = api.descriptionDiagnostics();
+  assert.equal(diagnostic.sourceJobId, fixture.A);
+  assert.equal(diagnostic.selectedPanelCount, 0);
+  assert.deepEqual(Array.from(diagnostic.renderedPanels[0].ids), [fixture.B]);
+  assert.equal(diagnostic.overview, null);
+  assert.equal(diagnostic.descriptionLength, 0);
+  assert.equal(diagnostic.headings.length, 0);
+  assert.throws(() => api.scrape(), /still changing/u);
+});
+
+test("the observed empty singular Qualification section is a lazy-load target and never a readable JD", (t) => {
+  const { api, document } = setup(t);
+  document.querySelector('#overview-1').innerHTML = '<div class="index_jobContentBrief__uwsMB"><div class="index_company-summary__Yt35X">An employer is hiring for this position.</div></div><section id="skills-section" class="index_sectionContent__prVJT index_skills__8_eCj"><div class="index_main___BY9M index_qualification-title__evQ1b"><h2 class="index_label__MLcbM">Qualification</h2></div></section>';
+  const record = api.cards()[0];
+  assert.equal(api.descriptionTarget(document, `https://jobright.ai/jobs/info/${fixture.A}`, record), document.querySelector('#skills-section'));
+  assert.throws(() => api.scrape(), /not readable/u);
+  const diagnostic = api.descriptionDiagnostics();
+  assert.equal(diagnostic.descriptionLength, 0);
+  assert.equal(diagnostic.counts.listTextElements, 0);
+  assert.ok(diagnostic.headings.some(heading => heading.label === 'Qualification'));
+  assert.doesNotMatch(JSON.stringify(diagnostic), /An employer is hiring/u);
+});
+
+test("Jobright lazy targets require the exact rendered job, company, title, overview, and committed US country", (t) => {
+  const { api, document } = setup(t);
+  const record = api.cards()[0], url = `https://jobright.ai/jobs/info/${fixture.A}`;
+  assert.ok(api.descriptionTarget(document, url, record));
+  assert.equal(api.descriptionTarget(document, url, { ...record, id: fixture.B }), null);
+  assert.equal(api.descriptionTarget(document, url, { ...record, title: 'Different role' }), null);
+  assert.equal(api.descriptionTarget(document, url, { ...record, company: 'Different employer' }), null);
+  assert.equal(api.descriptionTarget(document, 'https://jobright.ai/jobs/recommend', record), null);
+  const metadata = document.querySelector('[data-time-filter-job]');
+  metadata.setAttribute('data-time-filter-job', fixture.B);
+  assert.equal(api.descriptionTarget(document, url, record), null);
+  metadata.setAttribute('data-time-filter-job', fixture.A);
+  const duplicate = document.querySelector('#overview-1').cloneNode(true);
+  document.querySelector('[class*="index_jobDetailContent__"]').append(duplicate);
+  assert.equal(api.descriptionTarget(document, url, record), null);
+  duplicate.remove();
+  document.querySelector('[data-preference-key="country"] span').setAttribute('title', 'United Kingdom');
+  assert.equal(api.descriptionTarget(document, url, record), null);
+});
 test("only committed visible country controls determine region and frozen search context", (t) => {
   const { api, document } = setup(t);
   const first = api.searchContext(document, `https://jobright.ai/jobs/info/${fixture.A}`);

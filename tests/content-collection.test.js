@@ -199,6 +199,42 @@ function changeDetailHeader(document, job) {
 const identicalBigId = { company: "BigID", title: "Senior Software Engineer", easy: true,
   description: "Design and build production data services, maintain automated tests, and improve service reliability. ".repeat(2) };
 
+const beaconCardTitle = 'Senior Authentication / Identity Security Engineer';
+const beaconDetailTitle = 'Remote-Sr Authentication / Identity Security Engineer';
+for (const fallback of [false, true]) test(`a verified LinkedIn job accepts the observed Senior/Remote-Sr title variation (public fallback: ${fallback})`, async (t) => {
+  const job = item(4480735630, { company: 'Beacon Hill', title: beaconCardTitle, ...(fallback ? { description: '' } : {}) });
+  const description = 'Build and maintain secure production authentication services and test enterprise identity integrations.';
+  const h = fixture(t, [[job, item(2)]], { detailTransition(current, context) {
+    context.renderDetails(current.id === job.id ? { ...current, title: beaconDetailTitle } : current);
+  }, publicDescription: fallback ? { title: beaconDetailTitle, description } : null });
+  await h.advance(100000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [job.id, '2']);
+  assert.equal(h.captures[0].job.title, beaconDetailTitle, 'the actual title remains unchanged in captured job data');
+  assert.equal(h.document.querySelector(`[data-job-id='${job.id}'] .job-card-list__title--link`).textContent, beaconCardTitle);
+  if (fallback) {
+    assert.equal(h.captures[0].job.description, description);
+    assert.equal(h.captures[0].job.selectorsUsed.description, 'verified-public-job-page');
+  }
+  assert.equal(h.messages.some(message => message.type === 'KAI_TRACKER_NOT_SAVED'), false);
+});
+
+for (const changed of [{ id: '777' }, { company: 'Another employer' }, { title: 'Remote-Sr Frontend Engineer' },
+  { title: 'Remote-Staff Authentication / Identity Security Engineer' }]) test(`a narrow title alias cannot bypass a different LinkedIn ${Object.keys(changed)[0]}: ${Object.values(changed)[0]}`, async (t) => {
+  const job = item(4480735630, { company: 'Beacon Hill', title: beaconCardTitle });
+  const h = fixture(t, [[job, item(2)]], { detailTransition(current, context) {
+    context.renderDetails(current.id === job.id ? { ...current, title: beaconDetailTitle, ...changed } : current);
+  } });
+  await h.advance(220000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), ['2']);
+  const report = h.messages.find(message => message.type === 'KAI_TRACKER_NOT_SAVED' && message.job.jobId === job.id);
+  assert.equal(report.reasonCode, 'DETAILS_NOT_CONFIRMED');
+  const diagnostic = JSON.parse(report.job.descriptionDiagnostics);
+  assert.equal(diagnostic.scrapedTitle, changed.title || beaconDetailTitle);
+  assert.equal(diagnostic.scrapedCompany, changed.company || job.company);
+  assert.ok(diagnostic.scrapedTitle.length <= 200 && diagnostic.scrapedCompany.length <= 200);
+  assert.equal(h.messages.some(message => message.type === 'KAI_TRACKER_DESCRIPTION'), false);
+});
+
 test("an unchanged previous description is never captured under a different job ID even after a new DOM render", async (t) => {
   const h = fixture(t, [[item(101, identicalBigId), item(102, { ...identicalBigId, company: "BIGID", title: "SENIOR SOFTWARE ENGINEER" }), item(103)]],
     { modern: true, standaloneTitle: true, dismissRemovesCard: true });

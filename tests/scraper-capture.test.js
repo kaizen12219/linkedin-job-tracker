@@ -193,6 +193,9 @@ test("description diagnostics identify an About section outside a narrow selecte
   assert.equal(value.root.tag, 'div');
   assert.equal(value.root.screen, 'SemanticJobDetails');
   assert.equal(value.root.testid, 'selected-header');
+  assert.equal(value.scrapedTitle, 'Senior Software Engineer');
+  assert.equal(value.scrapedCompany, 'BigID');
+  assert.ok(value.scrapedTitle.length <= 200 && value.scrapedCompany.length <= 200);
   assert.deepEqual(Array.from(value.root.renderedJobIds), ['101']);
   assert.equal(value.readySource, 'not-found');
   assert.equal(value.descriptionLength, 0);
@@ -268,7 +271,7 @@ test("public numeric and slug URLs preserve case/whitespace-normalized exact hea
   assert.equal(value.company, 'MUTUAL OF OMAHA');
 });
 
-for (const changed of [{ title: 'Senior Java Integration Engineer III' }, { company: 'Other Insurance Company' }, { headerId: '999' },
+for (const changed of [{ title: 'Staff Java Integration Engineer III' }, { company: 'Other Insurance Company' }, { headerId: '999' },
   { canonical: 'https://www.linkedin.com/jobs/view/999/' }, { ogUrl: 'https://www.linkedin.com/jobs/view/different-role-999' },
   { canonical: 'https://evil.example/jobs/view/4480734414/' }, { canonical: '' }]) test(`the public parser rejects conflicting selected identity: ${Object.keys(changed)[0]}=${Object.values(changed)[0]}`, (t) => {
   const { api } = descriptionFixture(t);
@@ -311,4 +314,36 @@ test("a closed exact public posting is marked closed without treating a login CT
   const ordinary = api.parsePublicDescription(publicJobHtml({ after: '<a href="/login">Sign in to apply</a><aside class="related-jobs"><span class="closed-job">No longer accepting applications</span></aside>' }), publicIdentity);
   assert.equal(ordinary.applicationsClosed, undefined);
   assert.equal(ordinary.applicationsAvailable, undefined);
+});
+
+test("LinkedIn title identity normalizes only Senior abbreviations and an explicitly separated leading Remote label", (t) => {
+  const { api } = descriptionFixture(t);
+  for (const [left, right] of [
+    ['Remote-Sr Authentication / Identity Security Engineer', 'Senior Authentication / Identity Security Engineer'],
+    ['REMOTE: Sr. Software Engineer', 'Senior Software Engineer'],
+    ['Remote—Sr. Backend Engineer', 'Senior Backend Engineer'],
+    ['Remote – Senior Engineer', 'Sr Engineer']
+  ]) assert.equal(api.identityTitle(left), api.identityTitle(right), `${left} / ${right}`);
+  for (const [left, right] of [
+    ['Remote Sensing Engineer', 'Sensing Engineer'], ['Remote / Senior Engineer', 'Senior Engineer'],
+    ['Senior Engineer - Remote', 'Senior Engineer'], ['Hybrid-Sr Engineer', 'Senior Engineer'],
+    ['Staff Engineer', 'Senior Engineer'], ['Lead Software Engineer', 'Senior Software Engineer'],
+    ['Senior Backend Engineer', 'Senior Frontend Engineer'], ['Senior Engineer I', 'Senior Engineer II'],
+    ['SrSoftware Engineer', 'SeniorSoftware Engineer'], ['Senior A / B Engineer', 'Senior A B Engineer']
+  ]) assert.notEqual(api.identityTitle(left), api.identityTitle(right), `${left} / ${right}`);
+  assert.equal(api.identityTitle('Staff Engineer'), 'staff engineer');
+  assert.equal(api.identityTitle('Lead Engineer'), 'lead engineer');
+});
+
+test("the same public job accepts its narrow Senior/Remote title variation and preserves the published title", (t) => {
+  const { api } = descriptionFixture(t);
+  const title = 'Remote-Sr Java Integration Engineer III';
+  const value = api.parsePublicDescription(publicJobHtml({ title }), { ...publicIdentity, title: 'Senior Java Integration Engineer III' });
+  assert.equal(value.jobId, publicIdentity.jobId);
+  assert.equal(value.title, title);
+  assert.match(value.description, /Build production Java integration services/u);
+  for (const changed of [{ title: 'Remote-Staff Java Integration Engineer III' }, { title: 'Remote-Lead Java Integration Engineer III' },
+    { title: 'Remote-Sr Frontend Engineer III' }, { company: 'Other employer' }, { headerId: '999' }]) {
+    assert.equal(api.parsePublicDescription(publicJobHtml({ title, ...changed }), { ...publicIdentity, title: 'Senior Java Integration Engineer III' }), null);
+  }
 });

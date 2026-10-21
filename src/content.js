@@ -257,7 +257,7 @@
     // job, even when it happens to have the same company or role title.
     const cardId = record.captureId;
     if (!cardId || !job || job.jobIdSource === "query" || String(job.jobId) !== String(cardId) || companyKey(job.company) !== companyKey(record.company) ||
-      companyKey(job.title) !== companyKey(record.title)) {
+      !titlesMatch(job.title, record.title)) {
       waitForDetails("The rendered LinkedIn detail ID, company or title does not match the selected job."); return;
     }
     if (!job.description?.trim()) {
@@ -293,7 +293,7 @@
     else if (classification === "duplicate") code = "DUPLICATE_COMPANY";
     if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
     const verified = job && job.jobIdSource !== "query" && String(job.jobId) === jobId &&
-      companyKey(job.company) === companyKey(record.company) && companyKey(job.title) === companyKey(record.title) && job.description?.trim();
+      companyKey(job.company) === companyKey(record.company) && titlesMatch(job.title, record.title) && job.description?.trim();
     const cause = (typeof verificationReason === "string" ? verificationReason : code === "DETAILS_NOT_CONFIRMED" ? collectionDetailFailure(record) : "").slice(0, 2000);
     let trackerVersion = "";
     try { trackerVersion = String(chrome.runtime.getManifest?.()?.version || "").slice(0, 64); } catch { /* Optional diagnostic metadata. */ }
@@ -430,6 +430,11 @@
   function companyKey(value) {
     return cleanText(value).toLocaleLowerCase("en-US");
   }
+  function titlesMatch(left, right) {
+    const normalize = window.LinkedInJobScraper?.identityTitle || companyKey;
+    const expected = normalize(right);
+    return !!expected && normalize(left) === expected;
+  }
 
   function clearCardState(card) {
     card.removeAttribute("data-kai-flow-job-state");
@@ -467,7 +472,7 @@
   const descriptionRevealAt = new WeakMap();
   const publicDescriptions = new Map();
   const sameDescriptionIdentity = (left, right) => String(left?.jobId) === String(right?.jobId || right?.captureId) &&
-    companyKey(left?.company) === companyKey(right?.company) && companyKey(left?.title) === companyKey(right?.title);
+    companyKey(left?.company) === companyKey(right?.company) && titlesMatch(left?.title, right?.title);
   function publicDescriptionOwner(record) {
     const selected = ownCollectionSelection(record);
     if (selected && collection?.running()) return { selection: selected, runId: collectionId };
@@ -515,7 +520,7 @@
     if (last !== undefined && Date.now() - last < 1000) return;
     const job = scrapeCollectionJob();
     if (!job || job.jobIdSource === "query" || String(job.jobId) !== String(record.captureId) ||
-      companyKey(job.company) !== companyKey(record.company) || companyKey(job.title) !== companyKey(record.title)) return;
+      companyKey(job.company) !== companyKey(record.company) || !titlesMatch(job.title, record.title)) return;
     preparePublicDescription(record, job);
     const target = window.LinkedInJobScraper?.descriptionTarget?.(document);
     if (!target?.isConnected || target.closest?.(CARD_SELECTOR) || typeof target.scrollIntoView !== "function") return;
@@ -544,7 +549,7 @@
     const job = scrapeCollectionJob();
     if (!job) return collectionScrapeError;
     if (job.jobIdSource === "query" || String(job.jobId) !== String(record.captureId)) return "The rendered LinkedIn detail ID does not match the selected job.";
-    if (companyKey(job.company) !== companyKey(record.company) || companyKey(job.title) !== companyKey(record.title)) return "The rendered LinkedIn company or title does not match the selected card.";
+    if (companyKey(job.company) !== companyKey(record.company) || !titlesMatch(job.title, record.title)) return "The rendered LinkedIn company or title does not match the selected card.";
     if (!job.description?.trim()) return "The selected LinkedIn job description is not readable yet.";
     if (job.applicationsAvailable === false && !job.applicationsClosed) return "The selected LinkedIn job has no ready Apply control.";
     return "The selected LinkedIn details did not remain stable before capture.";
@@ -692,6 +697,7 @@
       wait: waitForCollection,
       cards: () => readableCards().map((record) => ({ ...record, id: record.captureId })),
       activeCard: activeCollectionCard,
+      titleMatches: titlesMatch,
       async notSaved(record, outcome, runId) {
         const selected = ownCollectionSelection(record);
         await reportNotSaved(record, { ...outcome, verificationReason: outcome.reason }, runId);

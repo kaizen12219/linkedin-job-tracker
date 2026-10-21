@@ -1,0 +1,163 @@
+diff --git a/job-research.js b/job-research.js
+index 1a4c0b1..f877284 100644
+--- a/job-research.js
++++ b/job-research.js
+@@ -10,0 +11 @@ import { isRetryableResearchFailure } from "./lib/research-retry.mjs";
++import { atomicWriteFile, isRetryableAtomicReplaceError } from "./lib/atomic-file-store.mjs";
+@@ -204 +205 @@ export class JobResearchService {
+-    dispatcher = null, verifyUrl = verifyApplicationUrl, clock = () => Date.now() } = {}) {
++    dispatcher = null, verifyUrl = verifyApplicationUrl, clock = () => Date.now(), writeAtomic = atomicWriteFile } = {}) {
+@@ -211,0 +213 @@ export class JobResearchService {
++    this.writeAtomic = writeAtomic;
+@@ -215,0 +218 @@ export class JobResearchService {
++    this.pendingCompletions = new Set();
+@@ -231 +233,0 @@ export class JobResearchService {
+-    const temporary = `${this.saveClaimsFile}.${crypto.randomUUID()}.tmp`;
+@@ -233,6 +235,4 @@ export class JobResearchService {
+-      await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+-      await fs.writeFile(temporary, JSON.stringify({ version: 1, claims }), { mode: 0o600 });
+-      await fs.rename(temporary, this.saveClaimsFile);
+-    } catch {
+-      throw fail("Save coordination storage is unavailable. Nothing may be written until it recovers.", 503);
+-    } finally { await fs.unlink(temporary).catch(() => {}); }
++      await this.writeAtomic(this.saveClaimsFile, () => JSON.stringify({ version: 1, claims }));
++    } catch (cause) {
++      throw Object.assign(fail("Save coordination storage is unavailable. Nothing may be written until it recovers.", 503), { cause });
++    }
+@@ -291,0 +292 @@ export class JobResearchService {
++      if (this.pendingCompletions.has(record)) await this.persist();
+@@ -340 +341 @@ export class JobResearchService {
+-    const temporary = `${file}.${crypto.randomUUID()}.tmp`;
++    let serialized;
+@@ -342,4 +343,3 @@ export class JobResearchService {
+-      await fs.mkdir(reports, { recursive: true, mode: 0o700 });
+-      await fs.writeFile(temporary, `${JSON.stringify(this.researchReport(record, overrides), null, 2)}\n`, { mode: 0o600 });
+-      await fs.rename(temporary, file);
+-      this.pendingReports.delete(record.requestId);
++      await this.writeAtomic(file, () => { serialized = `${JSON.stringify(this.researchReport(record, overrides), null, 2)}\n`; return serialized; });
++      if (serialized === `${JSON.stringify(this.researchReport(record, overrides), null, 2)}\n`) this.pendingReports.delete(record.requestId);
++      else this.pendingReports.add(record.requestId);
+@@ -350 +349,0 @@ export class JobResearchService {
+-      await fs.unlink(temporary).catch(() => {});
+@@ -355,4 +354,6 @@ export class JobResearchService {
+-    await fs.mkdir(this.directory, { recursive: true, mode: 0o700 });
+-    const temporary = `${this.file}.${crypto.randomUUID()}.tmp`;
+-    await fs.writeFile(temporary, JSON.stringify(this.records), { mode: 0o600 });
+-    await fs.rename(temporary, this.file);
++    let completed;
++    await this.writeAtomic(this.file, () => {
++      completed = new Map(this.records.filter(record => this.pendingCompletions.has(record)).map(record => [record, record.resultFingerprint]));
++      return JSON.stringify(this.records);
++    });
++    for (const [record, fingerprint] of completed) if (record.state === "completed" && record.resultFingerprint === fingerprint) this.pendingCompletions.delete(record);
+@@ -387,0 +389 @@ export class JobResearchService {
++        if (this.pendingCompletions.has(existing)) await this.persist();
+@@ -437,0 +440,2 @@ export class JobResearchService {
++      const storageRetry = isRetryableAtomicReplaceError(error);
++      if (storageRetry) record.recoverableStorageFailure = true;
+@@ -442 +446 @@ export class JobResearchService {
+-      else if (isRetryableResearchFailure(error)) this.queueRetry(record, error);
++      else if (storageRetry || isRetryableResearchFailure(error)) this.queueRetry(record, error);
+@@ -447 +451,9 @@ export class JobResearchService {
+-      await this.persist();
++      try { await this.persist(); }
++      catch (retryError) {
++        if (!storageRetry || !isRetryableAtomicReplaceError(retryError)) throw retryError;
++        // The previous durable queued record is still intact. Keep its same
++        // operation queued in memory; a later poll must persist before dispatch.
++        record.error = text(retryError.message).slice(0, 500);
++        this.diagnosticEvent(record, "storage-retry-pending", { reason: record.error });
++        await this.writeReport(record);
++      }
+@@ -464,0 +477 @@ export class JobResearchService {
++    if (this.pendingCompletions.has(record)) throw Object.assign(fail("The verified research decision is waiting for durable storage. Retry when research storage is available.", 503), { code: "RESEARCH_PERSISTENCE_PENDING" });
+@@ -465,0 +479 @@ export class JobResearchService {
++      ...(record.recoverableStorageFailure === true && ["queued", "researching", "completed"].includes(record.state) ? { recoverableStorageFailure: true } : {}),
+@@ -474,0 +489 @@ export class JobResearchService {
++      if (record && this.pendingCompletions.has(record)) await this.persist();
+@@ -519,0 +535 @@ export class JobResearchService {
++          if (this.pendingCompletions.has(record)) await this.persist();
+@@ -545,0 +562 @@ export class JobResearchService {
++        this.pendingCompletions.add(record);
+@@ -554 +571,2 @@ export class JobResearchService {
+-        this.diagnosticEvent(record, "callback-rejected", { reason: text(error.message), status: error.status || 503, result });
++        this.diagnosticEvent(record, this.pendingCompletions.has(record) ? "decision-persistence-pending" : "callback-rejected", {
++          reason: text(error.message), status: error.status || 503, result });
+diff --git a/lib/tracker-desktop-dispatcher.mjs b/lib/tracker-desktop-dispatcher.mjs
+index 0b0459d..945a946 100644
+--- a/lib/tracker-desktop-dispatcher.mjs
++++ b/lib/tracker-desktop-dispatcher.mjs
+@@ -7,0 +8 @@ import { isRetryableResearchFailure } from "./research-retry.mjs";
++import { atomicWriteFile } from "./atomic-file-store.mjs";
+@@ -81 +82 @@ function preSubmitError(error, phase = "before_submit") {
+-  return desktopError(
++  return Object.assign(desktopError(
+@@ -85 +86 @@ function preSubmitError(error, phase = "before_submit") {
+-  );
++  ), { cause: error });
+@@ -584 +585 @@ export class DesktopCodexDispatcher {
+-    onStatus = null, onOperation = null, clientFactory = null, clock = () => Date.now() } = {}) {
++    onStatus = null, onOperation = null, clientFactory = null, clock = () => Date.now(), writeAtomic = atomicWriteFile } = {}) {
+@@ -600,0 +602 @@ export class DesktopCodexDispatcher {
++    this.writeAtomic = writeAtomic;
+@@ -904,8 +906 @@ export class DesktopCodexDispatcher {
+-    await fs.mkdir(this.runtimeDir, { recursive: true, mode: 0o700 });
+-    const temporary = `${this.ledgerPath}.${process.pid}.${crypto.randomUUID()}.tmp`;
+-    await fs.writeFile(temporary, `${JSON.stringify(this.ledger, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+-    try { await fs.rename(temporary, this.ledgerPath); }
+-    catch (error) {
+-      await fs.rm(temporary, { force: true }).catch(() => {});
+-      throw error;
+-    }
++    await this.writeAtomic(this.ledgerPath, () => `${JSON.stringify(this.ledger, null, 2)}\n`);
+@@ -939 +934,2 @@ export class DesktopCodexDispatcher {
+-      const ledger = await this.loadLedger();
++      const previous = await this.loadLedger();
++      const ledger = { ...previous, operations: { ...previous.operations } };
+@@ -950 +946,3 @@ export class DesktopCodexDispatcher {
+-      await this.saveLedger();
++      this.ledger = ledger;
++      try { await this.saveLedger(); }
++      catch (error) { this.ledger = previous; throw error; }
+@@ -1671,4 +1669,10 @@ export class DesktopCodexDispatcher {
+-          record = await this.updateOperation(operationId, {
+-            phase: "turn_started", turnId: turn.id,
+-            submittedAt: record.submittedAt || this.timestamp()
+-          });
++          try {
++            record = await this.updateOperation(operationId, {
++              phase: "turn_started", turnId: turn.id,
++              submittedAt: record.submittedAt || this.timestamp()
++            });
++          } catch (error) {
++            throw Object.assign(deliveryAmbiguous("The saved Codex turn was found, but Job tracker could not persist its ledger confirmation.", {
++              threadId: record.threadId, turnId: turn.id, causeCode: error?.code
++            }), { cause: error });
++          }
+@@ -1680 +1684 @@ export class DesktopCodexDispatcher {
+-          throw deliveryAmbiguous("The Codex task was recovered, but Job tracker could not save its turn confirmation.", {
++          throw Object.assign(deliveryAmbiguous("The Codex task was recovered, but Job tracker could not save its turn confirmation.", {
+@@ -1682 +1686 @@ export class DesktopCodexDispatcher {
+-          });
++          }), { cause: error });
+@@ -1869,4 +1873,10 @@ export class DesktopCodexDispatcher {
+-    record = await this.updateOperation(operationId, {
+-      phase: "turn_started", turnId, submittedAt,
+-      submissionAttemptedAt: null, submissionError: null, imageDirectory: preparedImages.directory
+-    });
++    try {
++      record = await this.updateOperation(operationId, {
++        phase: "turn_started", turnId, submittedAt,
++        submissionAttemptedAt: null, submissionError: null, imageDirectory: preparedImages.directory
++      });
++    } catch (error) {
++      throw Object.assign(deliveryAmbiguous("Codex Desktop accepted the prompt, but Job tracker could not save its ledger confirmation.", {
++        threadId: record.threadId, turnId, causeCode: error?.code
++      }), { cause: error });
++    }
+@@ -1876 +1886 @@ export class DesktopCodexDispatcher {
+-      throw deliveryAmbiguous("Codex Desktop accepted the prompt, but Job tracker could not save its turn confirmation.", {
++      throw Object.assign(deliveryAmbiguous("Codex Desktop accepted the prompt, but Job tracker could not save its turn confirmation.", {
+@@ -1878 +1888 @@ export class DesktopCodexDispatcher {
+-      });
++      }), { cause: error });

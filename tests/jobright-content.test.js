@@ -477,6 +477,54 @@ test("collector failure details preserve the actual cause and cap diagnostic tex
   assert.equal(report.reasonCode, "CARD_UNAVAILABLE"); assert.equal(report.reasonDetail, reason.slice(0, 2000));
   assert.equal(report.reasonDetail.length, 2000); assert.equal(h.captures.length, 0);
 });
+test("an unreadable Jobright description reports bounded selected-layout diagnostics and continues without capturing skills as duties", async (t) => {
+  const h = setup(t, { hidden: true, detailsOnOpen(details, job) {
+    if (job.id === fixture.A) details.querySelector('#overview-1').innerHTML = '<h2>Skills</h2><p>Java, React, SQL.</p><div class="ant-skeleton" aria-busy="true"></div>';
+  } });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.B]);
+  const report = h.messages.find(value => value.type === 'KAI_TRACKER_NOT_SAVED' && value.job.jobId === fixture.A);
+  assert.equal(report.reasonCode, 'DETAILS_NOT_CONFIRMED');
+  assert.equal(report.job.detailAvailability, 'unavailable');
+  assert.equal(report.job.description, undefined);
+  const diagnostic = JSON.parse(report.job.descriptionDiagnostics);
+  assert.equal(diagnostic.sourceJobId, fixture.A);
+  assert.equal(diagnostic.selectedPanelCount, 1);
+  assert.equal(diagnostic.descriptionLength, 0);
+  assert.equal(diagnostic.counts.busy, 1);
+  assert.equal(diagnostic.counts.skeletons, 1);
+  assert.equal(diagnostic.viewport.documentHidden, true);
+  assert.ok(diagnostic.headings.some(heading => heading.label === 'Skills'));
+  assert.ok(report.job.descriptionDiagnostics.length <= 3900);
+  assert.doesNotMatch(report.job.descriptionDiagnostics, /Java, React|Jane Doe|private@example/u);
+});
+for (const removeCardOnOpen of [false, true]) test(`the authorized Jobright qualification section hydrates after being revealed and receives a full review (card removed: ${removeCardOnOpen})`, async (t) => {
+  let revealed = 0, hydratedAt = null;
+  const captureTimes = [];
+  const h = setup(t, { hidden: true, removeCardOnOpen, detailsOnOpen(details, job) {
+    if (job.id !== fixture.A) return;
+    const overview = details.querySelector('#overview-1'), ready = overview.innerHTML;
+    overview.innerHTML = '<section id="skills-section" class="index_sectionContent__prVJT index_skills__8_eCj"><div class="index_main___BY9M"><h2>Qualification</h2></div></section>';
+    const section = overview.querySelector('#skills-section');
+    section.scrollIntoView = () => {
+      if (revealed++) return;
+      h.window.setTimeout(() => { overview.innerHTML = ready; hydratedAt = h.window.Date.now(); }, 10000);
+    };
+  } });
+  const sendMessage = h.window.chrome.runtime.sendMessage;
+  h.window.chrome.runtime.sendMessage = async value => {
+    if (value.type === 'KAI_TRACKER_CAPTURE') captureTimes.push({ id: value.job.jobId, at: h.window.Date.now() });
+    return sendMessage(value);
+  };
+  await h.advance(6000);
+  assert.ok(revealed > 0, 'the actual selected empty Qualification section is revealed');
+  assert.equal(h.captures.length, 0, 'a heading alone cannot authorize capture');
+  await h.advance(180000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.ok(captureTimes.find(capture => capture.id === fixture.A).at >= hydratedAt + 5000, 'hydrated engineering duties receive a complete review');
+  assert.equal(h.messages.some(value => value.type === 'KAI_TRACKER_NOT_SAVED'), false);
+  assert.deepEqual(h.actions, []);
+});
 test("banned cards are reported without clicking any Jobright dismiss or like control", async (t) => {
   const h = setup(t, { blocked: new Set(["Company 1"]) }); await h.advance(100_000);
   assert.deepEqual(h.captures.map((value) => value.job.jobId), [fixture.B]);
