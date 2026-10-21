@@ -233,49 +233,93 @@
       const current = context();
       return current.filterKey === frozen && current.selectedRegion === "us" ? window.LinkedInJobCollector.searchKey(window.location.href) : "";
     };
-    if (!frozen || searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
+    const initialContext = context();
+    if (!frozen || window.LinkedInJobCollector.searchKey(window.location.href) !== state.searchKey ||
+      (initialContext.filterKey && (initialContext.filterKey !== frozen || initialContext.selectedRegion !== "us" || initialContext.selectedRegionSource !== "search-control")))
+      throw new Error("The search changed. Job collection stopped.");
     async function returnToResults({ recover = false } = {}) {
-      if (!scraper().jobId(window.location.href)) return true;
-      const close = document.querySelector("button[id*='job-detail-close-button']");
-      let control = close && !close.disabled && close.getAttribute("aria-disabled") !== "true" ? close : null;
-      if (!control) {
-        control = [...document.querySelectorAll("a[href]")].find((anchor) => {
-          try {
-            const url = new URL(anchor.href, window.location.href);
-            if (url.origin !== window.location.origin || !/^\/jobs\/recommend\/?$/u.test(url.pathname) || window.LinkedInJobCollector.searchKey(url.href) !== state.searchKey) return false;
-            if (anchor.closest("[hidden], [aria-hidden='true'], [aria-disabled='true'], template, [inert]")) return false;
-            for (let current = anchor; current && current.nodeType === 1; current = current.parentElement) {
-              const style = window.getComputedStyle(current);
-              if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") return false;
-            }
-            return true;
-          } catch { return false; }
-        });
-      }
-      if (!control) {
-        if (recover) return false;
-        throw new Error("The Jobright detail view could not be closed. Job collection stopped.");
-      }
+      const detailSourceUrl = scraper().jobId(window.location.href) ? window.location.href : "";
+      const visibleControl = (node) => {
+        if (!node?.isConnected || node.matches(":disabled") || node.closest("[hidden], [aria-hidden='true'], [aria-disabled='true'], template, [inert]")) return false;
+        for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
+          const style = window.getComputedStyle(current);
+          if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+        }
+        return true;
+      };
+      const leavingLists = () => [...document.querySelectorAll("#jobs-page-main-content [class*='index_jobs-list__'][class*='index_jobs-list-leave__']")];
+      const returnContext = () => {
+        const current = context();
+        if (current.filterKey || !detailSourceUrl || leavingLists().length !== 1) return current;
+        // Closing the route may precede its background-tab animation. These
+        // same committed controls were already readable under this exact
+        // detail backdrop; read them only to guard a results-link fallback.
+        return scraper().searchContext(document, detailSourceUrl);
+      };
+      const guardReturn = () => {
+        if (version !== startVersion) throw new Error("Job collection stopped.");
+        const current = returnContext();
+        if (window.LinkedInJobCollector.searchKey(window.location.href) !== state.searchKey ||
+          (current.filterKey && (current.filterKey !== frozen || current.selectedRegion !== "us" || current.selectedRegionSource !== "search-control")))
+          throw new Error("The search changed. Job collection stopped.");
+        return current;
+      };
+      const resultsLink = () => [...document.querySelectorAll("a[href]")].find((anchor) => {
+        if (!visibleControl(anchor)) return false;
+        try {
+          const url = new URL(anchor.href, window.location.href);
+          if (url.origin !== window.location.origin || !/^\/jobs\/recommend\/?$/u.test(url.pathname) || window.LinkedInJobCollector.searchKey(url.href) !== state.searchKey) return false;
+          return true;
+        } catch { return false; }
+      });
       // Only close the job details. Apply, Like, Hide and Orion keep their
       // native behavior. Navigation may use an observed link to these exact
       // results if the detail's close control never finished rendering.
-      control.click();
-      for (let elapsed = 0; elapsed < 15_000; elapsed += 200) {
-        if (version !== startVersion) throw new Error("Job collection stopped.");
-        const current = context();
-        if (window.LinkedInJobCollector.searchKey(window.location.href) !== state.searchKey ||
-          (current.filterKey && (current.filterKey !== frozen || current.selectedRegion !== "us"))) throw new Error("The search changed. Job collection stopped.");
-        const collapsed = document.querySelector("#jobs-page-main-content [class*='index_jobs-list__'][class*='index_jobs-list-leave__']");
-        if (!scraper().jobId(window.location.href) && !collapsed && searchKey() === state.searchKey) return true;
-        if (!await wait(200, state.id)) throw new Error("Job collection stopped.");
+      const startedAt = Date.now(), deadline = startedAt + 90_000;
+      let usedResultsLink = false, closeAttempted = false, announced = false, closeAttemptedAt = startedAt;
+      while (Date.now() < deadline) {
+        const current = guardReturn();
+        if (!scraper().jobId(window.location.href) && !leavingLists().length && searchKey() === state.searchKey) return true;
+        if (!announced) { status("Returning to Jobright results…", state); announced = true; }
+        const committed = current.filterKey === frozen && current.selectedRegion === "us" && current.selectedRegionSource === "search-control";
+        if (committed && !closeAttempted && scraper().jobId(window.location.href)) {
+          const closes = [...document.querySelectorAll("button[id*='job-detail-close-button']")].filter(visibleControl);
+          const close = closes.length === 1 ? closes[0] : null;
+          const control = close || resultsLink();
+          if (!control) {
+            if (recover) return false;
+            throw new Error(closes.length > 1 ? "The Jobright detail close controls are ambiguous. Job collection stopped."
+              : "The Jobright detail view could not be closed. Job collection stopped.");
+          }
+          guardReturn();
+          closeAttempted = true; usedResultsLink = !close; closeAttemptedAt = Date.now();
+          control.click();
+          continue;
+        }
+        if (!usedResultsLink && Date.now() - closeAttemptedAt >= 5000 && committed) {
+          const fallback = resultsLink();
+          if (fallback) {
+            guardReturn();
+            usedResultsLink = true;
+            status("Waiting for Jobright results — reopening the verified results link…", state);
+            fallback.click();
+          }
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        if (!await wait(Math.min(200, remaining), state.id)) throw new Error("Job collection stopped.");
       }
-      throw new Error("The Jobright results did not return after closing details. Job collection stopped.");
+      guardReturn();
+      const current = returnContext();
+      throw new Error("The Jobright results did not return within 90 seconds after closing details. Job collection stopped." +
+        ` Detail route: ${!!scraper().jobId(window.location.href)}; collapsed list: ${!!leavingLists().length}; committed filters: ${current.filterKey === frozen && current.selectedRegion === "us"}; results link used: ${usedResultsLink}.`);
     }
     waiting = { ...state, localVersion: version };
     let release = () => {}, started = false, leaseAcquired = false;
     try {
       release = await lease(state.id);
       leaseAcquired = true;
+      await returnToResults();
       for (let elapsed = 0; !records().length && elapsed < 15_000; elapsed += 200) {
         if (!await wait(200, state.id) || version !== startVersion) return;
         if (searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");

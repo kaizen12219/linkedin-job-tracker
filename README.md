@@ -2,7 +2,7 @@
 
 This extension captures qualifying LinkedIn and Jobright jobs into ApplicantAlly. Research uses independent Codex sessions in Rezi Builder; saving and duplicate checks use ApplicantAlly’s local JSON store.
 
-Current release: **0.8.4**. See [CHANGELOG.md](CHANGELOG.md) for changes and the versioning policy. Future releases increment the patch version for fixes, the minor version for compatible features, and the major version for incompatible changes.
+Current release: **0.8.14**. See [CHANGELOG.md](CHANGELOG.md) for changes and the versioning policy. Future releases increment the patch version for fixes, the minor version for compatible features, and the major version for incompatible changes.
 
 ## Install and start
 

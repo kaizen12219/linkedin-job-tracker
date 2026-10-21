@@ -4,11 +4,11 @@ const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 const collectionLocks = require("./fixtures/collection-locks.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, closeFadeDelay = 0, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, initialListDelay = 0, closeFadeDelay = 0, closeBehavior = "restore", changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
-  const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [], resultNavigations = [];
+  const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [], closeAttempts = [], resultNavigations = [], resultNavigationTimes = [];
   const removedCards = new Map();
   window.Date.now = () => time; window.Math.random = () => .5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
@@ -27,6 +27,11 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     list = document.createElement("div"); list.className = "index_jobs-list__CM7kJ";
     list.append(document.querySelector("header"), ...scroller.childNodes);
     left.append(list); scroller.append(left);
+    if (initialListDelay) {
+      document.body.prepend(list.querySelector("header"));
+      list.classList.add("index_jobs-list-leave___nSi4"); list.style.opacity = "0";
+      window.setTimeout(() => { list.classList.remove("index_jobs-list-leave___nSi4"); list.style.removeProperty("opacity"); }, initialListDelay);
+    }
   }
   Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => 700 } });
   scroller.scrollTo = ({ top }) => {
@@ -64,6 +69,10 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
         if (!missingDetails) window.setTimeout(() => {
           const details = document.querySelector("#details"); details.innerHTML = fixture.details(value);
           if (detailsOnOpen) detailsOnOpen(details, value, selections.length);
+          for (const button of details.querySelectorAll("button[id*='job-detail-close-button']")) {
+            const click = button.click.bind(button);
+            button.click = () => { closeAttempts.push({ id: button.id, at: time }); click(); };
+          }
           if (replaceCardOnOpen) {
             const replacement = document.createElement("template"); replacement.innerHTML = fixture.card(replaceCardOnOpen(value));
             card.replaceWith(replacement.content.firstElementChild); wire();
@@ -99,11 +108,12 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   document.querySelector("#details").addEventListener("click", (event) => {
     if (event.target.id !== "job-detail-close-button") return;
     detailCloses.push(window.location.pathname.split("/").at(-1));
-    restoreResults();
+    if (closeBehavior === "restore") restoreResults();
+    else if (closeBehavior === "route-only") window.history.replaceState({}, "", "/jobs/recommend");
   });
   if (resultsNavigation) {
-    const results = document.createElement("a"); results.href = "/jobs/recommend"; results.textContent = "Recommended jobs";
-    results.addEventListener("click", event => { event.preventDefault(); resultNavigations.push(window.location.pathname); restoreResults(); });
+    const results = document.createElement("a"); results.href = typeof resultsNavigation === "string" ? resultsNavigation : "/jobs/recommend"; results.textContent = "Recommended jobs";
+    results.addEventListener("click", event => { event.preventDefault(); resultNavigations.push(window.location.pathname); resultNavigationTimes.push(time); restoreResults(); });
     document.body.prepend(results);
   }
   wire();
@@ -123,7 +133,9 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   if (autoStart) state = newState();
   window.eval(fs.readFileSync(require.resolve("../src/jobright-content.js"), "utf8"));
   if (changedFilterAt) window.setTimeout(() => document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid"), changedFilterAt);
-  return { document, window, messages, captures, selections, actions, detailCloses, resultNavigations,
+  return { document, window, messages, captures, selections, actions, detailCloses, closeAttempts, resultNavigations, resultNavigationTimes,
+    get now() { return time; },
+    jump(amount) { time += amount; },
     get state() { return state; },
     click(target) { clickHandler({ target, isTrusted: true, button: 0, defaultPrevented: false }); },
     async request(value) { return new Promise((resolve) => listeners[0](value, {}, resolve)); },
@@ -132,7 +144,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
       const until = time + amount; await new Promise((resolve) => setImmediate(resolve));
       for (;;) {
         const next = [...timers].filter(([, timer]) => timer.at <= until).sort((a, b) => a[1].at - b[1].at)[0];
-        if (!next) break; timers.delete(next[0]); time = next[1].at; next[1].callback(); await new Promise((resolve) => setImmediate(resolve));
+        if (!next) break; timers.delete(next[0]); time = Math.max(time, next[1].at); next[1].callback(); await new Promise((resolve) => setImmediate(resolve));
       }
       time = until;
     }
@@ -397,13 +409,167 @@ test("Jobright waits for the result list to fade back in after the detail route 
   assert.equal(h.state, null);
 });
 
+test("Jobright waits beyond fifteen seconds for the original result filters to hydrate before continuing", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeFadeDelay: 20_000 });
+  const committed = h.window.JobrightJobScraper.searchContext().filterKey;
+  for (let elapsed = 0; elapsed < 60_000 && !h.detailCloses.length; elapsed += 1000) await h.advance(1000);
+  await h.advance(16_000);
+  assert.deepEqual(h.selections, [fixture.A], "a hidden result list is not ready for the next selection");
+  assert.ok(h.state, "slow hydration stays within the bounded return window");
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.ok(h.captures.every(capture => capture.job.searchContextKey === committed && capture.job.selectedRegion === "us"));
+  assert.deepEqual(h.detailCloses, [fixture.A, fixture.B]);
+  assert.equal(h.state, null);
+});
+
+test("a resumed Jobright results route waits for its collapsed list before selecting any job", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, initialListDelay: 20_000 });
+  const committed = h.window.JobrightJobScraper.searchContext().filterKey;
+  assert.ok(committed, "the committed country controls remain readable outside the collapsing list");
+  await h.advance(16_000);
+  assert.equal(h.window.location.pathname, "/jobs/recommend");
+  assert.deepEqual(h.selections, []); assert.deepEqual(h.closeAttempts, []);
+  assert.ok(h.state, "resuming must wait through a slow result-list transition");
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.ok(h.captures.every(capture => capture.job.searchContextKey === committed));
+  assert.equal(h.state, null);
+});
+
+test("Jobright can reopen exact results after the close changes route before its collapsed list restores", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "route-only", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  const closedAt = h.closeAttempts[0].at;
+  assert.equal(h.window.location.pathname, "/jobs/recommend");
+  assert.equal(h.window.JobrightJobScraper.searchContext().filterKey, "");
+  assert.ok(h.document.querySelector("[class*='index_jobs-list-leave__']"));
+  await h.advance(Math.max(0, closedAt + 4900 - h.now));
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.deepEqual(h.resultNavigations, []);
+  await h.advance(1000);
+  assert.deepEqual(h.resultNavigations, ["/jobs/recommend"]);
+  assert.ok(h.resultNavigationTimes[0] - closedAt >= 5000);
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.deepEqual(h.detailCloses, [fixture.A, fixture.B]);
+  assert.deepEqual(h.resultNavigations, ["/jobs/recommend", "/jobs/recommend"]);
+  assert.equal(h.state, null);
+});
+
+for (const staleControl of ["hidden", "inert", "disabled"]) test(`Jobright never clicks a ${staleControl} stale close ahead of the enabled close`, async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, detailsOnOpen(details) {
+    const stale = details.querySelector("#job-detail-close-button"), enabled = stale.cloneNode(true);
+    stale.id = "stale-job-detail-close-button";
+    if (staleControl === "hidden") stale.hidden = true;
+    else if (staleControl === "inert") { const parent = details.ownerDocument.createElement("div"); parent.setAttribute("inert", ""); stale.replaceWith(parent); parent.append(stale); }
+    else stale.disabled = true;
+    if (staleControl === "inert") stale.parentElement.after(enabled);
+    else stale.after(enabled);
+  } });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.deepEqual(h.closeAttempts.map(attempt => attempt.id), ["job-detail-close-button", "job-detail-close-button"]);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.equal(h.state, null);
+});
+
+test("ambiguous enabled Jobright close controls use the observed exact results link without guessing a close", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, resultsNavigation: true, detailsOnOpen(details) {
+    const close = details.querySelector("#job-detail-close-button"), second = close.cloneNode(true);
+    second.id = "second-job-detail-close-button"; close.after(second);
+  } });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(h.closeAttempts, []);
+  assert.deepEqual(h.resultNavigations, [`/jobs/info/${fixture.A}`]);
+  assert.equal(h.state, null);
+});
+
+test("an enabled no-op Jobright close falls back once to the observed exact search after five seconds", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, closeBehavior: "noop", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  assert.equal(h.closeAttempts.length, 1);
+  const closedAt = h.closeAttempts[0].at;
+  await h.advance(Math.max(0, closedAt + 4900 - h.now));
+  assert.deepEqual(h.resultNavigations, [], "do not navigate while the selected close may still be completing");
+  await h.advance(1000);
+  assert.deepEqual(h.resultNavigations, [`/jobs/info/${fixture.A}`]);
+  assert.ok(h.resultNavigationTimes[0] - closedAt >= 5000 && h.resultNavigationTimes[0] - closedAt <= 5400);
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.equal(h.closeAttempts.length, 1); assert.equal(h.resultNavigations.length, 1);
+  assert.equal(h.state, null);
+});
+
+for (const href of ["https://unrelated.example/jobs/recommend", "/jobs/recommend?country=Canada"]) test(`a no-op Jobright close never follows the unsafe results link ${href}`, async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, closeBehavior: "noop", resultsNavigation: href });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  await h.advance(95_000);
+  assert.deepEqual(h.closeAttempts.map(attempt => attempt.id), ["job-detail-close-button"]);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.state, null);
+});
+
+test("a committed country change while a no-op Jobright close waits blocks the fallback link", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "noop", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  const country = h.document.querySelector("[data-preference-key='country'] span");
+  country.setAttribute("title", "United Kingdom"); country.textContent = "United Kingdom";
+  await h.advance(6000);
+  assert.deepEqual(h.closeAttempts.map(attempt => attempt.id), ["job-detail-close-button"]);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.state, null);
+});
+
+test("missing committed Jobright filters never authorize the no-op close fallback", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "noop", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  h.document.querySelector("header").remove();
+  await h.advance(95_000);
+  assert.equal(h.closeAttempts.length, 1);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 1, "the missing filters cannot authorize another job capture");
+  assert.equal(h.state, null);
+});
+
+test("stopping during Jobright's return wait prevents its delayed fallback and next selection", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "noop", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  await h.request({ type: "KAI_TRACKER_RUN_STOP" });
+  await h.advance(0);
+  assert.match(h.document.querySelector("[data-job-tracker-collection]").textContent, /stopped/iu);
+  assert.deepEqual(h.resultNavigations, []);
+  await h.advance(250);
+  assert.equal(h.state, null);
+  await h.advance(95_000);
+  assert.deepEqual(h.closeAttempts.map(attempt => attempt.id), ["job-detail-close-button"]);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 1);
+});
+
+test("Jobright's return deadline uses wall time even if a background timer resumes late", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, closeBehavior: "noop" });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  assert.ok(h.state);
+  h.jump(91_000);
+  await h.advance(0);
+  assert.equal(h.state, null, "a resumed callback must not start another ninety seconds of polling");
+  assert.equal(h.closeAttempts.length, 1);
+  assert.deepEqual(h.resultNavigations, []);
+});
+
 test("Jobright stops after a bounded wait when the closed detail never restores the result list", async (t) => {
   const h = setup(t, { listLeaveOnSelect: true, closeFadeDelay: Infinity });
   for (let elapsed = 0; elapsed < 60_000 && !h.detailCloses.length; elapsed += 1000) await h.advance(1000);
   assert.deepEqual(h.detailCloses, [fixture.A]);
   await h.advance(1000);
   assert.ok(h.state, "the closing transition must have time to restore the verified search");
-  await h.advance(20_000);
+  await h.advance(95_000);
   assert.deepEqual(h.captures.map((capture) => capture.job.jobId), [fixture.A]);
   assert.deepEqual(h.selections, [fixture.A]);
   assert.deepEqual(h.actions, []);

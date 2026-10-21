@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.14 — 2026-10-21
+
+- Allow up to 90 seconds of elapsed time for Jobright results and committed filters to return after closing details. Keep Stop and changed-search checks active throughout the wait.
+- Ignore hidden, disabled or ambiguous detail close controls. If closing stalls, allow one visible, observed results link for the exact same search; retain selected-job identity and description checks.
+- Record bounded return-state diagnostics when the results view cannot recover. Keep ApplicantAlly saves, AI eligibility decisions and Kevin/Jagjeet profile routing unchanged.
+
 ## 0.8.13 — 2026-10-21
 
 - Keep bounded recovery polling when only failed research remains, so an approved worker repair can resume and import without another capture or reconnect. Persist probe order across extension suspension and retain destination, lifetime, cancellation and save guards.
