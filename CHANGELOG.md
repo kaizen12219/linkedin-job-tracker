@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.15 — 2026-10-21
+
+- Recover Jobright returns where the detail route closes but the committed search controls disappear. Retain the visible exact results link verified before the tracker's own close, then permit that same unchanged link once if the results remain unreadable.
+- Preserve Stop, current-search and observed-filter checks during recovery. Reject replaced, hidden or retargeted links and keep complete visible search controls mandatory before selecting or saving another job.
+- Add bounded pre-close navigation-proof diagnostics for any remaining return timeout.
+- Recognize genuine LinkedIn titles containing Search or Results, including Conversational Search. Reject whole navigation labels instead of excluding those words from every job title.
+
 ## 0.8.14 — 2026-10-21
 
 - Allow up to 90 seconds of elapsed time for Jobright results and committed filters to return after closing details. Keep Stop and changed-search checks active throughout the wait.

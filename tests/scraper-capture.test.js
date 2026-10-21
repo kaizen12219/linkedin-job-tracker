@@ -52,6 +52,35 @@ test("a standalone selected-title link proves its job ID without using an unrela
   assert.equal(data.title, "Product Builder - Fintech"); assert.equal(data.company, "Mews");
   assert.equal(data.isEasyApply, true); assert.equal(data.workplaceType, "remote");
 });
+
+for (const title of ["Senior Software Engineer II, Conversational Search", "Search Engineer", "Search Results Engineer"]) test(`a selected ${title} title retains its exact rendered identity`, (t) => {
+  const id = "4482033140", description = "Build reliable search infrastructure and maintain production services.";
+  const dom = new JSDOM(`<title>Search jobs | LinkedIn</title><main>
+    <header hidden><h1>Unrelated Search Engineer</h1><a href="/jobs/view/999">Search Engineer</a></header>
+    <li data-occludable-job-id="999"><a href="/jobs/view/999">Other Search Engineer</a></li>
+    <div data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails">
+      <div class="job-details-jobs-unified-top-card"><h1 hidden>Search jobs</h1>
+        <p><a href="/jobs/view/${id}/">${title}</a></p><a href="/company/etsy">Etsy</a><button>Remote</button><button>Apply</button></div>
+      <section componentkey="JobDetails_AboutTheJob_${id}"><h2>About the job</h2><div data-testid="expandable-text-box">${description}</div></section>
+    </div></main>`, { url: "https://www.linkedin.com/jobs/search/?currentJobId=999", runScripts: "outside-only" });
+  t.after(() => dom.window.close()); dom.window.eval(source);
+  const value = dom.window.LinkedInJobScraper.scrape();
+  assert.equal(value.title, title); assert.equal(value.company, "Etsy");
+  assert.equal(value.jobId, id); assert.equal(value.jobIdSource, "details", "a stale query cannot replace the exact selected-title link");
+  assert.equal(value.description, description);
+});
+
+for (const label of ["Search", "Job search", "Search jobs", "Search results", "Results", "Job results"]) test(`the ${label} navigation label is not a job title`, (t) => {
+  const dom = new JSDOM(`<title>${label} | LinkedIn</title><main>
+    <header hidden><h1>Hidden Search Engineer</h1><a href="/jobs/view/999">Hidden Search Engineer</a></header>
+    <li data-occludable-job-id="999"><h1>Unrelated Search Engineer</h1><a href="/jobs/view/999">Unrelated Search Engineer</a></li>
+    <div data-sdui-screen="com.linkedin.sdui.flagshipnav.jobs.SemanticJobDetails"><h1><a href="/jobs/view/4482033140/">${label}</a></h1>
+      <a href="/company/etsy">Etsy</a><section componentkey="JobDetails_AboutTheJob_4482033140"><p>Build production software services.</p></section>
+    </div></main>`, { url: "https://www.linkedin.com/jobs/search/?currentJobId=4482033140", runScripts: "outside-only" });
+  t.after(() => dom.window.close()); dom.window.eval(source);
+  assert.equal(dom.window.LinkedInJobScraper.scrape().title, "", "outside or hidden unrelated headers cannot substitute for this UI label");
+});
+
 test("missing Apply controls cannot be mistaken for an ordinary external-apply job", (t) => {
   const data = scrape(t, "Remote", "");
   assert.equal(data.applicationsAvailable, false);

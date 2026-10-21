@@ -10,6 +10,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
   const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [], closeAttempts = [], resultNavigations = [], resultNavigationTimes = [];
   const removedCards = new Map();
+  let detachedHeader = null;
   window.Date.now = () => time; window.Math.random = () => .5;
   window.setTimeout = (callback, delay) => { timers.set(++timerId, { callback, at: time + Number(delay || 0) }); return timerId; };
   window.clearTimeout = (id) => timers.delete(id); window.setInterval = () => 0; window.MutationObserver = class { observe() {} };
@@ -92,6 +93,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   function restoreResults() {
     window.history.replaceState({}, "", "/jobs/recommend");
     document.querySelector("#details").replaceChildren();
+    if (detachedHeader) { (list || document.body).prepend(detachedHeader); detachedHeader = null; }
     for (const [id, removed] of removedCards) {
       if (!document.getElementById(id)) {
         const replacement = document.createElement("template"); replacement.innerHTML = fixture.card(removed.value);
@@ -110,6 +112,10 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     detailCloses.push(window.location.pathname.split("/").at(-1));
     if (closeBehavior === "restore") restoreResults();
     else if (closeBehavior === "route-only") window.history.replaceState({}, "", "/jobs/recommend");
+    else if (closeBehavior === "filters-missing") {
+      restoreResults();
+      detachedHeader = document.querySelector("header"); detachedHeader.remove();
+    }
   });
   if (resultsNavigation) {
     const results = document.createElement("a"); results.href = typeof resultsNavigation === "string" ? resultsNavigation : "/jobs/recommend"; results.textContent = "Recommended jobs";
@@ -455,6 +461,93 @@ test("Jobright can reopen exact results after the close changes route before its
   assert.deepEqual(h.detailCloses, [fixture.A, fixture.B]);
   assert.deepEqual(h.resultNavigations, ["/jobs/recommend", "/jobs/recommend"]);
   assert.equal(h.state, null);
+});
+
+test("Jobright reopens only its pre-close observed results link when its own close unmounts the filters", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "filters-missing", resultsNavigation: true });
+  const committed = h.window.JobrightJobScraper.searchContext().filterKey;
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  const closedAt = h.closeAttempts[0].at;
+  assert.equal(h.window.location.pathname, "/jobs/recommend");
+  assert.equal(h.document.querySelector("[class*='index_jobs-list-leave__']"), null);
+  assert.equal(h.document.querySelector("header"), null);
+  assert.equal(h.window.JobrightJobScraper.searchContext().filterKey, "");
+  await h.advance(Math.max(0, closedAt + 4900 - h.now));
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A], "missing controls never authorize selecting the next job");
+  await h.advance(1000);
+  assert.deepEqual(h.resultNavigations, ["/jobs/recommend"]);
+  assert.ok(h.resultNavigationTimes[0] - closedAt >= 5000);
+  assert.equal(h.window.JobrightJobScraper.searchContext().filterKey, committed);
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.ok(h.captures.every(capture => capture.job.searchContextKey === committed && capture.job.selectedRegion === "us"));
+  assert.deepEqual(h.resultNavigations, ["/jobs/recommend", "/jobs/recommend"]);
+  assert.equal(h.state, null);
+});
+
+for (const change of ["replaced", "retargeted", "hidden"]) test(`Jobright rejects a ${change} results link after its own close removes the filters`, async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, closeBehavior: "filters-missing", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  const link = h.document.querySelector("a[href='/jobs/recommend']");
+  const unexpected = [];
+  if (change === "replaced") {
+    const replacement = link.cloneNode(true);
+    replacement.addEventListener("click", event => { event.preventDefault(); unexpected.push("replaced link clicked"); });
+    link.replaceWith(replacement);
+  } else if (change === "retargeted") link.href = "/jobs/recommend?country=Canada";
+  else link.hidden = true;
+  await h.advance(95_000);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(unexpected, []);
+  assert.deepEqual(h.closeAttempts.map(attempt => attempt.id), ["job-detail-close-button"]);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.state, null);
+});
+
+test("Jobright does not use the cached results link after a readable changed country returns", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "filters-missing", resultsNavigation: true });
+  const country = h.document.querySelector("[data-preference-key='country']").cloneNode(true);
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  const label = country.querySelector("span"); label.title = "United Kingdom"; label.textContent = "United Kingdom";
+  h.document.body.prepend(country);
+  await h.advance(6000);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.state, null);
+});
+
+test("Jobright does not use the cached results link after the current search query changes", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "filters-missing", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  h.window.history.replaceState({}, "", "/jobs/recommend?country=Canada");
+  await h.advance(6000);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.state, null);
+});
+
+test("stopping Jobright after its own close unmounts filters prevents cached-link recovery", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, closeBehavior: "filters-missing", resultsNavigation: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.closeAttempts.length; elapsed += 1000) await h.advance(1000);
+  await h.request({ type: "KAI_TRACKER_RUN_STOP" });
+  await h.advance(95_000);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.captures.length, 1);
+  assert.equal(h.state, null);
+});
+
+test("missing initial Jobright search controls cannot authorize an observed results-link recovery", async (t) => {
+  const h = setup(t, { listLeaveOnSelect: true, resultsNavigation: true });
+  h.document.querySelector("header").remove();
+  await h.advance(95_000);
+  assert.deepEqual(h.resultNavigations, []);
+  assert.deepEqual(h.closeAttempts, []);
+  assert.deepEqual(h.selections, []);
+  assert.equal(h.captures.length, 0);
 });
 
 for (const staleControl of ["hidden", "inert", "disabled"]) test(`Jobright never clicks a ${staleControl} stale close ahead of the enabled close`, async (t) => {

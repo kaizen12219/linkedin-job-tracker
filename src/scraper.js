@@ -23,8 +23,8 @@
     /\bverified\b/i,
     /\bempleo verificado\b/i,
     /\bjob alert\b/i,
-    /\bsearch\b/i,
-    /\bresults\b/i
+    /^(?:job search|search(?: jobs| results)?)$/i,
+    /^(?:job )?results$/i
   ];
 
   const NON_COMPANY_PATTERNS = [

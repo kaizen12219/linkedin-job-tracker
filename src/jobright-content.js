@@ -239,11 +239,11 @@
       throw new Error("The search changed. Job collection stopped.");
     async function returnToResults({ recover = false } = {}) {
       const detailSourceUrl = scraper().jobId(window.location.href) ? window.location.href : "";
-      const visibleControl = (node) => {
+      const visibleControl = (node, opacityBackdrop = null) => {
         if (!node?.isConnected || node.matches(":disabled") || node.closest("[hidden], [aria-hidden='true'], [aria-disabled='true'], template, [inert]")) return false;
         for (let current = node; current && current.nodeType === 1; current = current.parentElement) {
           const style = window.getComputedStyle(current);
-          if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || style.opacity === "0") return false;
+          if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse" || (style.opacity === "0" && current !== opacityBackdrop)) return false;
         }
         return true;
       };
@@ -272,6 +272,36 @@
           return true;
         } catch { return false; }
       });
+      const filterSignature = (control) => JSON.stringify([
+        control.getAttribute("data-preference-key"), control.getAttribute("data-preference-measure"),
+        String(control.textContent || "").replace(/\s+/gu, " ").trim(),
+        [...control.querySelectorAll("[title]")].map((node) => node.getAttribute("title"))
+      ]);
+      const observedControls = (opacityBackdrop = null) => [...document.querySelectorAll("[data-preference-key]")].filter((control) =>
+        visibleControl(control, opacityBackdrop) && !control.closest("[role='dialog'], [role='listbox'], [role='menu'], [aria-modal='true'], [popover], .ant-popover, .ant-dropdown, .ant-modal, [data-slot='popover-content'], [data-radix-popper-content-wrapper]"));
+      let ownCloseProof = null;
+      const verifyObservedControls = () => {
+        if (!ownCloseProof) return;
+        for (const [control, signature] of ownCloseProof.controls) {
+          if (control.isConnected && filterSignature(control) !== signature) throw new Error("The search changed. Job collection stopped.");
+        }
+        // A new visible partial topbar must not silently replace a changed
+        // committed filter while the country control is still unmounted.
+        for (const control of observedControls()) {
+          const key = control.getAttribute("data-preference-key");
+          const prior = ownCloseProof.filters.get(key);
+          if (!prior || !prior.has(filterSignature(control))) throw new Error("The search changed. Job collection stopped.");
+        }
+      };
+      const preservedResultsLink = () => {
+        if (!ownCloseProof?.filters.has("country") || scraper().jobId(window.location.href)) return null;
+        let current;
+        try { current = new URL(window.location.href); } catch { return null; }
+        if (current.origin !== window.location.origin || !/^\/jobs\/recommend\/?$/u.test(current.pathname) ||
+          window.LinkedInJobCollector.searchKey(current.href) !== state.searchKey) return null;
+        const { anchor, href, ownerDocument } = ownCloseProof;
+        return anchor?.ownerDocument === ownerDocument && ownerDocument === document && visibleControl(anchor) && anchor.href === href ? anchor : null;
+      };
       // Only close the job details. Apply, Like, Hide and Orion keep their
       // native behavior. Navigation may use an observed link to these exact
       // results if the detail's close control never finished rendering.
@@ -279,6 +309,7 @@
       let usedResultsLink = false, closeAttempted = false, announced = false, closeAttemptedAt = startedAt;
       while (Date.now() < deadline) {
         const current = guardReturn();
+        verifyObservedControls();
         if (!scraper().jobId(window.location.href) && !leavingLists().length && searchKey() === state.searchKey) return true;
         if (!announced) { status("Returning to Jobright results…", state); announced = true; }
         const committed = current.filterKey === frozen && current.selectedRegion === "us" && current.selectedRegionSource === "search-control";
@@ -292,14 +323,29 @@
               : "The Jobright detail view could not be closed. Job collection stopped.");
           }
           guardReturn();
+          if (close) {
+            const anchor = resultsLink();
+            // The frozen context was just verified by the scraper. Mirror its
+            // one exact detail-backdrop opacity exception for snapshots only;
+            // controls never become clickable or capture-ready through it.
+            const lists = leavingLists(), backdrop = detailSourceUrl && lists.length === 1 ? lists[0] : null;
+            const controls = observedControls(backdrop).map((node) => [node, filterSignature(node)]);
+            const filters = new Map();
+            for (const [node, signature] of controls) {
+              const key = node.getAttribute("data-preference-key"), values = filters.get(key) || new Set();
+              values.add(signature); filters.set(key, values);
+            }
+            ownCloseProof = { anchor, href: anchor?.href || "", ownerDocument: document, controls, filters };
+          }
           closeAttempted = true; usedResultsLink = !close; closeAttemptedAt = Date.now();
           control.click();
           continue;
         }
-        if (!usedResultsLink && Date.now() - closeAttemptedAt >= 5000 && committed) {
-          const fallback = resultsLink();
+        if (!usedResultsLink && Date.now() - closeAttemptedAt >= 5000 && (committed || ownCloseProof)) {
+          const fallback = committed ? resultsLink() : preservedResultsLink();
           if (fallback) {
             guardReturn();
+            verifyObservedControls();
             usedResultsLink = true;
             status("Waiting for Jobright results — reopening the verified results link…", state);
             fallback.click();
@@ -310,9 +356,10 @@
         if (!await wait(Math.min(200, remaining), state.id)) throw new Error("Job collection stopped.");
       }
       guardReturn();
+      verifyObservedControls();
       const current = returnContext();
       throw new Error("The Jobright results did not return within 90 seconds after closing details. Job collection stopped." +
-        ` Detail route: ${!!scraper().jobId(window.location.href)}; collapsed list: ${!!leavingLists().length}; committed filters: ${current.filterKey === frozen && current.selectedRegion === "us"}; results link used: ${usedResultsLink}.`);
+        ` Detail route: ${!!scraper().jobId(window.location.href)}; collapsed list: ${!!leavingLists().length}; committed filters: ${current.filterKey === frozen && current.selectedRegion === "us"}; results link used: ${usedResultsLink}; preclose link observed: ${!!ownCloseProof?.anchor}; preclose filter proof intact: ${!!ownCloseProof?.filters.has("country")}.`);
     }
     waiting = { ...state, localVersion: version };
     let release = () => {}, started = false, leaseAcquired = false;
