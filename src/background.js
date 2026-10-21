@@ -298,15 +298,17 @@ async function handleTrackerMessage(message, sender = {}) {
   if (message.type === "KAI_TRACKER_NOT_SAVED") {
     const reasons = { BANNED_COMPANY: "Skipped: company is in the banned-company list.",
       DUPLICATE_COMPANY: "Skipped: company already has a recorded job.",
+      ALREADY_CAPTURED: "Skipped: this job was already submitted from this page.",
       DETAILS_NOT_CONFIRMED: "The selected job's full details and identity could not be confirmed.",
       CARD_UNAVAILABLE: "The attempted job card became unavailable before capture." };
-    if (!reasons[message.reasonCode] || !matchesJobSource(message.job, sender)) throw new Error("The failed job snapshot is invalid.");
+    if (!reasons[message.reasonCode] || !matchesJobSource(message.job, sender) ||
+      (message.reasonCode === "ALREADY_CAPTURED" && JobCapturePolicy.sourceSite(message.job.sourceUrl) !== "jobright")) throw new Error("The failed job snapshot is invalid.");
     if (message.runId) await withCollectionState(state => {
       if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped."), { code: "TRACKER_RUN_STOPPED" });
     }, sender.tab?.id);
-    const reason = reasons[message.reasonCode] + (typeof message.reasonDetail === "string" && !["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode)
+    const reason = reasons[message.reasonCode] + (typeof message.reasonDetail === "string" && !["BANNED_COMPANY", "DUPLICATE_COMPANY", "ALREADY_CAPTURED"].includes(message.reasonCode)
       ? " " + message.reasonDetail.slice(0, 2000) : "");
-    return logNotSaved(message.job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY"].includes(message.reasonCode) ? "skipped" : "failed",
+    return logNotSaved(message.job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY", "ALREADY_CAPTURED"].includes(message.reasonCode) ? "skipped" : "failed",
       reason, error: { code: message.reasonCode, message: reason } });
   }
   if (message.type === "KAI_TRACKER_RUN_WAIT") return waitForCollectionRun(message, sender);

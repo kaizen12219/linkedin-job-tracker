@@ -500,6 +500,26 @@ test("pre-capture report messages enforce LinkedIn sender and active run identit
   assert.equal(report.job.description, undefined); assert.equal(h.calls.some(call => call.action === "save"), false);
 });
 
+test("Jobright already-captured reports are skipped while actual unavailable cards and LinkedIn reporting stay unchanged", async () => {
+  const h = harness({ tabUrl: jobrightUrl }); await settle();
+  const job = { jobId: jobrightId, company: 'Already submitted employer', title: 'Engineer', sourceUrl: jobrightUrl, detailAvailability: 'unavailable' };
+  const message = { type: 'KAI_TRACKER_NOT_SAVED', job, reasonCode: 'ALREADY_CAPTURED' };
+  const response = await h.sendRaw(message, 'foreign', { url: jobrightUrl, tab: { id: 9, url: jobrightUrl } });
+  assert.equal(response.response.ok, true);
+  const skipped = h.calls.find(call => call.action === 'failure-report').report;
+  assert.equal(skipped.status, 'skipped');
+  assert.equal(skipped.error.code, 'ALREADY_CAPTURED');
+  assert.equal(skipped.reason, 'Skipped: this job was already submitted from this page.');
+  assert.equal((await h.sendRaw({ ...message, reasonCode: 'CARD_UNAVAILABLE' }, 'foreign', { url: jobrightUrl })).response.ok, true);
+  const unavailable = h.calls.filter(call => call.action === 'failure-report').at(-1).report;
+  assert.equal(unavailable.status, 'failed');
+  assert.equal(unavailable.error.code, 'CARD_UNAVAILABLE');
+  const denied = await h.sendRaw({ ...message, job: { ...job, jobId: '123', sourceUrl: 'https://www.linkedin.com/jobs/view/123/' } });
+  assert.equal(denied.response.ok, false);
+  assert.equal(h.calls.filter(call => call.action === 'failure-report').length, 2);
+  assert.equal(h.calls.some(call => call.action === 'save' || call.action === 'duplicate'), false);
+});
+
 test("closed or unverified application controls cannot reach a Sheet save", async () => {
   const h = harness(); await settle();
   for (const flags of [{ applicationsClosed: true }, { applicationsAvailable: false }]) {

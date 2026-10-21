@@ -24,7 +24,8 @@
     let tail = Promise.resolve();
     let recovery = null;
     let recoveryGeneration = 0;
-    const recoveryProbes = new Map();
+    let recoveryDestination = null;
+    let recoveryClientAvailable = false;
     const serial = (operation) => {
       const result = tail.then(operation, operation);
       tail = result.catch(() => {});
@@ -39,6 +40,11 @@
     async function write(records) {
       await storage.set({ [STORAGE_KEY]: records });
       if (records.some((record) => !record.terminal || record.saveClaim)) await alarms.create(ALARM, { periodInMinutes: 0.5 });
+      // A worker may be repaired after the final active request has failed.
+      // Keep a slow check only while recoverable history has an original
+      // destination/client and is still inside its existing 24-hour lifetime.
+      else if (recoveryClientAvailable && records.some(record => recoveryEligible(record, recoveryDestination)))
+        await alarms.create(ALARM, { periodInMinutes: RECOVERY_PROBE_INTERVAL / 60_000 });
       else await alarms.clear(ALARM);
     }
     async function clientKey() {
@@ -47,7 +53,17 @@
         value = [...cryptoImpl.getRandomValues(new Uint8Array(32))].map((byte) => byte.toString(16).padStart(2, "0")).join("");
         await storage.set({ [CLIENT_KEY]: value });
       }
+      recoveryClientAvailable = true;
       return value;
+    }
+    function recoveryEligible(record, destination, now = Date.now()) {
+      return typeof destination === "string" && record.sheetUrl === destination && record.terminal === true && record.state === "failed" &&
+        record.notSaved?.stage === "research" && record.notSaved?.error?.code === "RESEARCH_FAILED" &&
+        !record.saveCancelled && !record.saveClaim && !record.saveResearch && UUID.test(record.requestId || "") &&
+        Number.isFinite(record.createdAt) && now >= record.createdAt && now - record.createdAt < MAX_AGE;
+    }
+    function lastRecoveryProbe(record, now) {
+      return Number.isFinite(record.recoveryCheckedAt) && record.recoveryCheckedAt <= now ? record.recoveryCheckedAt : 0;
     }
     const fileDestination = (destination) => typeof destination === "string" && destination.startsWith("applicantally-file:");
     function coordinationFailure(error) {
@@ -285,6 +301,7 @@
         const roleSkipReason = JobCapturePolicy.roleSkipReason(job);
         if (roleSkipReason) return { status: "skipped", reason: roleSkipReason };
         const state = await sheetClient.getStatus();
+        recoveryDestination = state.configured ? state.sheetUrl : null;
         if (!state.configured) throw new Error("Choose your ApplicantAlly data folder before researching jobs.");
         const region = JobProfileRouting.jobRegion(job);
         if (JobCapturePolicy.sourceSite(job.sourceUrl) === "jobright" &&
@@ -332,40 +349,47 @@
     }
     async function reconcileStorageRecovery(records, state, generation) {
       const reconciliation = { responses: new Map(), outage: null }, now = Date.now();
+      recoveryClientAvailable = false;
       if (!state.configured || generation !== recoveryGeneration) return reconciliation;
-      for (const [requestId, nextProbeAt] of recoveryProbes) if (nextProbeAt <= now) recoveryProbes.delete(requestId);
-      const candidates = records.filter((record) => record.terminal === true && record.state === "failed" &&
-        record.notSaved?.stage === "research" && record.notSaved?.error?.code === "RESEARCH_FAILED" &&
-        !record.saveCancelled && !record.saveClaim && !record.saveResearch && UUID.test(record.requestId || "") &&
-        record.sheetUrl === state.sheetUrl && Number.isFinite(record.createdAt) && now >= record.createdAt && now - record.createdAt < MAX_AGE &&
-        (recoveryProbes.get(record.requestId) || 0) <= now)
-        .sort((a, b) => b.createdAt - a.createdAt).slice(0, RECOVERY_PROBE_LIMIT);
-      if (!candidates.length) return reconciliation;
+      const eligible = records.filter(record => recoveryEligible(record, state.sheetUrl, now));
+      if (!eligible.length) return reconciliation;
       // Terminal history must not create a new authentication identity or submit
       // work. Only this original client's explicitly repaired worker record can
       // reopen a failure; ordinary failures remain terminal.
       const key = (await storage.get(CLIENT_KEY))[CLIENT_KEY];
       if (!/^[a-f0-9]{64}$/u.test(key || "")) return reconciliation;
+      recoveryClientAvailable = true;
+      const candidates = eligible.filter(record => !lastRecoveryProbe(record, now) || now - lastRecoveryProbe(record, now) >= RECOVERY_PROBE_INTERVAL)
+        .sort((a, b) => lastRecoveryProbe(a, now) - lastRecoveryProbe(b, now) || b.createdAt - a.createdAt).slice(0, RECOVERY_PROBE_LIMIT);
       const deadline = Date.now() + RECOVERY_PROBE_TIMEOUT;
       for (const record of candidates) {
         const remaining = deadline - Date.now();
         if (remaining <= 0 || generation !== recoveryGeneration) break;
-        recoveryProbes.set(record.requestId, now + RECOVERY_PROBE_INTERVAL);
+        // Persist the cursor so a suspended extension worker cannot keep
+        // checking only the newest three failures on every five-minute alarm.
+        record.recoveryCheckedAt = now;
+        await write(records);
+        const timeoutMs = deadline - Date.now();
+        if (timeoutMs <= 0 || generation !== recoveryGeneration) break;
         let response;
         try {
-          response = await request(`/${encodeURIComponent(record.requestId)}`, undefined, { timeoutMs: remaining, existingClientKey: key });
+          response = await request(`/${encodeURIComponent(record.requestId)}`, undefined, { timeoutMs, existingClientKey: key });
         } catch (error) {
           if (error.retryableResearch) { reconciliation.outage = error; break; }
           continue;
         }
-        if (generation !== recoveryGeneration || response?.requestId !== record.requestId || response.recoverableStorageFailure !== true ||
+        if (generation !== recoveryGeneration || response?.requestId !== record.requestId ||
+          (response.recoverableStorageFailure !== true && response.recoverableResearchFailure !== true) ||
           !["queued", "researching", "completed"].includes(response.state)) continue;
         const current = await sheetClient.getStatus();
-        if (generation !== recoveryGeneration || !current.configured || current.sheetUrl !== record.sheetUrl || Date.now() - record.createdAt >= MAX_AGE) continue;
+        if (generation !== recoveryGeneration) continue;
+        recoveryDestination = current.configured ? current.sheetUrl : null;
+        if (!current.configured || current.sheetUrl !== record.sheetUrl || Date.now() - record.createdAt >= MAX_AGE) continue;
         record.terminal = false;
         record.state = "researching";
         await notSaved(record, { stage: "research", status: "pending", willRetry: true, research: response,
-          reason: "Research storage was repaired. This job is retrying its original research request." });
+          reason: response.recoverableStorageFailure === true ? "Research storage was repaired. This job is retrying its original research request."
+            : "The interrupted research request was recovered. This job is retrying its original research request." });
         await write(records);
         reconciliation.responses.set(record.requestId, response);
       }
@@ -382,6 +406,7 @@
           else if (record.saveClaim?.phase === "settle") await settleSaveClaim(record, records);
         }
         const state = await sheetClient.getStatus();
+        recoveryDestination = state.configured ? state.sheetUrl : null;
         const { responses: recoveredResponses, outage: recoveryOutage } = await reconcileStorageRecovery(records, state, recoveryAtStart);
         for (const record of records.filter((entry) => !entry.terminal)) {
           if (recoveredResponses.has(record.requestId) && recoveryAtStart !== recoveryGeneration) {
@@ -501,7 +526,7 @@
         await write(records);
       });
     }
-    function clear() { recoveryGeneration++; return serial(async () => {
+    function clear() { recoveryGeneration++; recoveryDestination = null; recoveryClientAvailable = false; return serial(async () => {
       const records = await read();
       for (const record of records) if (record.saveClaim?.phase === "settle") await settleSaveClaim(record, records);
       for (const record of records.filter(entry => !entry.terminal)) {

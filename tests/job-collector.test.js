@@ -186,6 +186,7 @@ test("a permanently missing body times out by elapsed wall time and continues wi
   assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
   assert.equal(h.reports.length, 1);
   assert.match(h.reports[0].reason, /90-second/);
+  assert.doesNotMatch(h.reports[0].reason, /Review diagnostics/u, "a readiness-only failure has no review measurements");
   assert.ok(h.reports[0].time - selectedAt >= 90_000);
   assert.ok(h.reports[0].time - selectedAt <= 95_000, "late wakes use one actual deadline rather than 180 nominal polls");
   assert.ok(h.workerWaits.length < 50);
@@ -219,6 +220,72 @@ test("continuously changing descriptions exhaust one 180-second review budget wi
   assert.match(h.reports[0].reason, /180-second/);
   assert.ok(h.reports[0].time - selectedAt <= 180_000);
   assert.ok(h.statuses.filter(entry => entry.message.startsWith("Reviewing Company 1")).length > 1);
+  assert.match(h.reports[0].reason, /changed fields=description/u);
+});
+
+test("failure-only review diagnostics identify Apply URL drift without recording URL or job values", async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  const scrape = h.adapter.scrape, status = h.adapter.status;
+  let revision = 0;
+  h.adapter.scrape = () => {
+    const job = scrape();
+    return job.jobId === "1" ? { ...job, applyUrl: `https://private-applicant.invalid/apply?secret=do-not-log-${revision}` } : job;
+  };
+  h.adapter.status = (...args) => {
+    status(...args);
+    if (args[0].startsWith("Reviewing Company 1")) revision++;
+  };
+  await h.advance(400_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].code, "DETAILS_NOT_CONFIRMED");
+  const reason = h.reports[0].reason;
+  assert.match(reason, /fingerprint changed during review/u);
+  assert.match(reason, /180-second/u); assert.match(reason, /Review diagnostics: attempts=\d+/u);
+  assert.match(reason, /changed fields=applyUrl\./u);
+  assert.match(reason, /details became unavailable=no/u);
+  assert.doesNotMatch(reason, /https:|private-applicant|do-not-log|Useful job description/u);
+  assert.ok(reason.length <= 2000); assert.ok(reason.slice(reason.indexOf(" Review diagnostics:")).length <= 700);
+});
+
+test("review diagnostics distinguish a late wake from an observed fingerprint change", async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true, workerLag: 0 });
+  const wait = h.adapter.wait, status = h.adapter.status;
+  let reviewingFirst = false, delayed = false, lateTimer = 1000000;
+  h.adapter.status = (...args) => { status(...args); if (args[0].startsWith("Reviewing Company 1")) reviewingFirst = true; };
+  h.adapter.wait = (...args) => {
+    if (!reviewingFirst || delayed) return wait(...args);
+    delayed = true;
+    return new Promise(resolve => h.timers.set(++lateTimer, { at: h.time + args[0] + 200_000, callback: () => resolve(true) }));
+  };
+  await h.advance(500_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  const reason = h.reports[0].reason;
+  assert.match(reason, /attempts=1/u); assert.match(reason, /180-second/u);
+  const requested = Number(reason.match(/last requested ms=(\d+)/u)[1]);
+  const elapsed = Number(reason.match(/last elapsed ms=(\d+)/u)[1]);
+  assert.ok(elapsed > requested); assert.match(reason, /late wake ms=200000/u);
+  assert.match(reason, /changed fields=none \(no fingerprint delta observed\)/u);
+  assert.match(reason, /details became unavailable=no/u);
+});
+
+test("stable successful reviews do not add diagnostic fields or failure messages", async () => {
+  const h = harness([[row(1)]], { reportFailures: true });
+  await h.advance(100_000);
+  assert.equal(h.captures.length, 1); assert.equal(h.reports.length, 0);
+  assert.equal(h.statuses.filter(entry => entry.message.startsWith("Reviewing")).length, 1);
+  assert.equal(h.statuses.some(entry => /Review diagnostics/u.test(entry.message)), false);
+  assert.equal(Object.keys(h.captures[0].job).some(key => /diagnostic|review/i.test(key)), false);
+});
+
+test("review diagnostics record details becoming unavailable without inventing a fingerprint delta", async () => {
+  const target = row(1), h = harness([[target, row(2)]], { reportFailures: true });
+  const status = h.adapter.status;
+  h.adapter.status = (...args) => { status(...args); if (args[0].startsWith("Reviewing Company 1")) target.description = ""; };
+  await h.advance(400_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["2"]);
+  assert.match(h.reports[0].reason, /description is not readable/u);
+  assert.match(h.reports[0].reason, /details became unavailable=yes/u);
+  assert.match(h.reports[0].reason, /changed fields=none \(no fingerprint delta observed\)/u);
 });
 
 test("Jobright also waits for its own changed body and cannot accept identical stale text under a new ID", async () => {

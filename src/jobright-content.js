@@ -125,10 +125,12 @@
   async function notSaved(record, { code, job, reason } = {}, runId) {
     if (!/^[a-f0-9]{24}$/u.test(record?.id || "") || !record.company || !record.title) return;
     const state = currentRecord(record)?.card.getAttribute("data-kai-flow-job-state") || (authorizationMatches(record) && selectedAuthorization.blocked);
-    if (state === "banned") code = "BANNED_COMPANY";
+    if (captured.has(identity(record))) code = "ALREADY_CAPTURED";
+    else if (state === "banned") code = "BANNED_COMPANY";
     else if (state === "duplicate") code = "DUPLICATE_COMPANY";
-    if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
-    const reasonDetail = (typeof reason === "string" && reason.trim() ? reason.trim() : code === "DETAILS_NOT_CONFIRMED" ? detailFailure(record) : "").slice(0, 2000);
+    if (!["BANNED_COMPANY", "DUPLICATE_COMPANY", "ALREADY_CAPTURED", "DETAILS_NOT_CONFIRMED", "CARD_UNAVAILABLE"].includes(code)) return;
+    const reasonDetail = (code === "ALREADY_CAPTURED" ? "Skipped: this job was already submitted from this page."
+      : typeof reason === "string" && reason.trim() ? reason.trim() : code === "DETAILS_NOT_CONFIRMED" ? detailFailure(record) : "").slice(0, 2000);
     let trackerVersion = "";
     try { trackerVersion = String(chrome.runtime.getManifest?.()?.version || "").slice(0, 64); } catch { /* Diagnostic metadata is optional. */ }
     let descriptionDiagnostics = "";

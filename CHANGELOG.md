@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.13 — 2026-10-21
+
+- Keep bounded recovery polling when only failed research remains, so an approved worker repair can resume and import without another capture or reconnect. Persist probe order across extension suspension and retain destination, lifetime, cancellation and save guards.
+- Recover explicitly authorized interrupted research under its original request and thread after verifying the exact interrupted turn. Preserve frozen job/model/profile settings and keep unrelated interruptions blocked.
+- Report previously submitted Jobright jobs as skipped when collection restarts in the same page, without resubmitting them or relaxing active-card checks.
+- Record bounded review timing and changed field names when detail verification times out, without logging URLs or description contents or relaxing identity/stability checks.
+
 ## 0.8.12 — 2026-10-21
 
 - Retry and serialize research-worker file replacements when Windows temporarily locks the destination. Keep exhausted storage failures queued under the same request ID, and require durable decisions before publishing results or authorizing a save.

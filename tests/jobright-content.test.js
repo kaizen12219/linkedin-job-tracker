@@ -147,6 +147,44 @@ test("Jobright infinite collection captures exact loaded jobs in background and 
   assert.deepEqual(h.actions, []); assert.equal(h.state, null);
 });
 
+test("restarting a Jobright collector on the same page reports already submitted jobs as skipped without another capture", async (t) => {
+  const h = setup(t);
+  for (let elapsed = 0; !h.captures.length && elapsed < 30000; elapsed += 1000) await h.advance(1000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  await h.request({ type: 'KAI_TRACKER_RUN_STOP' });
+  await h.advance(0);
+  const restarted = h.start();
+  await h.advance(0); await restarted;
+  await h.advance(180000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B]);
+  assert.equal(h.selections.filter(id => id === fixture.A).length, 1);
+  const reports = h.messages.filter(message => message.type === 'KAI_TRACKER_NOT_SAVED' && message.job.jobId === fixture.A);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].reasonCode, 'ALREADY_CAPTURED');
+  assert.equal(reports[0].job.verificationReason, 'Skipped: this job was already submitted from this page.');
+  assert.equal(h.messages.some(message => message.type === 'KAI_TRACKER_NOT_SAVED' && message.reasonCode === 'CARD_UNAVAILABLE'), false);
+  assert.deepEqual(h.actions, []);
+});
+
+test("a genuinely changed uncaptured Jobright card remains unavailable rather than already submitted", async (t) => {
+  const h = setup(t);
+  const sendMessage = h.window.chrome.runtime.sendMessage;
+  let changed = false;
+  h.window.chrome.runtime.sendMessage = async message => {
+    if (!changed && message.type === 'KAI_TRACKER_CLASSIFY_COMPANIES' && message.companies.length === 1 && message.companies[0] === 'Company 1') {
+      changed = true;
+      h.document.getElementById(fixture.A).querySelector('h2').textContent = 'Different vacancy';
+    }
+    return sendMessage(message);
+  };
+  await h.advance(180000);
+  assert.equal(changed, true);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.B]);
+  const report = h.messages.find(message => message.type === 'KAI_TRACKER_NOT_SAVED' && message.job.jobId === fixture.A);
+  assert.equal(report.reasonCode, 'CARD_UNAVAILABLE');
+  assert.equal(h.messages.some(message => message.type === 'KAI_TRACKER_NOT_SAVED' && message.reasonCode === 'ALREADY_CAPTURED'), false);
+});
+
 test("opening Jobright details preserves the committed US search through the list leave transition", async (t) => {
   const last = "68c123456789abcdef012303";
   const h = setup(t, { listLeaveOnSelect: true, lazy: fixture.job(last) });

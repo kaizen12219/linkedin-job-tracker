@@ -1,0 +1,132 @@
+diff --git a/job-research.js b/job-research.js
+index f877284..1ccd3cb 100644
+--- a/job-research.js
++++ b/job-research.js
+@@ -209,0 +210 @@ export class JobResearchService {
++    this.interruptedRecoveriesFile = path.join(this.directory, "interrupted-recoveries.json");
+@@ -364,0 +366 @@ export class JobResearchService {
++      await this.applyInterruptedRecoveries();
+@@ -372,0 +375,53 @@ export class JobResearchService {
++  async applyInterruptedRecoveries() {
++    let manifest;
++    try {
++      const data = await fs.readFile(this.interruptedRecoveriesFile, "utf8");
++      if (data.length > 16000) throw fail("The operator recovery manifest is too large.", 503);
++      manifest = JSON.parse(data);
++    } catch (error) { if (error.code === "ENOENT") return; throw error; }
++    if (manifest?.version !== 1 || !Array.isArray(manifest.approvals) || manifest.approvals.length < 1 || manifest.approvals.length > 2 ||
++      Object.keys(manifest).some(key => !["version", "approvals"].includes(key))) throw fail("Invalid operator recovery manifest.", 503);
++    const seen = new Set(), pending = [];
++    for (const approval of manifest.approvals) {
++      if (!approval || Object.keys(approval).some(key => !["requestId", "threadId", "turnId", "approvalId", "approvedAt"].includes(key)) ||
++        ![approval.requestId, approval.threadId, approval.turnId, approval.approvalId].every(value => typeof value === "string" && ID.test(value)) ||
++        typeof approval.approvedAt !== "string" || !Number.isFinite(Date.parse(approval.approvedAt)) || seen.has(approval.requestId))
++        throw fail("Invalid exact-session operator recovery approval.", 503);
++      seen.add(approval.requestId);
++      const matches = this.records.filter(record => record.requestId === approval.requestId);
++      if (matches.length !== 1) throw fail("Operator recovery must identify one existing request.", 409);
++      const record = matches[0], existing = record.interruptedRecovery;
++      if (existing) {
++        if (!["requestId", "threadId", "turnId", "approvalId", "approvedAt"].every(key => existing[key] === approval[key]))
++          throw fail("This request already has a different operator recovery approval.", 409);
++        continue; // A crash or failed manifest cleanup must never replay a successor.
++      }
++      if (record.state !== "failed" || record.threadId !== approval.threadId || record.turnId !== approval.turnId ||
++        record.result !== undefined || record.resultFingerprint !== undefined || record.cancelledAt || record.cancelRequestedAt ||
++        (record.diagnostics?.events || []).some(event => event.type === "decision-accepted") ||
++        this.clock() - record.createdAt > 86400000 || this.clock() - Date.parse(approval.approvedAt) > 86400000 ||
++        Date.parse(approval.approvedAt) > this.clock() + 60000) throw fail("The exact interrupted request is no longer eligible for operator recovery.", 409);
++      pending.push({ record, approval });
++    }
++    if (pending.length) {
++      const claims = await this.loadSaveClaims();
++      if (pending.some(({ record }) => claims.some(claim => claim.requestId === record.requestId))) throw fail("A request with save ownership cannot be recovered.", 409);
++      for (const { record, approval } of pending) {
++        const operationId = `research:${record.requestId}:${record.client.slice(0, 16)}`;
++        await this.dispatcher.authorizeInterruptedRecovery(operationId, approval);
++      }
++      for (const { record, approval } of pending) {
++        record.interruptedRecovery = clone(approval);
++        record.recoverableResearchFailure = true;
++        record.state = "queued";
++        record.retryFailed = true;
++        delete record.error; delete record.retryAt; delete record.completedAt;
++        this.diagnosticEvent(record, "operator-interruption-recovery-approved", {
++          reason: "The user explicitly authorized resuming this exact interrupted research session.", threadId: approval.threadId, turnId: approval.turnId });
++      }
++      await this.persist();
++    }
++    // The durable request and ledger retain the approval proof. Leaving a
++    // locked manifest behind is harmless: its exact approval is idempotent.
++    await fs.unlink(this.interruptedRecoveriesFile).catch(() => {});
++  }
+@@ -479,0 +535 @@ export class JobResearchService {
++      ...(record.recoverableResearchFailure === true && ["queued", "researching", "completed"].includes(record.state) ? { recoverableResearchFailure: true } : {}),
+diff --git a/lib/tracker-desktop-dispatcher.mjs b/lib/tracker-desktop-dispatcher.mjs
+index 945a946..83be08f 100644
+--- a/lib/tracker-desktop-dispatcher.mjs
++++ b/lib/tracker-desktop-dispatcher.mjs
+@@ -52,0 +53 @@ const OPERATION_ID = /^[A-Za-z0-9:_-]{8,200}$/u;
++const APPROVAL_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/u;
+@@ -558,0 +560,8 @@ function operationTurns(turns, operationId) {
++function sameInterruptedApproval(left, right) {
++  return !!left && ["requestId", "threadId", "turnId", "approvalId", "approvedAt"].every(key => left[key] === right?.[key]);
++}
++function approvedPreviousInterruptedTurn(record, turn) {
++  return turn.status === "interrupted" && (record.previousInterruptedTurnIds || []).includes(turn.id) &&
++    record.interruptedRecovery?.turnId === turn.id && record.interruptedRecovery?.threadId === record.threadId;
++}
++
+@@ -939 +948 @@ export class DesktopCodexDispatcher {
+-        (current.previousFailedTurnIds || []).includes(expectedTurnId))) return null;
++        (current.previousFailedTurnIds || []).includes(expectedTurnId) || (current.previousInterruptedTurnIds || []).includes(expectedTurnId))) return null;
+@@ -952,0 +962,22 @@ export class DesktopCodexDispatcher {
++  async authorizeInterruptedRecovery(operationId, approval) {
++    const refused = () => desktopError("The exact interrupted operation is not eligible for this operator-approved recovery.",
++      "CHATGPT_DESKTOP_RECOVERY_REFUSED", { deliveryAmbiguous: false, phase: "operator_recovery" }, 409);
++    if (!approval || ![approval.requestId, approval.threadId, approval.turnId, approval.approvalId].every(value => typeof value === "string" && APPROVAL_ID.test(value)) ||
++      !operationId.startsWith(`research:${approval.requestId}:`) || !Number.isFinite(Date.parse(approval.approvedAt))) throw refused();
++    return this.withLedger(async () => {
++      const previous = await this.loadLedger(), current = previous.operations[operationId];
++      if (current?.terminationRequestedAt || current?.terminationCompletedAt || current?.terminationReason) throw refused();
++      if (current?.interruptedRecovery) {
++        if (!sameInterruptedApproval(current.interruptedRecovery, approval)) throw refused();
++        return { ...current };
++      }
++      if (current?.phase !== "failed" || current.turnStatus !== "interrupted" || current.threadId !== approval.threadId || current.turnId !== approval.turnId ||
++        current.terminationRequestedAt || current.terminationCompletedAt || current.terminationReason) throw refused();
++      const candidate = { ...current, interruptedRecovery: { ...approval }, updatedAt: this.timestamp() };
++      this.ledger = { ...previous, operations: { ...previous.operations, [operationId]: candidate } };
++      try { await this.saveLedger(); }
++      catch (error) { this.ledger = previous; throw error; }
++      return { ...candidate };
++    });
++  }
++
+@@ -1422 +1453 @@ export class DesktopCodexDispatcher {
+-      (latest.previousFailedTurnIds || []).includes(turn.id))) {
++      (latest.previousFailedTurnIds || []).includes(turn.id) || (latest.previousInterruptedTurnIds || []).includes(turn.id))) {
+@@ -1598 +1629,13 @@ export class DesktopCodexDispatcher {
+-    if (record?.phase === "failed" && retryFailed && record.retryableResearch === true && workflow === "research") {
++    const approvedInterruption = record?.interruptedRecovery?.turnId === record?.turnId &&
++      record?.interruptedRecovery?.threadId === record?.threadId && record?.turnStatus === "interrupted" &&
++      !record.interruptedRecoveryUsedAt && !record.terminationRequestedAt && !record.terminationCompletedAt && !record.terminationReason;
++    if (record?.phase === "failed" && retryFailed && (record.retryableResearch === true || approvedInterruption) && workflow === "research") {
++      if (approvedInterruption) {
++        await this.resumeThread(client, record.threadId, record);
++        const turns = await this.fullTurns(client, record.threadId);
++        const old = turns.filter(turn => turn.id === record.turnId);
++        const previousFailed = new Set(record.previousFailedTurnIds || []);
++        if (old.length !== 1 || old[0].status !== "interrupted" || turnOperationId(old[0]) !== (record.turnMessageId || operationId) ||
++          turns.some(turn => turn.id !== record.turnId && !(previousFailed.has(turn.id) && turn.status === "failed")))
++          throw deliveryAmbiguous("The approved interrupted turn is no longer the only eligible terminal turn in this saved task. No new prompt was submitted.", { threadId: record.threadId, turnId: record.turnId });
++      }
+@@ -1604,2 +1647,3 @@ export class DesktopCodexDispatcher {
+-        previousFailedTurnIds: [...(record.previousFailedTurnIds || []), record.turnId],
+-        turnMessageId: `${operationId}:retry:${retryCount}`,
++        ...(approvedInterruption ? { previousInterruptedTurnIds: [...(record.previousInterruptedTurnIds || []), record.turnId],
++          interruptedRecoveryUsedAt: this.timestamp() } : { previousFailedTurnIds: [...(record.previousFailedTurnIds || []), record.turnId] }),
++        turnMessageId: approvedInterruption ? `${operationId}:operator:${record.interruptedRecovery.approvalId}` : `${operationId}:retry:${retryCount}`,
+@@ -1696 +1740 @@ export class DesktopCodexDispatcher {
+-      if (turns.some((item) => !(previousFailed.has(item.id) && item.status === "failed"))) {
++      if (turns.some((item) => !(previousFailed.has(item.id) && item.status === "failed") && !approvedPreviousInterruptedTurn(record, item))) {

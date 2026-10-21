@@ -27,8 +27,31 @@
   function create(adapter, { random = Math.random, now = () => Date.now(), schedule = setTimeout, unschedule = clearTimeout } = {}) {
     let current = null;
     const actionDelay = () => Math.round(450 + random() * 800);
-    const fingerprint = (job) => JSON.stringify([job.jobId, job.jobIdSource, job.company, job.title, job.description, job.applyUrl,
-      job.workplaceType, job.isEasyApply, job.applicationsAvailable, job.applicationsClosed, job.posterName, job.descriptionEmails]);
+    const fingerprintFields = ["jobId", "jobIdSource", "company", "title", "description", "applyUrl", "workplaceType", "isEasyApply",
+      "applicationsAvailable", "applicationsClosed", "posterName", "descriptionEmails"];
+    const fingerprint = (job) => JSON.stringify(fingerprintFields.map(field => job[field]));
+    const stabilityFailure = "The selected job's details did not remain stable long enough to verify.";
+    function observeDetails(diagnostics, job) {
+      if (!diagnostics) return;
+      if (!job) {
+        if (diagnostics.lastValues) diagnostics.detailsBecameUnavailable = true;
+        return;
+      }
+      const values = fingerprintFields.map(field => JSON.stringify([job[field]]));
+      if (diagnostics.lastValues) for (let index = 0; index < fingerprintFields.length; index++) {
+        if (values[index] !== diagnostics.lastValues[index]) diagnostics.changedFields.add(fingerprintFields[index]);
+      }
+      diagnostics.lastValues = values;
+    }
+    function reviewFailureReason(reason, diagnostics, reachedLimit) {
+      if (!reachedLimit && !diagnostics.attempts) return reason;
+      const fields = fingerprintFields.filter(field => diagnostics.changedFields.has(field));
+      const summary = ` Review diagnostics: attempts=${diagnostics.attempts}; last requested ms=${diagnostics.lastRequestedMs ?? "none"};` +
+        ` last elapsed ms=${diagnostics.lastElapsedMs ?? "none"}; late wake ms=${diagnostics.lastElapsedMs === null ? "none" : Math.max(0, diagnostics.lastElapsedMs - diagnostics.lastRequestedMs)};` +
+        ` details became unavailable=${diagnostics.detailsBecameUnavailable ? "yes" : "no"}; changed fields=${fields.length ? fields.join(",") : "none (no fingerprint delta observed)"}.`;
+      const bounded = summary.slice(0, 700);
+      return `${reason.slice(0, 2000 - bounded.length)}${bounded}`;
+    }
     const active = (run) => current === run && !run.stopped;
     function check(run) {
       if (!active(run)) return false;
@@ -98,25 +121,26 @@
         run.detailFailure = "The selected job has no ready application control or verified external application link.";
         return null;
       }
-      run.detailFailure = "The selected job's details did not remain stable long enough to verify.";
+      run.detailFailure = stabilityFailure;
       return job;
     }
-    function readMatchingJob(run, record, previous) {
-      try { return matchingJob(run, record, previous); }
+    function readMatchingJob(run, record, previous, diagnostics) {
+      try { const job = matchingJob(run, record, previous); observeDetails(diagnostics, job); return job; }
       catch (error) {
         if (!check(run)) return null;
         run.detailFailure = String(error?.message || "The selected job details could not be read.").slice(0, 1000);
+        observeDetails(diagnostics, null);
         return null;
       }
     }
-    async function details(run, record, previous, jobDeadline) {
+    async function details(run, record, previous, jobDeadline, diagnostics) {
       let stable = "", stableAt = 0, waitingReason = "";
       const deadline = Math.min(now() + 90_000, jobDeadline);
       // Each poll rechecks the exact selected job, even after a late wake.
       while (check(run) && now() < deadline) {
         if (!await pause(run, Math.min(500, deadline - now()))) return null;
         if (!check(run) || now() >= deadline) return null;
-        const job = readMatchingJob(run, record, previous);
+        const job = readMatchingJob(run, record, previous, diagnostics);
         if (!job) {
           stable = "";
           if (run.detailFailure !== waitingReason) {
@@ -153,8 +177,10 @@
       try { adapter.select(record); }
       catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
       let job, reviewedJob, recovered = false, ready = false, reviewLimitReached = false;
+      const diagnostics = { attempts: 0, lastRequestedMs: null, lastElapsedMs: null, detailsBecameUnavailable: false,
+        changedFields: new Set(), lastValues: null, lastReviewFailure: "" };
       while (check(run) && now() < jobDeadline) {
-        job = await details(run, record, previous, jobDeadline);
+        job = await details(run, record, previous, jobDeadline, diagnostics);
         if (!job) {
           // Recovery is bounded and only happens before any capture attempt.
           if (check(run) && now() < jobDeadline && !recovered && typeof adapter.recoverDetails === "function") {
@@ -165,7 +191,8 @@
               if (reopened !== false) continue;
             } catch (error) {
               run.state.counts.skipped++;
-              await notSaved(run, record, "DETAILS_NOT_CONFIRMED", `${run.detailFailure} Reopening failed: ${error.message}`, reviewedJob);
+              await notSaved(run, record, "DETAILS_NOT_CONFIRMED", reviewFailureReason(`${run.detailFailure} Reopening failed: ${error.message}`,
+                diagnostics, now() >= jobDeadline), reviewedJob);
               throw error;
             }
           }
@@ -180,10 +207,15 @@
           break;
         }
         adapter.status(`Reviewing ${job.company} — about ${Math.round(delay / 1000)} seconds.`, run.state);
+        diagnostics.attempts++;
+        diagnostics.lastRequestedMs = delay;
+        const reviewStartedAt = now();
         if (!await pause(run, delay)) return;
+        diagnostics.lastElapsedMs = Math.max(0, now() - reviewStartedAt);
         if (now() >= jobDeadline) break;
-        job = readMatchingJob(run, record, previous);
+        job = readMatchingJob(run, record, previous, diagnostics);
         if (!job || fingerprint(job) !== reviewing) {
+          diagnostics.lastReviewFailure = job ? "The selected job's fingerprint changed during review." : "The selected job's details became unavailable during review.";
           adapter.status(`Waiting for ${record.company} — the details changed during review.`, run.state);
           continue;
         }
@@ -193,8 +225,9 @@
           return;
         }
         if (now() >= jobDeadline) break;
-        job = readMatchingJob(run, record, previous);
+        job = readMatchingJob(run, record, previous, diagnostics);
         if (!job || fingerprint(job) !== reviewing) {
+          diagnostics.lastReviewFailure = job ? "The selected job's fingerprint changed before capture." : "The selected job's details became unavailable before capture.";
           adapter.status(`Waiting for ${record.company} — the details changed before capture.`, run.state);
           continue;
         }
@@ -205,8 +238,9 @@
       if (!ready) {
         run.state.counts.skipped++;
         const limit = reviewLimitReached || now() >= jobDeadline ? " The 180-second verification and review limit was reached." : " The description did not become ready within the 90-second readiness window.";
-        const reason = (run.detailFailure || "The selected job details could not be verified.") + limit;
-        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", reason.slice(0, 2000), reviewedJob);
+        const failure = run.detailFailure === stabilityFailure && diagnostics.lastReviewFailure ? diagnostics.lastReviewFailure : run.detailFailure;
+        const reason = (failure || "The selected job details could not be verified.") + limit;
+        await notSaved(run, record, "DETAILS_NOT_CONFIRMED", reviewFailureReason(reason, diagnostics, reviewLimitReached || now() >= jobDeadline), reviewedJob);
         return;
       }
       adapter.status(`Saving ${job.company}…`, run.state);
