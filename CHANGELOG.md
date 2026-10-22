@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.18 — 2026-10-22
+
+- Verify the lower bound of spelled-out and mixed experience ranges, including “Three to five years.” Accept the required three-year minimum for Jagjeet and reject an incorrect five-year result; preserve exact job-description evidence checks.
+
 ## 0.8.17 — 2026-10-22
 
 - Confirm the end of Jobright's infinite results list with repeated bottom probes and 30 seconds of unchanged, readable results without a loading indicator. Delayed batches, growing lists and short first pages continue collecting; loading that cannot settle is reported instead of marked finished.

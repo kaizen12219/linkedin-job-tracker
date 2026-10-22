@@ -43,6 +43,33 @@ test("required experience wins over title, including ranges and the exact five-y
   }
 });
 
+test("Kentro's written three-to-five-year requirement verifies its lower bound and routes to Jagjeet", () => {
+  const evidence = "Three to five years of relevant experience in data engineering, software engineering, cloud engineering, analytics engineering, or a closely related discipline";
+  const target = { ...job, title: "Mid-Level Data Engineer, Cloud Data Platforms", description: `${duties} ${evidence}.` };
+  const routing = Routing.snapshot(target, options);
+  assert.equal(Routing.verifiedExperience(target, { minimumYears: 3, evidence }), true);
+  assert.equal(Routing.choose(target, routing, { minimumYears: 3, evidence, scope: "ordinary" }).profile, "jagjeet");
+  assert.equal(Routing.verifiedExperience(target, { minimumYears: 5, evidence }), false);
+  assert.throws(() => Routing.choose(target, routing, { minimumYears: 5, evidence, scope: "senior" }), /could not be confirmed/);
+});
+
+test("written and mixed experience ranges consume both endpoints while retaining only the lower bound", () => {
+  const ranges = ["three to five", "THREE TO FIVE", "3 to five", "three to 5", "three-five", "3–five", "three—5", "Three (3) to five (5)"];
+  for (const range of ranges) {
+    const evidence = `Requires ${range} years of professional software engineering experience.`;
+    const target = { ...job, title: "Senior Software Engineer", description: `${duties} ${evidence}` };
+    assert.equal(Routing.verifiedExperience(target, { minimumYears: 3, evidence }), true, range);
+    assert.equal(Routing.choose(target, Routing.snapshot(target, options), { minimumYears: 3, evidence, scope: "senior" }).profile, "jagjeet", range);
+    assert.equal(Routing.verifiedExperience(target, { minimumYears: 5, evidence }), false, range);
+  }
+  const evidence = "Requires five to ten years of professional software engineering experience.";
+  const target = { ...job, description: evidence };
+  assert.equal(Routing.choose(target, Routing.snapshot(target, options), { minimumYears: 5, evidence }).profile, "kevin");
+  assert.equal(Routing.verifiedExperience(target, { minimumYears: 10, evidence }), false);
+  assert.equal(Routing.verifiedExperience(target, { minimumYears: 5, evidence: "Requires five to eight years of professional software engineering experience." }), false,
+    "recognizing written ranges must not weaken the exact evidence requirement");
+});
+
 test("the visible search-country dropdown wins over stale URL state and never reads a job's location", (t) => {
   const dom = new JSDOM(`<header><button>Jobs</button><button>United Kingdom</button><input id="jobs-search-box-location-id" value="United States"></header>
     <main><li data-occludable-job-id="123"><button>Colombia</button></li><div class="jobs-details"><button>United States</button></div></main>

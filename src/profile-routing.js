@@ -87,7 +87,9 @@
   const SENIOR_TITLE = /\b(?:senior|sr\.?|staff|principal|architect)\b/iu;
   const YEAR_WORDS = Object.freeze({ zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12, fifteen: 15, twenty: 20 });
   function quotedYears(evidence) {
-    const pattern = /\b(\d+(?:\.\d+)?|zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|fifteen|twenty)(?:\s*\(\s*\d+\s*\))?(?:\s*[-–—�]\s*\d+(?:\.\d+)?|\s+to\s+\d+(?:\.\d+)?)?(?:\s*\+|\s+or\s+more)?\s*(?:years?|yrs?)\b/giu;
+    const number = String.raw`(?:\d+(?:\.\d+)?|${Object.keys(YEAR_WORDS).join("|")})`;
+    const parenthetical = String.raw`(?:\s*\(\s*\d+\s*\))?`;
+    const pattern = new RegExp(String.raw`\b(${number})${parenthetical}(?:\s*[-–—�]\s*${number}${parenthetical}|\s+to\s+${number}${parenthetical})?(?:\s*\+|\s+or\s+more)?\s*(?:years?|yrs?)\b`, "giu");
     return [...text(evidence).matchAll(pattern)].map((match) => YEAR_WORDS[match[1].toLowerCase()] ?? Number(match[1]));
   }
   function verifiedExperience(job, value) {
