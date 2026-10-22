@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.17 — 2026-10-22
+
+- Confirm the end of Jobright's infinite results list with repeated bottom probes and 30 seconds of unchanged, readable results without a loading indicator. Delayed batches, growing lists and short first pages continue collecting; loading that cannot settle is reported instead of marked finished.
+- Recheck Stop and the frozen search after end confirmation so waiting for more jobs cannot capture from a changed search or resume a stopped run.
+
 ## 0.8.16 — 2026-10-22
 
 - Keep Jobright collection running when an untouched job card disappears or changes identity before selection. Record that card as unavailable and continue to other jobs while preserving exact identity, search, cancellation and save checks.

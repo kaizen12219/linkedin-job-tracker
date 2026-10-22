@@ -80,6 +80,71 @@ test("collection skips filtered/dismissed jobs, submits each active job once, an
   }
   assert.ok(h.checkpoints[0].visited.includes("3"), "progress is stored before Next");
 });
+
+test("end confirmation waits for a late batch and collects it before confirming the real end", async () => {
+  const pages = [[row(1)]], h = harness(pages), confirmations = [];
+  h.adapter.confirmEnd = async () => {
+    confirmations.push({ time: h.time, captured: h.captures.map(entry => entry.job.jobId) });
+    if (confirmations.length !== 1) return true;
+    return new Promise(resolve => h.timers.set(Symbol("late-results"), { at: h.time + 15_000, callback() {
+      pages[0].push(row(2)); resolve(false);
+    } }));
+  };
+  for (let elapsed = 0; !confirmations.length && elapsed < 80_000; elapsed += 1000) await h.advance(1000);
+  assert.equal(confirmations.length, 1);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1"]);
+  assert.equal(h.finishes.length, 0); assert.equal(h.app.running(), true);
+  await h.advance(10_000);
+  assert.equal(h.finishes.length, 0, "a quiet first bottom observation is not a confirmed end");
+  await h.advance(200_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
+  assert.deepEqual(confirmations.map(entry => entry.captured), [["1"], ["1", "2"]]);
+  assert.equal(h.finishes.length, 1); assert.match(h.finishes[0].message, /last results page/u);
+  assert.equal(h.app.running(), false); assert.equal(h.timers.size, 0);
+});
+
+for (const interruption of ["stop", "search change"]) test(`a pending end confirmation cannot finish successfully or collect a late batch after ${interruption}`, async () => {
+  const pages = [[row(1)]], h = harness(pages);
+  let confirming = false;
+  h.adapter.confirmEnd = () => {
+    confirming = true;
+    return new Promise(resolve => h.timers.set(Symbol("end-confirmation"), { at: h.time + 15_000, callback() {
+      pages[0].push(row(2)); resolve(true);
+    } }));
+  };
+  for (let elapsed = 0; !confirming && elapsed < 80_000; elapsed += 1000) await h.advance(1000);
+  assert.equal(confirming, true); assert.equal(h.finishes.length, 0);
+  if (interruption === "stop") h.app.stop("Stopped during end confirmation."); else h.changeSearch();
+  await h.advance(100_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1"]);
+  assert.deepEqual(h.actions.filter(entry => entry.type === "select").map(entry => entry.id), ["1"]);
+  assert.equal(h.finishes.length, 1);
+  assert.match(h.finishes[0].message, interruption === "stop" ? /Stopped during end confirmation/u : /search changed/u);
+  assert.doesNotMatch(h.finishes[0].message, /last results page/u);
+  assert.equal(h.app.running(), false); assert.equal(h.timers.size, 0);
+});
+
+test("failed end confirmation preserves its loading failure instead of announcing the last page", async () => {
+  const h = harness([[row(1)]]);
+  h.adapter.confirmEnd = async () => { throw new Error("Jobright kept loading; the end of its results could not be confirmed."); };
+  await h.advance(100_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1"]);
+  assert.equal(h.finishes.length, 1);
+  assert.match(h.finishes[0].message, /end of its results could not be confirmed/u);
+  assert.doesNotMatch(h.finishes[0].message, /last results page/u);
+  assert.equal(h.app.running(), false);
+});
+
+test("end confirmation runs only after native pagination reaches its last page", async () => {
+  const h = harness([[row(1)], [row(2)]]), confirmations = [];
+  h.adapter.confirmEnd = async () => { confirmations.push(h.captures.map(entry => entry.job.jobId)); return true; };
+  await h.advance(200_000);
+  assert.deepEqual(h.captures.map(entry => entry.job.jobId), ["1", "2"]);
+  assert.equal(h.actions.filter(entry => entry.type === "next").length, 1);
+  assert.deepEqual(confirmations, [["1", "2"]]);
+  assert.equal(h.finishes.length, 1); assert.match(h.finishes[0].message, /last results page/u);
+});
+
 for (const phase of ["reveal", "select"]) test(`a typed Jobright preselection failure during ${phase} skips once and continues without selecting the stale job`, async () => {
   const first = "68c123456789abcdef012301", second = "68c123456789abcdef012302";
   const h = harness([[row(first), row(second)]], { reportFailures: true, sourceUrl: "https://jobright.ai/jobs/recommend",

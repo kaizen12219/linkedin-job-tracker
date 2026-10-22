@@ -4,11 +4,13 @@ const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 const collectionLocks = require("./fixtures/collection-locks.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, initialListDelay = 0, closeFadeDelay = 0, closeBehavior = "restore", afterClose = null, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, lazyDelay = 1200, lazyBatches = null, initialScrollHeight = 700, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, initialListDelay = 0, closeFadeDelay = 0, closeBehavior = "restore", afterClose = null, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
-  let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
+  let time = 0, timerId = 0, scrollTop = 0, scrollHeight = initialScrollHeight, batchIndex = 0, pendingBatch = false, state = null, clickHandler;
   const timers = new Map(), captures = [], selections = [], messages = [], actions = [], detailCloses = [], closeAttempts = [], resultNavigations = [], resultNavigationTimes = [];
+  const scrollAttempts = [], batchArrivals = [], runEnds = [], detailCloseTimes = [];
+  const batches = lazyBatches || (lazy ? [{ job: lazy, delay: resultsLoader ? loaderDelay : lazyDelay }] : []);
   const removedCards = new Map();
   let detachedHeader = null;
   window.Date.now = () => time; window.Math.random = () => .5;
@@ -34,21 +36,26 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
       window.setTimeout(() => { list.classList.remove("index_jobs-list-leave___nSi4"); list.style.removeProperty("opacity"); }, initialListDelay);
     }
   }
-  Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => 700 } });
+  Object.defineProperties(scroller, { scrollTop: { get: () => scrollTop }, clientHeight: { get: () => 300 }, scrollHeight: { get: () => scrollHeight } });
   scroller.scrollTo = ({ top }) => {
     if (listLeaveOnSelect && window.location.pathname.startsWith("/jobs/info/")) actions.push("scroll-detail");
-    scrollTop = top;
-    if (lazy && top >= 400) {
-      const next = lazy; lazy = null;
+    scrollTop = Math.max(0, Math.min(top, scrollHeight - 300));
+    scrollAttempts.push({ top: scrollTop, at: time, height: scrollHeight });
+    if (!pendingBatch && batchIndex < batches.length && scrollTop >= Math.max(0, scrollHeight - 300)) {
+      const batch = batches[batchIndex++], next = batch.job;
+      pendingBatch = true;
       const loader = resultsLoader ? document.createElement("div") : null;
       if (loader) {
         if (resultsLoader === "busy") loader.setAttribute("aria-busy", "true");
         else loader.setAttribute("role", "progressbar");
         (list || scroller).append(loader);
       }
-      if (loaderDelay !== Infinity) window.setTimeout(() => {
-        loader?.remove(); jobs.push(next); (list || scroller).insertAdjacentHTML("beforeend", fixture.card(next)); wire();
-      }, loader ? loaderDelay : 1200);
+      if (batch.delay !== Infinity) window.setTimeout(() => {
+        loader?.remove(); pendingBatch = false; jobs.push(next);
+        if (lazyBatches) scrollHeight = batch.height ?? scrollHeight + 400;
+        (list || scroller).insertAdjacentHTML("beforeend", fixture.card(next)); wire();
+        batchArrivals.push({ id: next.id, at: time, height: scrollHeight });
+      }, batch.delay);
     }
   };
   window.HTMLElement.prototype.scrollIntoView = function () {
@@ -111,6 +118,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     if (event.target.id !== "job-detail-close-button") return;
     const closedId = window.location.pathname.split("/").at(-1);
     detailCloses.push(closedId);
+    detailCloseTimes.push({ id: closedId, at: time });
     if (closeBehavior === "restore") restoreResults();
     else if (closeBehavior === "route-only") window.history.replaceState({}, "", "/jobs/recommend");
     else if (closeBehavior === "filters-missing") {
@@ -130,7 +138,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
     if (value.type === "KAI_TRACKER_RUN_STATE") return { ok: true, result: { state: structuredClone(state) } };
     if (value.type === "KAI_TRACKER_RUN_WAIT") return new Promise((resolve) => { window.setTimeout(() => resolve({ ok: true, result: { stopped: state?.id !== value.runId } }), value.milliseconds); });
     if (value.type === "KAI_TRACKER_RUN_CHECKPOINT") { if (state?.id === value.runId) state = structuredClone(value.state); return { ok: true, result: { stopped: state?.id !== value.runId } }; }
-    if (value.type === "KAI_TRACKER_RUN_END") { if (state?.id === value.runId) state = null; return { ok: true, result: {} }; }
+    if (value.type === "KAI_TRACKER_RUN_END") { runEnds.push({ at: time, ...structuredClone(value) }); if (state?.id === value.runId) state = null; return { ok: true, result: {} }; }
     if (value.type === "KAI_TRACKER_CLASSIFY_COMPANIES") return { ok: true, result: { companies: value.companies.map((company) => ({ company, banned: blocked.has(company), duplicate: false })) } };
     if (value.type === "KAI_TRACKER_CAPTURE") { captures.push(structuredClone(value)); return { ok: true, result: { status: "researching" } }; }
     if (value.type === "KAI_TRACKER_NOT_SAVED") return { ok: true, result: { reported: true } };
@@ -141,7 +149,7 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   if (autoStart) state = newState();
   window.eval(fs.readFileSync(require.resolve("../src/jobright-content.js"), "utf8"));
   if (changedFilterAt) window.setTimeout(() => document.querySelector("[data-preference-key='workLocation'] span").setAttribute("title", "Hybrid"), changedFilterAt);
-  return { document, window, messages, captures, selections, actions, detailCloses, closeAttempts, resultNavigations, resultNavigationTimes,
+  return { document, window, messages, captures, selections, actions, detailCloses, closeAttempts, resultNavigations, resultNavigationTimes, scrollAttempts, batchArrivals, runEnds, detailCloseTimes,
     get now() { return time; },
     jump(amount) { time += amount; },
     get state() { return state; },
@@ -165,6 +173,97 @@ test("Jobright infinite collection captures exact loaded jobs in background and 
   assert.deepEqual(h.selections, [fixture.A, fixture.B, "68c123456789abcdef012303"]);
   assert.ok(h.captures.every((capture) => capture.runId === "jobright-run" && capture.job.selectedRegion === "us"));
   assert.deepEqual(h.actions, []); assert.equal(h.state, null);
+});
+
+for (const lazyDelay of [8000, 15000]) test(`Jobright confirms the feed end long enough to collect a no-loader batch delayed ${lazyDelay} milliseconds`, async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { hidden: true, listLeaveOnSelect: true, lazy: fixture.job(last), lazyDelay });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B, last]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, last]);
+  assert.equal(h.runEnds.length, 1);
+  assert.ok(h.runEnds[0].at - h.detailCloseTimes.at(-1).at >= 30_000, "completion requires a quiet confirmation after the last returned job");
+  assert.equal(h.state, null);
+  assert.deepEqual(h.actions, []);
+});
+
+test("Jobright probes an already-bottom short list and waits for delayed jobs without a loader", async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, initialScrollHeight: 300,
+    lazy: fixture.job(last), lazyDelay: 25_000 });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, last]);
+  assert.ok(h.scrollAttempts.filter(attempt => attempt.top === 0 && attempt.at < h.batchArrivals[0].at).length >= 2,
+    "a list with no scroll range still needs bottom probes while waiting for the next batch");
+  assert.equal(h.runEnds.length, 1);
+  assert.equal(h.state, null);
+  assert.deepEqual(h.actions, []);
+});
+
+test("Jobright continues across repeated slow batches and confirms the quiet end only after the final batch", async (t) => {
+  const extra = ["68c123456789abcdef012303", "68c123456789abcdef012304", "68c123456789abcdef012305"];
+  const h = setup(t, { hidden: true, listLeaveOnSelect: true, lazyBatches: extra.map((id, index) => ({
+    job: fixture.job(id), delay: index === 1 ? 15000 : 8000, height: 1100 + index * 400
+  })) });
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, fixture.B, ...extra]);
+  assert.deepEqual(h.selections, [fixture.A, fixture.B, ...extra]);
+  assert.deepEqual(h.batchArrivals.map(arrival => arrival.height), [1100, 1500, 1900]);
+  assert.equal(h.runEnds.length, 1);
+  assert.ok(h.runEnds[0].at - h.detailCloseTimes.at(-1).at >= 30_000);
+  assert.equal(h.state, null);
+  assert.deepEqual(h.actions, []);
+});
+
+test("Jobright's genuinely quiet feed finishes after bounded end confirmation", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true });
+  for (let elapsed = 0; !h.detailCloses.length && elapsed < 60_000; elapsed += 1000) await h.advance(1000);
+  assert.deepEqual(h.detailCloses, [fixture.A]);
+  await h.advance(10_000);
+  assert.ok(h.state, "two brief bottom observations cannot establish the true end");
+  await h.advance(60_000);
+  assert.equal(h.state, null);
+  assert.equal(h.runEnds.length, 1);
+  const quietDuration = h.runEnds[0].at - h.detailCloseTimes[0].at;
+  assert.ok(quietDuration >= 30_000 && quietDuration <= 65_000, `quiet feed completed after ${quietDuration}ms`);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+});
+
+test("Jobright does not mistake a late wake during feed-end confirmation for observed quiet time", async (t) => {
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true });
+  for (let elapsed = 0; elapsed < 60_000 && !h.document.querySelector("[data-job-tracker-collection]")?.textContent.includes("Checking for more"); elapsed += 1000) await h.advance(1000);
+  assert.match(h.document.querySelector("[data-job-tracker-collection]")?.textContent || "", /Checking for more/);
+  assert.ok(h.state);
+  h.jump(70_000);
+  await h.advance(0);
+  assert.equal(h.state, null);
+  const notice = h.document.querySelector("[data-job-tracker-collection]");
+  assert.equal(notice?.getAttribute("role"), "alert");
+  assert.match(notice?.textContent || "", /end of the list could not be confirmed within 60 seconds/);
+  assert.doesNotMatch(notice?.textContent || "", /^Finished/);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.runEnds.length, 1);
+});
+
+for (const interruption of ["Stop", "filter change"]) test(`Jobright ${interruption} during feed-end confirmation prevents delayed capture`, async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { jobs: [fixture.job()], listLeaveOnSelect: true, lazy: fixture.job(last), lazyDelay: 25_000 });
+  for (let elapsed = 0; !h.detailCloses.length && elapsed < 60_000; elapsed += 1000) await h.advance(1000);
+  await h.advance(10_000);
+  assert.ok(h.state, "the run must still be confirming the feed end");
+  assert.deepEqual(h.batchArrivals, []);
+  if (interruption === "Stop") await h.request({ type: "KAI_TRACKER_RUN_STOP" });
+  else {
+    const country = h.document.querySelector("[data-preference-key='country'] span");
+    country.setAttribute("title", "United Kingdom"); country.textContent = "United Kingdom";
+  }
+  await h.advance(120_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.runEnds.length, 1);
+  assert.equal(h.state, null);
+  assert.deepEqual(h.actions, []);
 });
 
 test("restarting a Jobright collector on the same page reports already submitted jobs as skipped without another capture", async (t) => {
@@ -310,6 +409,7 @@ for (const failure of ["wrong metadata", "stale job detail", "missing descriptio
   assert.match(report.job.verificationReason, /180-second/);
   assert.deepEqual(h.selections, [fixture.A, fixture.A], "readiness expiry never creates another retry");
   assert.deepEqual(h.actions, []);
+  await h.advance(45_000); // Readiness expiry is followed by the separate quiet-feed confirmation.
   assert.equal(h.state, null);
 });
 
@@ -440,6 +540,7 @@ test("a permanently missing Jobright detail is reported after bounded recovery a
   assert.match(reports[0].job.verificationReason, /180-second/);
   assert.deepEqual(h.resultNavigations, [`/jobs/info/${fixture.A}`, `/jobs/info/${fixture.A}`]);
   assert.deepEqual(h.actions, []);
+  await h.advance(45_000); // The next job is already queued; now allow the separate end confirmation.
   assert.equal(h.state, null);
 });
 

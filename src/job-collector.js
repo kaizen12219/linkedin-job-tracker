@@ -311,7 +311,14 @@
           await checkpoint(run);
           if (!check(run)) break;
           const next = adapter.next();
-          if (!next) break;
+          if (!next) {
+            if (typeof adapter.confirmEnd === "function") {
+              const confirmed = await adapter.confirmEnd();
+              if (!check(run)) break;
+              if (!confirmed) { bottomChecks = 0; loadingWait = 0; continue; }
+            }
+            break;
+          }
           adapter.status("Moving to the next results page…", run.state);
           await adapter.revealNext(next);
           if (!await pause(run, actionDelay()) || !check(run)) break;

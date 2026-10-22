@@ -426,6 +426,44 @@
           }
           return lastScrollAt && Date.now() - lastScrollAt < 2500 ? "loading" : "bottom";
         },
+        async confirmEnd() {
+          await returnToResults();
+          const target = scroller();
+          if (!target) throw new Error("The Jobright results list is unavailable.");
+          const snapshot = () => JSON.stringify([records().map(record => record.id), target.scrollTop, target.clientHeight, target.scrollHeight]);
+          const atBottom = () => target.scrollTop + target.clientHeight >= target.scrollHeight - 4;
+          const guard = () => {
+            if (version !== startVersion) throw new Error("Job collection stopped.");
+            if (searchKey() !== state.searchKey) throw new Error("The search changed. Job collection stopped.");
+          };
+          const startedAt = Date.now(), initial = snapshot();
+          let quietSince = startedAt, lastProbeAt = -Infinity, lastObservedAt = startedAt, probes = 0;
+          // Reaching the current bottom is only a request for the next batch.
+          // Observe a quiet list after repeated probes, including short lists
+          // where the first scroll cannot move the viewport at all.
+          while (Date.now() - startedAt < 60_000) {
+            guard();
+            if (scroller() !== target || !target.isConnected || snapshot() !== initial || !atBottom()) return false;
+            const now = Date.now();
+            const readable = target.clientHeight > 0 && target.scrollHeight >= target.clientHeight;
+            if (!readable || loading() || now - lastObservedAt > 5000) quietSince = now;
+            lastObservedAt = now;
+            if (now - lastProbeAt >= 5000) {
+              status("Checking for more Jobright jobs — waiting for the results list to settle…", state);
+              target.scrollTo({ top: Math.max(0, target.scrollHeight - target.clientHeight), behavior: "instant" });
+              lastProbeAt = now; probes++;
+              guard();
+              if (scroller() !== target || !target.isConnected || snapshot() !== initial || !atBottom()) return false;
+              if (loading()) quietSince = Date.now();
+            }
+            if (readable && !loading() && probes >= 3 && Date.now() - quietSince >= 30_000) return true;
+            const remaining = 60_000 - (Date.now() - startedAt);
+            if (remaining <= 0) break;
+            if (!await wait(Math.min(1000, remaining), state.id)) throw new Error("Job collection stopped.");
+          }
+          guard();
+          throw new Error("More Jobright results may still be loading. The end of the list could not be confirmed within 60 seconds. Job collection stopped.");
+        },
         loading, pageKey: () => records().map((record) => record.id).join(","), next: () => null,
         async revealNext() {}, async goNext() {}, status,
         async checkpoint(next) {
