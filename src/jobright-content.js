@@ -19,6 +19,8 @@
     const matches = records().filter((item) => item.id === record.id);
     return matches.length === 1 && key(matches[0].company) === key(record.company) && key(matches[0].title) === key(record.title) ? matches[0] : null;
   };
+  const unavailableBeforeSelection = () => Object.assign(new Error("The selected Jobright job card is no longer available with the same identity."),
+    { code: "JOBRIGHT_PRESELECTION_UNAVAILABLE" });
   const safeScrape = () => {
     try {
       const job = scraper()?.scrape(document, window.location.href) || null;
@@ -53,7 +55,7 @@
     const current = currentRecord(record);
     const currentContext = context();
     if (!filterKey || currentContext.filterKey !== filterKey || currentContext.selectedRegion !== "us" || currentContext.selectedRegionSource !== "search-control") throw new Error("The search changed. Job collection stopped.");
-    if (!current || !active(record) || !current.link.isConnected || scraper().jobId(current.link.href) !== record.id) throw new Error("The selected job card changed.");
+    if (!current || !active(record) || !current.link.isConnected || scraper().jobId(current.link.href) !== record.id) throw unavailableBeforeSelection();
     selectedAuthorization = null;
     selecting = true;
     try { current.link.click(); authorize(current, filterKey); }
@@ -394,7 +396,7 @@
         async reveal(record) {
           await returnToResults();
           const current = currentRecord(record);
-          if (!current) throw new Error("The selected job card changed.");
+          if (!current) throw unavailableBeforeSelection();
           current.card.scrollIntoView({ block: "center", behavior: "instant" });
         },
         select(record) { selectRecord(record, frozen); },

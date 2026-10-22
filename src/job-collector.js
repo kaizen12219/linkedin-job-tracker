@@ -160,6 +160,15 @@
       try { await adapter.notSaved(record, { code, reason, ...(job ? { job } : {}) }, run.state.id); }
       catch { /* Reporting must not stop collection or retry a capture. */ }
     }
+    async function skipUnavailableBeforeSelection(run, record, error) {
+      if (error?.code !== "JOBRIGHT_PRESELECTION_UNAVAILABLE") return false;
+      // Only this adapter-owned pre-click outcome can continue. Navigation,
+      // changed searches and every capture response retain their stop rules.
+      if (!check(run)) return true;
+      run.state.counts.skipped++;
+      await notSaved(run, record, "CARD_UNAVAILABLE", error.message);
+      return true;
+    }
     async function collect(run, record) {
       if (!await adapter.allowed(record) || !check(run) || !adapter.activeCard(record)) {
         run.state.counts.skipped++;
@@ -168,14 +177,20 @@
       }
       if (!await pause(run, actionDelay())) return;
       try { await adapter.reveal(record); }
-      catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
+      catch (error) {
+        if (await skipUnavailableBeforeSelection(run, record, error)) return;
+        await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error;
+      }
       if (!await pause(run, actionDelay())) return;
       if (!adapter.activeCard(record)) { await notSaved(run, record, "CARD_UNAVAILABLE", "The attempted job card became unavailable before selection."); return; }
       let previous;
       try { previous = adapter.scrape(); } catch { /* A previous unreadable panel cannot stop the new selection. */ }
       const jobDeadline = now() + 180_000;
       try { adapter.select(record); }
-      catch (error) { await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error; }
+      catch (error) {
+        if (await skipUnavailableBeforeSelection(run, record, error)) return;
+        await notSaved(run, record, "CARD_UNAVAILABLE", error.message); throw error;
+      }
       let job, reviewedJob, recovered = false, ready = false, reviewLimitReached = false;
       const diagnostics = { attempts: 0, lastRequestedMs: null, lastElapsedMs: null, detailsBecameUnavailable: false,
         changedFields: new Set(), lastValues: null, lastReviewFailure: "" };

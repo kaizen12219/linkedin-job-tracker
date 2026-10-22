@@ -306,10 +306,8 @@ async function handleTrackerMessage(message, sender = {}) {
     if (message.runId) await withCollectionState(state => {
       if (!collectionMatches(state, sender, message.runId)) throw Object.assign(new Error("Job collection stopped."), { code: "TRACKER_RUN_STOPPED" });
     }, sender.tab?.id);
-    const reason = reasons[message.reasonCode] + (typeof message.reasonDetail === "string" && !["BANNED_COMPANY", "DUPLICATE_COMPANY", "ALREADY_CAPTURED"].includes(message.reasonCode)
-      ? " " + message.reasonDetail.slice(0, 2000) : "");
     return logNotSaved(message.job, { stage: "capture", status: ["BANNED_COMPANY", "DUPLICATE_COMPANY", "ALREADY_CAPTURED"].includes(message.reasonCode) ? "skipped" : "failed",
-      reason, error: { code: message.reasonCode, message: reason } });
+      reason: reasons[message.reasonCode], error: { code: message.reasonCode, message: reasons[message.reasonCode] } });
   }
   if (message.type === "KAI_TRACKER_RUN_WAIT") return waitForCollectionRun(message, sender);
   if (COLLECTION_MESSAGES.has(message.type)) return handleCollectionMessage(message, sender);

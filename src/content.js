@@ -285,7 +285,7 @@
     } catch { /* A failed capture does not interfere with native selection. */ }
   }
 
-  async function reportNotSaved(record, { code, reason, job, verificationReason } = {}, runId) {
+  async function reportNotSaved(record, { code, job, verificationReason } = {}, runId) {
     const jobId = String(record?.captureId || "");
     if (!/^\d+$/u.test(jobId) || !record.company || !record.title) return;
     const classification = sameJob(record) ? record.card.getAttribute("data-kai-flow-job-state") : null;
@@ -314,8 +314,7 @@
       }
     }
     try {
-      await chrome.runtime.sendMessage({ type: "KAI_TRACKER_NOT_SAVED", job: snapshot, reasonCode: code,
-        ...(typeof reason === "string" ? { reasonDetail: reason.slice(0, 2000) } : {}), ...(runId ? { runId } : {}) });
+      await chrome.runtime.sendMessage({ type: "KAI_TRACKER_NOT_SAVED", job: snapshot, reasonCode: code, ...(runId ? { runId } : {}) });
     } catch { /* A log write failure must not interrupt selection or collection. */ }
   }
 

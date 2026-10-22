@@ -80,6 +80,62 @@ test("collection skips filtered/dismissed jobs, submits each active job once, an
   }
   assert.ok(h.checkpoints[0].visited.includes("3"), "progress is stored before Next");
 });
+for (const phase of ["reveal", "select"]) test(`a typed Jobright preselection failure during ${phase} skips once and continues without selecting the stale job`, async () => {
+  const first = "68c123456789abcdef012301", second = "68c123456789abcdef012302";
+  const h = harness([[row(first), row(second)]], { reportFailures: true, sourceUrl: "https://jobright.ai/jobs/recommend",
+    jobUrl: record => `https://jobright.ai/jobs/info/${record.id}` });
+  const original = h.adapter[phase];
+  h.adapter[phase] = record => {
+    if (record.id === first) throw Object.assign(new Error("The selected job card changed before selection."), { code: "JOBRIGHT_PRESELECTION_UNAVAILABLE" });
+    return original(record);
+  };
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [second]);
+  assert.deepEqual(h.actions.filter(action => action.type === "select").map(action => action.id), [second]);
+  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].id, first); assert.equal(h.reports[0].code, "CARD_UNAVAILABLE");
+  assert.match(h.reports[0].reason, /card changed/u);
+  assert.equal(h.finishes[0].state.counts.skipped, 1); assert.equal(h.finishes[0].state.counts.saved, 1);
+  assert.match(h.finishes[0].message, /last results page/u); assert.equal(h.app.running(), false);
+});
+
+for (const phase of ["reveal", "select"]) test(`an ordinary ${phase} error remains fatal instead of becoming a preselection skip`, async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  h.adapter[phase] = () => { throw new Error("The results view could not be closed safely."); };
+  await h.advance(300_000);
+  assert.equal(h.captures.length, 0); assert.equal(h.actions.some(action => action.type === "select"), false);
+  assert.equal(h.reports.length, 1); assert.equal(h.reports[0].id, "1");
+  assert.match(h.finishes[0].message, /could not be closed safely/u);
+  assert.equal(h.finishes[0].state.counts.skipped, 0); assert.equal(h.app.running(), false);
+});
+
+for (const interruption of ["stop", "search change"]) test(`a typed preselection error cannot continue after ${interruption}`, async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  h.adapter.reveal = () => {
+    if (interruption === "stop") h.app.stop(); else h.changeSearch();
+    throw Object.assign(new Error("The selected job card changed before selection."), { code: "JOBRIGHT_PRESELECTION_UNAVAILABLE" });
+  };
+  await h.advance(300_000);
+  assert.equal(h.captures.length, 0); assert.equal(h.actions.some(action => action.type === "select"), false);
+  assert.equal(h.reports.length, 0, "a cancelled or changed search cannot authorize a skip report");
+  assert.equal(h.finishes[0].state.counts.skipped, 0);
+  assert.match(h.finishes[0].message, interruption === "stop" ? /stopped/u : /search changed/u);
+  assert.equal(h.app.running(), false);
+});
+
+test("the preselection error code after an uncertain capture cannot continue or retry the write", async () => {
+  const h = harness([[row(1), row(2)]], { reportFailures: true });
+  const capture = h.adapter.capture;
+  h.adapter.capture = async (...args) => {
+    await capture(...args);
+    throw Object.assign(new Error("The write response was lost."), { code: "JOBRIGHT_PRESELECTION_UNAVAILABLE" });
+  };
+  await h.advance(300_000);
+  assert.deepEqual(h.captures.map(item => item.job.jobId), ["1"]);
+  assert.deepEqual(h.actions.filter(action => action.type === "select").map(action => action.id), ["1"]);
+  assert.equal(h.reports.length, 0); assert.equal(h.finishes[0].state.counts.skipped, 0);
+  assert.match(h.finishes[0].message, /write response was lost/u); assert.equal(h.app.running(), false);
+});
+
 test("review time grows with description size and stays within variable bounded pauses", () => {
   const short = collector.reviewDelay("word ".repeat(60), () => 0.5);
   const long = collector.reviewDelay("word ".repeat(350), () => 0.5);

@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.16 — 2026-10-22
+
+- Keep Jobright collection running when an untouched job card disappears or changes identity before selection. Record that card as unavailable and continue to other jobs while preserving exact identity, search, cancellation and save checks.
+- Remove duplicated diagnostic text from failure-report summaries. Preserve the specific cause in the bounded, redacted `job.verificationReason` field, alongside description diagnostics and extension version.
+
 ## 0.8.15 — 2026-10-21
 
 - Recover Jobright returns where the detail route closes but the committed search controls disappear. Retain the visible exact results link verified before the tracker's own close, then permit that same unchanged link once if the results remain unreadable.

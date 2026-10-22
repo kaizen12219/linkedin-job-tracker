@@ -500,6 +500,43 @@ test("pre-capture report messages enforce LinkedIn sender and active run identit
   assert.equal(report.job.description, undefined); assert.equal(h.calls.some(call => call.action === "save"), false);
 });
 
+test("capture reports retain bounded redacted reveal and close causes without duplicating the generic failure message", async () => {
+  const captureRef = "a".repeat(64), apiKey = "sk-proj-" + "S".repeat(24), bearer = "PRIVATE_DIAGNOSTIC_TOKEN";
+  const generic = "The attempted job card became unavailable before capture.";
+  for (const site of ["linkedin", "jobright"]) {
+    const jobright = site === "jobright", sourceUrl = jobright ? jobrightUrl : "https://www.linkedin.com/jobs/view/123/";
+    const tab = { id: jobright ? 9 : 42, url: jobright ? jobrightUrl : "https://www.linkedin.com/jobs/search-results/" };
+    const cause = jobright ? "The Jobright results did not return within 90 seconds after closing details. Job collection stopped."
+      : "A job card is covered or unavailable. Collection stopped.";
+    const verificationReason = `${cause} captureRef=${captureRef} api_key=${apiKey} Bearer ${bearer} ${"diagnostic ".repeat(300)}`;
+    let researchRequests = 0;
+    const h = harness({ tabUrl: tab.url, searchContext: jobright ? { filterKey: jobrightFilters, selectedRegion: "us", selectedRegionSource: "search-control" } : null,
+      researchFetch: async () => { researchRequests++; throw new Error("Failure reporting must not start research"); } });
+    await settle(); await h.context.toggleJobCollection(tab);
+    const runId = collection(h, tab.id).id;
+    const response = await h.sendRaw({ type: "KAI_TRACKER_NOT_SAVED", reasonCode: "CARD_UNAVAILABLE", runId,
+      job: { jobId: jobright ? jobrightId : "123", company: "Diagnostic employer", title: "Software Engineer", sourceUrl,
+        detailAvailability: "unavailable", verificationReason, trackerVersion: "0.8.16", privateDiagnostic: "PRIVATE_RESUME" },
+      ...(jobright ? { reasonDetail: verificationReason } : {}) }, jobright ? "foreign" : "linkedin", { url: tab.url, tab });
+    assert.equal(response.response.ok, true, site);
+    const writes = h.calls.filter(call => call.action === "failure-report");
+    assert.equal(writes.length, 1, site);
+    const { report, options } = writes[0];
+    assert.equal(report.status, "failed"); assert.equal(report.stage, "capture");
+    assert.equal(report.reason, generic); assert.equal(report.error.message, generic); assert.equal(report.error.code, "CARD_UNAVAILABLE");
+    assert.ok(report.job.verificationReason.startsWith(cause));
+    assert.equal(report.job.verificationReason.length, 2000);
+    assert.match(report.job.verificationReason, /captureRef=\[redacted\] api_key=\[redacted\] Bearer \[redacted\]/u);
+    assert.equal(report.job.trackerVersion, "0.8.16"); assert.equal(report.job.sourceUrl, sourceUrl);
+    assert.equal(report.job.detailAvailability, "unavailable");
+    for (const secret of [captureRef, apiKey, bearer, "PRIVATE_RESUME"]) assert.equal(JSON.stringify(report).includes(secret), false, site);
+    assert.equal(report.job.privateDiagnostic, undefined); assert.equal(report.reasonDetail, undefined);
+    assert.equal(options.sheetUrl, "applicantally-file:00000000-0000-0000-0000-000000000001");
+    assert.deepEqual(h.stored.jobTrackerFailureReportsV1.entries, [], "the real report outbox acknowledges the written record");
+    assert.equal(researchRequests, 0); assert.equal(h.calls.some(call => call.action === "save" || call.action === "duplicate"), false);
+  }
+});
+
 test("Jobright already-captured reports are skipped while actual unavailable cards and LinkedIn reporting stay unchanged", async () => {
   const h = harness({ tabUrl: jobrightUrl }); await settle();
   const job = { jobId: jobrightId, company: 'Already submitted employer', title: 'Engineer', sourceUrl: jobrightUrl, detailAvailability: 'unavailable' };

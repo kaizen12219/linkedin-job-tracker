@@ -4,7 +4,7 @@ const test = require("node:test");
 const { JSDOM } = require("jsdom");
 const fixture = require("./fixtures/jobright-page.js");
 const collectionLocks = require("./fixtures/collection-locks.js");
-function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, initialListDelay = 0, closeFadeDelay = 0, closeBehavior = "restore", changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
+function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = true, lazy = null, stale = false, resultsNavigation = false, hidden = false, blocked = new Set(), changedFilterAt = 0, listLeaveOnSelect = false, initialListDelay = 0, closeFadeDelay = 0, closeBehavior = "restore", afterClose = null, changedCountryInDetail = false, matchScores = false, resultsLoader = "", loaderDelay = 8000, replaceCardOnOpen = null, removeCardOnOpen = false, detailsOnOpen = null, revealError = "", locks = collectionLocks(), runId = "jobright-run" } = {}) {
   const dom = new JSDOM(fixture.page(jobs, null), { url: "https://jobright.ai/jobs/recommend", runScripts: "outside-only", pretendToBeVisual: true });
   t.after(() => dom.window.close()); const window = dom.window, document = window.document;
   let time = 0, timerId = 0, scrollTop = 0, state = null, clickHandler;
@@ -109,13 +109,15 @@ function setup(t, { jobs = [fixture.job(), fixture.job(fixture.B)], autoStart = 
   }
   document.querySelector("#details").addEventListener("click", (event) => {
     if (event.target.id !== "job-detail-close-button") return;
-    detailCloses.push(window.location.pathname.split("/").at(-1));
+    const closedId = window.location.pathname.split("/").at(-1);
+    detailCloses.push(closedId);
     if (closeBehavior === "restore") restoreResults();
     else if (closeBehavior === "route-only") window.history.replaceState({}, "", "/jobs/recommend");
     else if (closeBehavior === "filters-missing") {
       restoreResults();
       detachedHeader = document.querySelector("header"); detachedHeader.remove();
     }
+    if (afterClose) afterClose(document, closedId, detailCloses.length);
   });
   if (resultsNavigation) {
     const results = document.createElement("a"); results.href = typeof resultsNavigation === "string" ? resultsNavigation : "/jobs/recommend"; results.textContent = "Recommended jobs";
@@ -215,6 +217,45 @@ test("opening Jobright details preserves the committed US search through the lis
     capture.job.selectedRegionSource === "search-control" && capture.job.searchContextKey === committed));
   assert.deepEqual(h.actions, []);
   assert.equal(h.state, null);
+});
+
+for (const change of ["removed", "changed title", "ambiguous", "unusable link"]) test(`Jobright skips an unselected card ${change} while closing the prior job and continues with the next exact job`, async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { jobs: [fixture.job(), fixture.job(fixture.B), fixture.job(last)], listLeaveOnSelect: true,
+    afterClose(document, closedId) {
+      if (closedId !== fixture.A) return;
+      const next = document.getElementById(fixture.B);
+      if (change === "removed") next.remove();
+      else if (change === "changed title") next.querySelector("h2").textContent = "A different vacancy";
+      else if (change === "ambiguous") next.after(next.cloneNode(true));
+      else next.querySelector("a").href = "https://unrelated.example/jobs/another-vacancy";
+    } });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A, last]);
+  assert.deepEqual(h.selections, [fixture.A, last], "the stale candidate never receives a native selection click");
+  const reports = h.messages.filter(message => message.type === "KAI_TRACKER_NOT_SAVED");
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].job.jobId, fixture.B); assert.equal(reports[0].reasonCode, "CARD_UNAVAILABLE");
+  assert.match(reports[0].job.verificationReason, /card.*changed|unavailable|identity/iu);
+  assert.ok(h.captures.every(capture => capture.job.selectedRegion === "us"));
+  const checkpoint = h.messages.filter(message => message.type === "KAI_TRACKER_RUN_CHECKPOINT").at(-1);
+  assert.equal(checkpoint.state.counts.skipped, 1); assert.equal(checkpoint.state.counts.researching, 2);
+  assert.deepEqual(h.actions, []); assert.equal(h.state, null);
+});
+
+test("Jobright still stops if the committed country changes while closing the prior job", async (t) => {
+  const last = "68c123456789abcdef012303";
+  const h = setup(t, { jobs: [fixture.job(), fixture.job(fixture.B), fixture.job(last)], listLeaveOnSelect: true,
+    afterClose(document, closedId) {
+      if (closedId !== fixture.A) return;
+      document.getElementById(fixture.B).remove();
+      const country = document.querySelector("[data-preference-key='country'] span");
+      country.title = "United Kingdom"; country.textContent = "United Kingdom";
+    } });
+  await h.advance(180_000);
+  assert.deepEqual(h.captures.map(capture => capture.job.jobId), [fixture.A]);
+  assert.deepEqual(h.selections, [fixture.A]);
+  assert.equal(h.state, null); assert.deepEqual(h.actions, []);
 });
 
 test("React replacing a selected Jobright card with the same job does not lose its capture", async (t) => {
